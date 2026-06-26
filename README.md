@@ -46,6 +46,7 @@
 
 - **数据 + 工具层**：纯标准库，离线可跑、可复现（`sqlite3` + 纯 Python 加权最短路）。
 - **引擎层**：`EDU_AGENT_ENGINE` 环境变量切换（离线 mock / 通义千问 / 本地 vLLM / 算法仓 W4A16 端点），同一张图复用。
+- **工具来源可切换**：默认本地直调；同一批工具也可暴露为 **MCP server**（stdio 传输），Agent 经 **MCP 协议**往返调用（`MCPToolProvider` 与本地 registry 同契约，图 / 引擎均无需改动）。见 `edu_agent/mcp/` 与 `scripts/mcp_demo.py`。
 
 ## 目录结构
 
@@ -75,6 +76,10 @@ edu-agent/
 │   │   ├── graph.py              ReAct 循环 + reflect 反幻觉兜底 + should_continue 门槛
 │   │   ├── prompts.py            系统提示（含多步执行纪律）
 │   │   └── demo_policy.py        旗舰任务的动态决策策略
+│   ├── mcp/                      MCP 集成（工具经 MCP 协议对外/被调）
+│   │   ├── server.py            把 16 工具暴露为 MCP server（stdio；复用 registry，逻辑不重写）
+│   │   ├── client.py            MCPToolProvider —— 与 registry 同契约、经 MCP 协议调用
+│   │   └── __init__.py          get_tool_provider()（EDU_AGENT_TOOLSOURCE=local/mcp）
 │   └── eval/                     引擎无关 agentic 评测
 │       ├── tasks.py              5 类 19 任务（锚定 seed-42 库）
 │       ├── metrics.py            工具选择 F1 / 参数准确率 / 轨迹成功率 / relevance
@@ -83,11 +88,12 @@ edu-agent/
 ├── scripts/
 │   ├── demo_trajectory.py        纯工具层五工具闭环 demo（零依赖）
 │   ├── agent_demo.py             LangGraph 多工具 Agent（离线 mock 引擎）
+│   ├── mcp_demo.py               工具经 MCP server + MCP 协议被 Agent 调用
 │   ├── eval_demo.py              agentic 评测（oracle / 真引擎）
 │   ├── eval_ablation.py          修复 before/after 两档对照（一次出对照）
 │   ├── eval_subset.py            子集快测（调参用）
 │   └── debug_trace.py            打印完整消息序列定位失败轨迹
-└── tests/                        test_tools / test_agent / test_eval（28/28 通过）
+└── tests/                        test_tools / test_agent / test_eval / test_mcp（32/32 通过）
 ```
 
 > 合成数据库 `edu_agent/data/edu.db` 由 `generate.py` 可复现地生成，已被 `.gitignore` 排除，不入库。
@@ -110,7 +116,10 @@ LangGraph Agent 编排（需 venv：`uv sync`）：
 ```bash
 # 离线 mock 引擎跑通编排循环（不需 key、不联网）
 uv run python scripts/agent_demo.py
-uv run python -m pytest tests/ -q        # 28/28（工具 + Agent 编排 + 评测框架）
+uv run python -m pytest tests/ -q        # 32/32（工具 + Agent 编排 + 评测框架 + MCP 集成）
+
+# 工具经 MCP 协议被 Agent 调用（起 MCP server 子进程，stdio 传输；同样不需 key、不联网）
+uv run python scripts/mcp_demo.py
 
 # agentic 评测（离线 oracle 验证框架；接真引擎用同一 harness 出真数）
 uv run python scripts/eval_demo.py                  # 离线（无 key）

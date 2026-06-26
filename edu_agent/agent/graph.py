@@ -50,7 +50,8 @@ def _count_tool_calls(messages: list) -> int:
                for m in messages if m.get("role") == "assistant")
 
 
-def build_agent(engine: Engine, db_conn=None, max_nudges: int = 1, max_tool_calls: int = 8):
+def build_agent(engine: Engine, db_conn=None, max_nudges: int = 1, max_tool_calls: int = 8,
+                tools_provider=None):
     """编译并返回一个多工具 Agent 图。
 
     db_conn      ：可注入共享连接（否则每次工具调用自开关）。
@@ -61,8 +62,12 @@ def build_agent(engine: Engine, db_conn=None, max_nudges: int = 1, max_tool_call
     max_tool_calls：反螺旋硬上限——累计工具调用达到该值后不再注入兜底提示，避免兜底把模型
                    推入「反复调同类工具」的死循环（实测 relevance 任务上出现过 8 连查）。
                    取值需高于最长合法链路（旗舰任务 5 步）+ 少量兜底重试。
+    tools_provider：工具来源，需提供 openai_tools() 与 dispatch(name, args, conn)。默认本地
+                   registry（直调，零额外进程）；传 MCPToolProvider 则工具改经 MCP 协议往返，
+                   图本身无需改动（两者同契约）。
     """
-    tools = registry.openai_tools()
+    provider = tools_provider if tools_provider is not None else registry
+    tools = provider.openai_tools()
 
     def agent_node(state: AgentState):
         resp = engine.chat(state["messages"], tools)
@@ -78,7 +83,7 @@ def build_agent(engine: Engine, db_conn=None, max_nudges: int = 1, max_tool_call
                 args = json.loads(fn["arguments"] or "{}")
             except json.JSONDecodeError:
                 args = {}
-            result = registry.dispatch(name, args, conn=db_conn)
+            result = provider.dispatch(name, args, conn=db_conn)
             out.append({"role": "tool", "tool_call_id": tc["id"], "name": name,
                         "content": json.dumps(result, ensure_ascii=False, default=str)})
         return {"messages": out}
@@ -113,12 +118,14 @@ def build_agent(engine: Engine, db_conn=None, max_nudges: int = 1, max_tool_call
 
 
 def run_agent(task: str, engine: Engine, system_prompt: str = SYSTEM_PROMPT,
-              db_conn=None, recursion_limit: int = 30, max_nudges: int = 1) -> dict:
+              db_conn=None, recursion_limit: int = 30, max_nudges: int = 1,
+              tools_provider=None) -> dict:
     """跑一个任务，返回 {final_answer, trace, messages}。trace 记录工具调用序列。
 
-    max_nudges：编排兜底强度（见 build_agent）；设 0 可复现「未加兜底」的旧行为做对照。
+    max_nudges    ：编排兜底强度（见 build_agent）；设 0 可复现「未加兜底」的旧行为做对照。
+    tools_provider：工具来源（见 build_agent）；默认本地 registry，传 MCPToolProvider 则经 MCP 协议调用。
     """
-    app = build_agent(engine, db_conn=db_conn, max_nudges=max_nudges)
+    app = build_agent(engine, db_conn=db_conn, max_nudges=max_nudges, tools_provider=tools_provider)
     init = {"messages": [{"role": "system", "content": system_prompt},
                          {"role": "user", "content": task}],
             "nudges": 0}
