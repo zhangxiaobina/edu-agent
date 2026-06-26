@@ -1,0 +1,36 @@
+# --- 红线：合成数据库 / 真实数据 / 密钥 一律不进仓库 ---
+# 合成库由脚本可复现地生成（python -m edu_agent.data.generate），不入库
+*.db
+*.sqlite
+*.sqlite3
+edu_agent/data/*.db
+data/
+
+# 环境变量 / 密钥（vLLM 端点、API key 等）
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.uv/
+
+# 评测产物 / 缓存
+.pytest_cache/
+.ruff_cache/
+eval/results/
+*.log
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
