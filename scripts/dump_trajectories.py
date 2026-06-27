@@ -61,6 +61,10 @@ def main():
                     help="并发任务数（默认 1=串行）。>1 时每个 worker 用独立 db 副本 + 独立 engine，"
                          "靠 vLLM 批处理大幅提速——解码受显存带宽限，批处理把『读一次权重』摊给整批，"
                          "GB10 上把 fp16 14B 的串行 ~7tok/s 拉高数倍。建议 8。")
+    ap.add_argument("--resume", action="store_true",
+                    help="断点续跑：读已存在的 traj_<tag>.jsonl，跳过其中已成功记录的 task id，"
+                         "改为追加写。任务集由 seed-42 + 同参数决定，故 id 与上次完全对齐——"
+                         "可跨机器接力（如隧道版跑一半，本地版接着跑），零重复零浪费。")
     args = ap.parse_args()
 
     cats = [c.strip() for c in args.cats.split(",") if c.strip()]
@@ -88,6 +92,28 @@ def main():
             subs = [s.strip() for s in args.ids.split(",") if s.strip()]
             tasks = [t for t in tasks if any(s in t.id for s in subs)]
             print(f"按 --ids 过滤后保留 {len(tasks)} 条：{[t.id for t in tasks]}\n")
+
+        # 断点续跑：读已存在输出里「已记录」的 task id，从待跑集中剔除。失败记录(success=false
+        # 且 error 非空，如断隧道 502)不算已完成 → 会重跑，正好把假失败修掉。
+        done_ids: set[str] = set()
+        if args.resume and os.path.exists(out_path):
+            with open(out_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    # 真失败(模型跑出来但没成功)也算已完成；基础设施假失败(502/timeout)重跑
+                    infra_fail = (rec.get("error") or "").split(":")[0] in (
+                        "InternalServerError", "APITimeoutError", "APIConnectionError")
+                    if rec.get("id") and not infra_fail:
+                        done_ids.add(rec["id"])
+            before = len(tasks)
+            tasks = [t for t in tasks if t.id not in done_ids]
+            print(f"--resume：已完成 {len(done_ids)} 条，跳过；本轮续跑 {len(tasks)}/{before} 条\n")
 
         # 并发上下文：每 worker 一份 db 副本 + 一个 engine（sqlite 连接非线程安全；
         # 独立副本还隔离 create_exam 写操作，避免并发 MAX(id)+1 撞 id）。串行(workers=1)
@@ -137,7 +163,9 @@ def main():
                   flush=True)
 
         # 完成一个写一个（乱序，带计数）→ 实时可见进度；jsonl 顺序无关（下游按 id 配对）。
-        with open(out_path, "w", encoding="utf-8") as f:
+        # --resume 用追加('a')保住已有记录；否则覆盖('w')。
+        write_mode = "a" if args.resume else "w"
+        with open(out_path, write_mode, encoding="utf-8") as f:
             if args.workers > 1:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
                     futs = [pool.submit(run_one, t) for t in tasks]
