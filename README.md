@@ -182,6 +182,23 @@ export EDU_AGENT_MODEL=...      # 如 qwen-plus / Qwen/Qwen3-14B
 > 学生诊断→路径、某 relevance 任务过度搜题）即属此类，根治需更强 SFT 数据（多跳 FC）或
 > plan-and-execute 显式分解。个别多步任务受 vLLM 非完全确定性影响在边界处轻微波动。
 
+**③ 从模型层根治：DPO 偏好对齐（脚手架）**
+
+编排兜底是推理层的上限；要从模型层根治，可把本仓多步任务的轨迹按档位 dump 出来，
+配成「真实逐跳调用的成功轨迹（chosen） vs 编造中间结果的失败轨迹（rejected）」偏好对，
+在算法仓做 DPO。`scripts/dump_trajectories.py` 即用于 dump 某模型档的**原生**多步轨迹
+（`--nudges 0` 关闭编排兜底，取模型层真实行为）：
+
+```bash
+# 接某档 vLLM 端点，dump 多步任务原生轨迹 → dpo_dumps/traj_<tag>.jsonl（不入库）
+EDU_AGENT_ENGINE=openai EDU_AGENT_BASE_URL=http://127.0.0.1:8000/v1 EDU_AGENT_API_KEY=dummy \
+EDU_AGENT_MODEL=<model> uv run python scripts/dump_trajectories.py --tag base
+```
+
+偏好对配对 / 校验 / DPO 训练在算法仓
+[`function-calling-sft`](https://github.com/zhangxiaobina/function-calling-sft)（见其 `docs/dpo.md`）。
+仓库只提供脚手架，不分发轨迹 / 偏好数据；数据够了即可照此复现。
+
 ## License
 
 Apache-2.0。合成数据生成逻辑与工具 schema 为原创；语义对照的真实平台代码**不包含**在本仓库内。

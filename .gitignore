@@ -5,6 +5,8 @@
 *.sqlite3
 edu_agent/data/*.db
 data/
+# DPO 轨迹 dump（模型原生轨迹 + 偏好对，按需本地生成，不入库）
+dpo_dumps/
 
 # 环境变量 / 密钥（vLLM 端点、API key 等）
 .env
