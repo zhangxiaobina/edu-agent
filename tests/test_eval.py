@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from edu_agent.data import db, generate  # noqa: E402
 from edu_agent.eval import build_tasks, format_report, make_oracle_engine, run_eval  # noqa: E402
+from edu_agent.eval import build_derived_tasks  # noqa: E402
 from edu_agent.eval import metrics  # noqa: E402
 from edu_agent.eval.tasks import CATEGORIES, EvalTask, ExpectedCall, SuccessSpec  # noqa: E402
 from edu_agent.tools import registry  # noqa: E402
@@ -72,6 +73,42 @@ def test_oracle_full_run_is_correct():
     assert report["relevance_accuracy"] == 1.0
     # 每类都应被评到
     assert set(report["by_category"]) == set(CATEGORIES)
+
+
+# ----------------- 2b. DPO 派生集：与基准隔离 + oracle 可满分 ----------------- #
+def test_derived_tasks_isolated_and_wellformed():
+    base = build_tasks(_CONN)
+    derived = build_derived_tasks(_CONN)
+    with_d = build_tasks(_CONN, include_derived=True)
+
+    # 默认集冻结不变；include_derived 仅做追加
+    assert len(base) == 19, "基准集应保持 19 题不变"
+    assert len(with_d) == len(base) + len(derived)
+
+    # 派生集：8 锚点 × 6 模板 = 48，全 multi_step，id 唯一且与基准不撞
+    assert len(derived) == 48
+    assert all(t.category == "multi_step" for t in derived)
+    dids = [t.id for t in derived]
+    assert len(dids) == len(set(dids)), "派生任务 id 必须唯一"
+    assert not (set(dids) & {t.id for t in base}), "派生 id 不得与基准撞车"
+
+    # 引用的工具均合法
+    valid_tools = set(registry.tool_names())
+    for t in derived:
+        for ec in t.expected_tools:
+            names = ec.tool if isinstance(ec.tool, list) else [ec.tool]
+            assert set(names) <= valid_tools, f"{t.id} 引用了未知工具 {names}"
+
+
+def test_derived_oracle_full_run_is_correct():
+    """离线 oracle 回放派生集 → 100% 成功，证明 harness 同样能评判派生任务。"""
+    derived = build_derived_tasks(_CONN)
+    report = run_eval(derived, make_oracle_engine, db_conn=_CONN)
+    print("\n[派生集]\n" + format_report(report))
+    assert report["trajectory_success_rate"] == 1.0, \
+        "oracle 回放派生集应 100% 成功；失败说明锚点解析或 harness 判定有误"
+    assert report["param_accuracy"] == 1.0
+    assert report["tool_recall"] == 1.0
 
 
 # ----------------------- 3. 指标能区分对错 ----------------------- #

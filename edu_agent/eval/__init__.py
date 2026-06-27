@@ -7,6 +7,8 @@
 from .harness import format_report, run_eval
 from .oracle import make_oracle_engine, oracle_policy_for
 from .tasks import CATEGORIES, EvalTask, ExpectedCall, SuccessSpec, build_tasks
+from .tasks_derived import build_derived_tasks
 
-__all__ = ["build_tasks", "run_eval", "format_report", "make_oracle_engine",
-           "oracle_policy_for", "EvalTask", "ExpectedCall", "SuccessSpec", "CATEGORIES"]
+__all__ = ["build_tasks", "build_derived_tasks", "run_eval", "format_report",
+           "make_oracle_engine", "oracle_policy_for", "EvalTask", "ExpectedCall",
+           "SuccessSpec", "CATEGORIES"]

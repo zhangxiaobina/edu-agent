@@ -21,7 +21,8 @@ class OpenAICompatEngine(Engine):
     name = "openai"
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None,
-                 model: str | None = None, temperature: float = 0.0):
+                 model: str | None = None, temperature: float = 0.0,
+                 timeout: float | None = None):
         try:
             from openai import OpenAI
         except ImportError as e:  # pragma: no cover
@@ -30,7 +31,13 @@ class OpenAICompatEngine(Engine):
         self.api_key = api_key or os.environ.get("EDU_AGENT_API_KEY", "EMPTY")
         self.model = model or os.environ.get("EDU_AGENT_MODEL", "qwen-plus")
         self.temperature = temperature
-        self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        # 慢端点（GB10 上 fp16 14B 单请求约几 tok/s，并发时更低）会让长 think 生成超过
+        # openai 客户端默认 600s 而抛 APITimeoutError → 整条轨迹记为空。放宽到默认 1800s，
+        # 可用 EDU_AGENT_TIMEOUT 覆盖。
+        self.timeout = timeout if timeout is not None else \
+            float(os.environ.get("EDU_AGENT_TIMEOUT", "1800"))
+        self._client = OpenAI(base_url=self.base_url, api_key=self.api_key,
+                              timeout=self.timeout)
 
     def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
         resp = self._client.chat.completions.create(

@@ -86,8 +86,12 @@ _QUERY_OR_ANALYSIS = ["list_exams", "query_student_scores", "get_score_distribut
                       "analyze_class_errors", "get_class_roster", "diagnose_weak_points"]
 
 
-def build_tasks(conn: sqlite3.Connection) -> list[EvalTask]:
-    """解析锚点后构造全部评测任务（对 seed-42 库可复现）。"""
+def build_tasks(conn: sqlite3.Connection, include_derived: bool = False) -> list[EvalTask]:
+    """解析锚点后构造全部评测任务（对 seed-42 库可复现）。
+
+    include_derived=False（默认）：仅返回冻结的 19 题基准集（保 before/after 对照可比）。
+    include_derived=True：再追加 tasks_derived 把 6 个 multi_step 模板铺满 8 锚点的派生集，
+    供 DPO dump 取更多真实多步轨迹（见 tasks_derived.build_derived_tasks）。"""
     py_exam = _exam(conn, CLASS3, PY)
     ds_exam = _exam(conn, CLASS3, DS)
     sid = _a_failed_student(conn, py_exam)
@@ -270,5 +274,9 @@ def build_tasks(conn: sqlite3.Connection) -> list[EvalTask]:
                  success=SuccessSpec(forbid_tools=True), should_call_tool=False,
                  notes="超出教学教务域，应礼貌说明无法处理，不调工具。"),
     ]
+
+    if include_derived:
+        from .tasks_derived import build_derived_tasks
+        tasks += build_derived_tasks(conn)
 
     return tasks
