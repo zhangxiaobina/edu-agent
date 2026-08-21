@@ -11,6 +11,7 @@ from typing import Callable
 from ..agent import run_agent
 from ..engine.base import Engine
 from . import metrics
+from .lineage import LineageValidationError, validate_lineage
 from .tasks import EvalTask
 
 
@@ -23,6 +24,9 @@ def run_eval(tasks: list[EvalTask], make_engine: Callable[[EvalTask], Engine],
     system_prompt ：可覆盖系统提示词（None 用默认强化版）；用于做「旧提示 vs 新提示」对照。
     """
     from ..agent.prompts import SYSTEM_PROMPT
+    lineage = validate_lineage(tasks, require_all_splits=False)
+    if not lineage["passed"]:
+        raise LineageValidationError(lineage)
     sys_prompt = system_prompt or SYSTEM_PROMPT
     records = []
     for task in tasks:
@@ -36,6 +40,7 @@ def run_eval(tasks: list[EvalTask], make_engine: Callable[[EvalTask], Engine],
             result = {"final_answer": None, "trace": [], "error": f"{type(e).__name__}: {e}"}
         records.append(metrics.score_task(task, result))
     report = metrics.aggregate(records)
+    report["lineage"] = lineage
     report["records"] = records
     return report
 

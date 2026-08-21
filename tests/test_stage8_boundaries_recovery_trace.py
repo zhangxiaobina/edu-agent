@@ -148,7 +148,10 @@ def test_read_only_history_audit_scans_sqlite_wal_json_log_and_artifact(tmp_path
     (tmp_path / "runtime.log").write_text(f"api_key={canary}\n", encoding="utf-8")
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    (artifact_dir / "sample.txt").write_text("phone=13800138000", encoding="utf-8")
+    (artifact_dir / "sample.txt").write_text(
+        "phone=13800138000 source=/Users/private-user/project/report.json",
+        encoding="utf-8",
+    )
 
     report = audit_paths([tmp_path / "state.db", tmp_path / "events.jsonl", tmp_path / "runtime.log", artifact_dir])
     serialized = json.dumps(report, ensure_ascii=False)
@@ -156,7 +159,10 @@ def test_read_only_history_audit_scans_sqlite_wal_json_log_and_artifact(tmp_path
     assert report["files_scanned"] >= 4
     assert report["totals"]["credential"] >= 2
     assert report["totals"]["student_pii"] >= 1
+    assert report["totals"]["private_path"] >= 1
     assert canary not in serialized
+    assert str(tmp_path) not in serialized
+    assert all(finding["location"].startswith("file[") for finding in report["findings"])
 
 
 def test_api_claim_before_run_reclaims_same_preallocated_run(tmp_path):

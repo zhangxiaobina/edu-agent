@@ -1,4 +1,4 @@
-"""PlanGraph 严格 before/after：同模型、温度、提示词、任务顺序，只切换计划层。"""
+"""历史 19-task Train/Dev PlanGraph 消融；不能作为独立 Test 证据。"""
 from __future__ import annotations
 
 import argparse
@@ -99,6 +99,7 @@ def main() -> None:
         )
 
     reports = {}
+    print("注意：这是历史 Train/Dev 诊断，不是独立 Test 或候选版模型证据。")
     print(f"模型：{model_label}")
     for label in ("before", "after"):
         database_path = Path(tempfile.gettempdir()) / f"edu_agent_plan_eval_{label}_data.db"

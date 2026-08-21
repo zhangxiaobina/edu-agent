@@ -15,3 +15,14 @@
 
 - 在后续开发中，如果项目结构、验证命令、部署方式或长期协作约定发生变化，应同步维护本文件。
 - 本文件只记录长期有效的项目规则，不记录一次性任务状态或临时信息。
+
+## CI 与离线验收
+
+- CI 固定使用 Python 3.12 和锁定版本的 uv；不扩展 Python/OS 矩阵，依赖安装必须通过
+  `uv lock --check`、`uv sync --frozen` 和 `uv pip check`。
+- 依赖同步完成后，ruff、全量 pytest、综合评测、Trace 基准和数据边界审计必须以 `uv run --frozen --offline`
+  运行；CI 不使用真实模型凭据、本机数据库、预建虚拟环境或 Docker。
+- 评测样本必须携带 stable lineage；Train/Dev/Test 按意图模板族或等价语义组隔离。CI 与 Stage 8 均运行
+  `scripts/audit_eval_lineage.py`，跨 split 重复、族重叠、缺 provenance、敏感字段或非确定生成必须失败。
+- 本地完整门禁仍以 `zsh scripts/accept_stage8.sh` 为唯一公开入口；CI 契约见
+  `.github/workflows/ci.yml`，评测报告的 candidate/release 模式必须通过真实 Git provenance 门禁。

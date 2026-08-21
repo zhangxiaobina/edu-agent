@@ -211,7 +211,15 @@ flowchart TD
 
 ## 验证口径
 
-`scripts/eval_system.py` 为每次运行写入时间、版本/commit、环境、模型、seed 和 config hash，并独立报告
-`api_recovery` 与 `trace_scaling`。离线 oracle 只证明 harness 与契约，真实模型另列；没有真实
+评测 corpus 在模板定义阶段分为 Train 55 / Dev 12 / Test 6；`scripts/audit_eval_lineage.py` 用两套新临时库
+重复生成并检查稳定 id、来源/版本、跨 split 重复、模板族/等价语义重叠、敏感字段和确定性。Test 使用
+独立 seed、实体分布和新意图族，不由随机行切分得到。
+
+`scripts/eval_system.py` 为每次运行写入时间、版本/commit、Git dirty 状态、无私有路径的环境摘要、模型、
+seed、完整 lineage manifest hash 和绑定 lock/workload 的 config hash，并独立报告 `api_recovery` 与
+`trace_scaling`。commit 只从真实 Git 元数据读取；candidate/release 模式拒绝 commit 或 Git 状态不可用以及
+dirty worktree。离线 oracle 只证明 Test harness 与契约，真实模型另列且当前为 `not_run`；没有当次真实
 Docker/Jobe 报告时 sandbox 项为 `not_verified`。完整一键门禁见
-`zsh scripts/accept_stage8.sh`。
+`zsh scripts/accept_stage8.sh`。该入口自动按 `.python-version` 和 `uv.lock` 准备环境，清空真实 Provider
+凭据，把合成库及中间状态限制在有界清理的私有临时目录，并在 artifact 生成后再次执行敏感数据审计；
+`--dry-run` 只验证调用图，不构成后端通过证据。

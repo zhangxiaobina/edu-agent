@@ -4,11 +4,29 @@
 
 离线（无 key）用 make_oracle_engine 验证框架；接真引擎后用同一 run_eval 出真数。
 """
+from .corpus import build_lineage_corpus, tasks_for_split
 from .harness import format_report, run_eval
+from .lineage import (
+    DATA_SOURCE,
+    DATA_VERSION,
+    LINEAGE_SCHEMA_VERSION,
+    SPLITS,
+    LineageValidationError,
+    SampleLineage,
+    audit_lineage,
+    build_lineage_manifest,
+    lineage_gate_passed,
+    validate_lineage,
+)
 from .oracle import make_oracle_engine, oracle_policy_for
 from .tasks import CATEGORIES, EvalTask, ExpectedCall, SuccessSpec, build_tasks
 from .tasks_derived import build_derived_tasks
+from .tasks_test import build_test_tasks
 
-__all__ = ["build_tasks", "build_derived_tasks", "run_eval", "format_report",
-           "make_oracle_engine", "oracle_policy_for", "EvalTask", "ExpectedCall",
-           "SuccessSpec", "CATEGORIES"]
+__all__ = [
+    "CATEGORIES", "DATA_SOURCE", "DATA_VERSION", "LINEAGE_SCHEMA_VERSION", "SPLITS",
+    "EvalTask", "ExpectedCall", "LineageValidationError", "SampleLineage", "SuccessSpec",
+    "audit_lineage", "build_derived_tasks", "build_lineage_corpus", "build_lineage_manifest",
+    "build_tasks", "build_test_tasks", "format_report", "lineage_gate_passed",
+    "make_oracle_engine", "oracle_policy_for", "run_eval", "tasks_for_split", "validate_lineage",
+]

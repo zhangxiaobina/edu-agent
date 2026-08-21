@@ -1,4 +1,4 @@
-"""多步提示词 before/after 消融：同一真实端点上跑两档配置。
+"""历史 19-task Train/Dev 提示词消融；不能作为独立 Test 证据。
 
   before = 旧提示
   after  = 强化的多步执行纪律提示
@@ -64,6 +64,7 @@ def main():
         configs = {args.only: configs[args.only]}
 
     summary = {}
+    print("注意：这是历史 Train/Dev 诊断，不是独立 Test 或候选版模型证据。\n")
     try:
         tasks = build_tasks(conn)
         print(f"端点 model={shared.model} · 任务数 {len(tasks)} · 同端点顺序跑 {len(configs)} 档\n")

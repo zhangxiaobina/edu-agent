@@ -137,6 +137,7 @@ def relevance_correct(task: EvalTask, result: dict) -> bool:
 def score_task(task: EvalTask, result: dict) -> dict:
     rec = {
         "id": task.id,
+        "lineage": task.lineage.to_dict() if task.lineage else None,
         "category": task.category,
         "success": trajectory_success(task, result),
         "tools_called": [t["tool"] for t in result.get("trace", [])],

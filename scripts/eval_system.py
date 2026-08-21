@@ -6,13 +6,10 @@ mock, and real providers are never mixed into one headline number.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.metadata
 import json
 import os
-import platform
 import statistics
-import subprocess
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -31,15 +28,35 @@ from edu_agent.engine.base import Engine, EngineResponse
 from edu_agent.engine.mock import MockEngine
 from edu_agent.engine.resilient import ResilientEngine
 from edu_agent.eval.harness import run_eval
+from edu_agent.eval.corpus import build_lineage_corpus, tasks_for_split
+from edu_agent.eval.lineage import (
+    audit_lineage,
+    lineage_gate_passed,
+)
 from edu_agent.eval.oracle import make_oracle_engine
-from edu_agent.eval.tasks import build_tasks
-from edu_agent.observability import RedactionPolicy
+from edu_agent.eval.provenance import (
+    EVIDENCE_MODES,
+    build_provenance,
+    credential_literals,
+    file_hash,
+    provenance_gate_passed,
+    sanitize_artifact,
+)
+from edu_agent.eval.tasks_test import (
+    TEST_COURSES_PER_CLASS,
+    TEST_N_CLASSES,
+    TEST_SEED,
+)
 from edu_agent.runtime.models import RunContext
 from edu_agent.runtime.config import ApiConfig, AppConfig, StorageConfig
 from edu_agent.runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor
 from edu_agent.runtime.transactions import IdempotentConsumer, OutboxWorker, TransactionalToolRuntime
 from edu_agent.state import SessionLeaseUnavailable, StateStore
 from edu_agent.tools import registry
+
+
+SEED = 42
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _p95(values: list[float]) -> float | None:
@@ -50,9 +67,7 @@ def _p95(values: list[float]) -> float | None:
     return round(ordered[index], 6)
 
 
-def _timed_agent_report(data_path: Path) -> tuple[dict, list[dict]]:
-    connection = db.connect(data_path)
-    tasks = build_tasks(connection)
+def _timed_agent_report(connection, tasks) -> tuple[dict, list[dict]]:
     timings: list[float] = []
     tool_counts: list[int] = []
     model_counts: list[int] = []
@@ -69,7 +84,6 @@ def _timed_agent_report(data_path: Path) -> tuple[dict, list[dict]]:
         return underlying
 
     report = run_eval(tasks, make_engine, db_conn=connection)
-    connection.close()
     records = report.pop("records", [])
     for record in records:
         tool_counts.append(int(record.get("tool_calls", 0)))
@@ -77,6 +91,15 @@ def _timed_agent_report(data_path: Path) -> tuple[dict, list[dict]]:
     return {
         "status": "verified",
         "source": "offline_oracle",
+        "evidence_scope": "harness_only",
+        "capability_claim": "not_measured",
+        "split": "test",
+        "repetitions": {
+            "requested": 1,
+            "completed": 1,
+            "run_ids": ["offline-oracle-1"],
+            "variance": None,
+        },
         "metrics": {
             "single_step": report["by_category"].get("single", {}),
             "multi_step": report["by_category"].get("multi_step", {}),
@@ -97,12 +120,22 @@ def _timed_agent_report(data_path: Path) -> tuple[dict, list[dict]]:
     }, records
 
 
+def _load_lineage_corpus(train_dev_path: Path, test_path: Path):
+    train_dev_conn = db.connect(train_dev_path)
+    test_conn = db.connect(test_path)
+    try:
+        return build_lineage_corpus(train_dev_conn, test_conn)
+    finally:
+        train_dev_conn.close()
+        test_conn.close()
+
+
 def _rag_report(data_path: Path) -> dict:
     from edu_agent.knowledge import SQLiteKnowledgeProvider, build_synthetic_corpus
     from scripts.eval_retrieval import evaluate_acl, evaluate_sparse
 
     knowledge_path = data_path.parent / "knowledge.db"
-    knowledge = SQLiteKnowledgeProvider(build_synthetic_corpus(knowledge_path, seed=42))
+    knowledge = SQLiteKnowledgeProvider(build_synthetic_corpus(knowledge_path, seed=SEED))
     sparse = evaluate_sparse(knowledge)
     acl = evaluate_acl(knowledge)
     return {
@@ -178,7 +211,7 @@ def _reliability_report(directory: Path) -> dict:
 def _transaction_report(directory: Path) -> dict:
     state = StateStore(directory / "transaction-state.db")
     data_path = directory / "transaction-data.db"
-    generate.build(seed=42, out_path=data_path)
+    generate.build(seed=SEED, out_path=data_path)
     context = RunContext.create(session_id="tx-session", run_id="tx-run", actor_id="teacher", tenant_id="school", role="teacher", course_ids={1})
     connection = db.connect(data_path)
     executor = PolicyToolExecutor(registry, policy=ExecutionPolicy(require_write_approval=False), state_store=state)
@@ -220,7 +253,7 @@ def _transaction_report(directory: Path) -> dict:
 def _multi_agent_report(directory: Path) -> dict:
     previous = os.environ.get("EDU_AGENT_DB")
     data_path = directory / "multi-agent-data.db"
-    generate.build(seed=42, out_path=data_path)
+    generate.build(seed=SEED, out_path=data_path)
     os.environ["EDU_AGENT_DB"] = str(data_path)
     try:
         def runner(execution):
@@ -359,10 +392,10 @@ def _api_recovery_report(directory: Path) -> dict:
     }
 
 
-def _trace_scaling_report(directory: Path) -> dict:
+def _trace_scaling_report(evidence_mode: str) -> dict:
     from scripts.benchmark_trace_scaling import benchmark
 
-    report = benchmark(event_count=1_000, page_size=64)
+    report = benchmark(event_count=1_000, page_size=64, evidence_mode=evidence_mode)
     return {
         "status": "verified" if all(report["assertions"].values()) else "failed",
         "source": "offline_keyset_trace_benchmark",
@@ -376,43 +409,156 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default=None)
     parser.add_argument("--sandbox-report", default=None)
+    parser.add_argument("--evidence-mode", choices=EVIDENCE_MODES, default="development")
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="repeat the independent Test harness run (metadata is retained per run)",
+    )
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats must be >= 1")
     output = Path(args.output) if args.output else Path("artifacts/system-eval.json")
+    secrets = credential_literals()
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="edu-agent-system-eval-") as directory:
         root = Path(directory)
-        data_path = root / "edu.db"
-        generate.build(seed=42, out_path=data_path)
-        agent, records = _timed_agent_report(data_path)
-        redaction = RedactionPolicy()
-        failed = [redaction.redact(record) for record in records if not record.get("success")]
-        failures_path = None
-        if failed:
-            failures_path = str(output.parent / f"{output.stem}.failed-trajectories.jsonl")
-            output.parent.mkdir(parents=True, exist_ok=True)
-            Path(failures_path).write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in failed) + "\n", encoding="utf-8")
-        sandbox = _sandbox_report(args.sandbox_report)
-        config_material = {
-            "seed": 42,
-            "agent_mode": agent["source"],
-            "sandbox_backend": sandbox.get("backend"),
-            "python": platform.python_version(),
+        train_dev_path = root / "train-dev.db"
+        test_path = root / "test.db"
+        repeat_train_dev_path = root / "repeat-train-dev.db"
+        repeat_test_path = root / "repeat-test.db"
+        generate.build(seed=SEED, out_path=train_dev_path)
+        generate.build(
+            seed=TEST_SEED,
+            out_path=test_path,
+            n_classes=TEST_N_CLASSES,
+            courses_per_class=TEST_COURSES_PER_CLASS,
+        )
+        generate.build(seed=SEED, out_path=repeat_train_dev_path)
+        generate.build(
+            seed=TEST_SEED,
+            out_path=repeat_test_path,
+            n_classes=TEST_N_CLASSES,
+            courses_per_class=TEST_COURSES_PER_CLASS,
+        )
+        corpus = _load_lineage_corpus(train_dev_path, test_path)
+        repeated_corpus = _load_lineage_corpus(repeat_train_dev_path, repeat_test_path)
+        lineage = audit_lineage(corpus, repeated_tasks=repeated_corpus)
+        test_tasks = tasks_for_split(corpus, "test")
+        test_connection = db.connect(test_path)
+        try:
+            agent_runs: list[tuple[dict, list[dict]]] = []
+            for _ in range(args.repeats):
+                agent_runs.append(_timed_agent_report(test_connection, test_tasks))
+        finally:
+            test_connection.close()
+        agent, _ = agent_runs[0]
+        success_rates = [
+            run_agent["metrics"]["trajectory_success_rate"] for run_agent, _ in agent_runs
+        ]
+        agent["repetitions"] = {
+            "requested": args.repeats,
+            "completed": len(agent_runs),
+            "run_ids": [f"offline-oracle-{index}" for index in range(1, len(agent_runs) + 1)],
+            "record_counts": [len(run_records) for _, run_records in agent_runs],
+            "trajectory_success_rates": success_rates,
+            "variance": statistics.pvariance(success_rates) if len(success_rates) > 1 else 0.0,
         }
-        config_hash = hashlib.sha256(json.dumps(config_material, sort_keys=True).encode()).hexdigest()
+        sandbox = _sandbox_report(args.sandbox_report)
+        input_hashes = {
+            relative: file_hash(PROJECT_ROOT / relative)
+            for relative in (
+                "pyproject.toml",
+                "uv.lock",
+                "scripts/eval_system.py",
+                "edu_agent/data/generate.py",
+                "edu_agent/data/schema.sql",
+                "edu_agent/eval/harness.py",
+                "edu_agent/eval/metrics.py",
+                "edu_agent/eval/oracle.py",
+                "edu_agent/eval/tasks.py",
+                "edu_agent/eval/tasks_derived.py",
+                "edu_agent/eval/tasks_test.py",
+                "edu_agent/eval/lineage.py",
+                "edu_agent/eval/corpus.py",
+                "scripts/audit_eval_lineage.py",
+            )
+        }
+        config_material = {
+            "seed": SEED,
+            "test_seed": TEST_SEED,
+            "test_task_count": len(test_tasks),
+            "repeats": args.repeats,
+            "model": {"name": "oracle", "mode": "offline_oracle"},
+            "agent_source": agent["source"],
+            "sandbox": {
+                "backend": sandbox.get("backend"),
+                "report_hash": file_hash(args.sandbox_report)
+                if args.sandbox_report
+                else "not_provided",
+                "source": sandbox.get("source"),
+            },
+            "input_hashes": input_hashes,
+            "lineage_manifest_hash": lineage.get("manifest_hash"),
+        }
+        provenance = build_provenance(
+            repo_root=PROJECT_ROOT,
+            config=config_material,
+            seed=SEED,
+            model_name="oracle",
+            model_mode="offline_oracle",
+            evidence_mode=args.evidence_mode,
+        )
+        failed = []
+        for repeat_index, (_, run_records) in enumerate(agent_runs, start=1):
+            failed.extend(
+                sanitize_artifact(
+                    {
+                        "config_hash": provenance["config_hash"],
+                        "repeat_index": repeat_index,
+                        "run_id": f"offline-oracle-{repeat_index}",
+                        **record,
+                    },
+                    secrets=secrets,
+                )
+                for record in run_records
+                if not record.get("success")
+            )
+        failures_artifact = None
+        failures_name = f"{output.stem}.failed-trajectories.jsonl"
+        failures_path = output.parent / failures_name
+        if failed:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            failures_path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in failed) + "\n",
+                encoding="utf-8",
+            )
+            failures_artifact = failures_name
+        else:
+            failures_path.unlink(missing_ok=True)
         report = {
-            "schema_version": "edu-agent.system-eval.v2",
+            "schema_version": "edu-agent.system-eval.v4",
             "generated_at": datetime.now(UTC).isoformat(),
             "version": importlib.metadata.version("edu-agent"),
-            "commit": _commit(),
-            "environment": {"python": platform.python_version(), "platform": platform.platform(), "sqlite": __import__("sqlite3").sqlite_version},
-            "model": {"mode": "offline_oracle", "name": "oracle", "seed": 42},
-            "config_hash": config_hash,
+            **provenance,
+            "config": config_material,
+            "lineage": lineage,
             "agent": agent,
+            "evaluation": {
+                "harness": {
+                    "status": "verified" if lineage_gate_passed(lineage) else "failed",
+                    "source": "offline_oracle",
+                    "scope": "harness_only",
+                },
+                "real_model": {"status": "not_run", "metrics": None},
+            },
             "rag": _rag_report(root / "rag.db"),
             "reliability": _reliability_report(root),
             "transaction": _transaction_report(root),
             "api_recovery": _api_recovery_report(root),
-            "trace_scaling": _trace_scaling_report(root),
+            "trace_scaling": _trace_scaling_report(args.evidence_mode),
             "multi_agent": _multi_agent_report(root),
             "sandbox": sandbox,
             "performance": {
@@ -428,22 +574,23 @@ def main() -> int:
                 },
                 "real_model": {"status": "not_run", "metrics": None},
             },
-            "failed_trajectories": failures_path,
+            "failed_trajectories": failures_artifact,
         }
+        report = sanitize_artifact(report, secrets=secrets)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str))
-    return 0 if all(section.get("status") in {"verified", "not_verified"} for section in (
+    sections_passed = all(section.get("status") in {"verified", "not_verified"} for section in (
         report["agent"], report["rag"], report["reliability"], report["transaction"],
         report["api_recovery"], report["trace_scaling"], report["multi_agent"], report["sandbox"],
-    )) else 1
-
-
-def _commit() -> str:
-    try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "unavailable"
+    ))
+    passed = sections_passed and provenance_gate_passed(report) and lineage_gate_passed(report["lineage"])
+    if not args.quiet:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+    elif passed:
+        print("offline system evaluation passed")
+    else:
+        print("offline system evaluation failed")
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1237 @@
+{
+  "checks": {
+    "all_splits_present": true,
+    "complete_provenance": true,
+    "cross_split_duplicates": true,
+    "deterministic_declarations": true,
+    "deterministic_generation": true,
+    "semantic_group_isolation": true,
+    "sensitive_fields": true,
+    "stable_ids": true,
+    "template_family_isolation": true
+  },
+  "dataset_generation": {
+    "test": {
+      "courses_per_class": 3,
+      "n_classes": 5,
+      "seed": 314,
+      "source": "existing_synthetic_generator"
+    },
+    "train_dev": {
+      "seed": 42,
+      "source": "existing_synthetic_generator"
+    }
+  },
+  "deterministic_generation": {
+    "error": null,
+    "first_hash": "40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b",
+    "passed": true,
+    "sample_count": 73,
+    "second_hash": "40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b"
+  },
+  "errors": [],
+  "manifest": {
+    "manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+    "sample_count": 73,
+    "samples": [
+      {
+        "content_hash": "de49288bea813d5085ea58feccbfd386a5464bdb0b40b3c9007da902cf2ea563",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "single.score_distribution",
+        "query_hash": "5040145fc9e51fb96ac49da22d4a1911dbc1032e557ec6ee6cd2d6673e54ec4f",
+        "sample_id": "sample-09755fb31128423691bc263772a60b451b75ece094ab698e6f6d7f9277ec6a2b",
+        "seed": 42,
+        "semantic_group": "score_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "single-score-dist",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "b87d8041d97d5c7b33a69df4e4e08cc728e33e35751ed288f4b5fa8b7ba2d07a",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "irrelevance.concept_explanation",
+        "query_hash": "cf8b12d9bcc4aaf8f76a5c6654abd22d6438483f41ca49210da7561449505cc9",
+        "sample_id": "sample-2140be2062da18e44078daad7cb32230eea00ad93955b3a4bfba9bd78040fba7",
+        "seed": 42,
+        "semantic_group": "no_tool_concept",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "irr-concept",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "f45615ae86c6ce3eac7b533e2a84136ce3ce66b364ccfcf05e3584f545c3e34d",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "single.practice_search",
+        "query_hash": "693044d97be915018f16b4aec4df79ab08b86f62fb13b870a3a52864cde74698",
+        "sample_id": "sample-31525ec7cc7d62ff6a4aee04690936438c4367c06caac4bd0e87e98bc62b7c3b",
+        "seed": 42,
+        "semantic_group": "practice_search",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "single-search-questions",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "f1c8d8399a4ef2618b0f51cfb0875d1769fe1131d26ec23efc23dfe0dc9fdc68",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "single.exam_list",
+        "query_hash": "d8c17cc3cd3dce088e1e95c4ee850f126dce306e1c4c2dda6c9beb6b76983e07",
+        "sample_id": "sample-421ce8b57aa36111d951cb3925eb51cbc214bd47151fceb55a7a8743296d6ac2",
+        "seed": 42,
+        "semantic_group": "exam_list",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "single-list-exams",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "78048633b3ee326d8867af272064c96d5448081cdc49a2f26e143559368745a6",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "relevance.exam_overview",
+        "query_hash": "5f4419fcde41a6f0ae10c38df6712636f89f2b3aa742ab5be3d482ef23a54c0a",
+        "sample_id": "sample-76b71b6edcc554eef53a57938a50d0a1895766e4149d92cc09e523b662120279",
+        "seed": 42,
+        "semantic_group": "exam_overview",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "rel-implicit-exam",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "d6010956ed3252a759a79a7d1f4b10b5ffab112102f9f45963784cf3e49eb4aa",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "irrelevance.thanks",
+        "query_hash": "17bb3354412342b85fe4912e781224ae5faeca89e9e104b462b014be334d5f66",
+        "sample_id": "sample-ab361380de2e857786a9ca7ba5a53839c0530e769a5cd89ef88930c70413777c",
+        "seed": 42,
+        "semantic_group": "no_tool_social",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "irr-thanks",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "97184abaa137ac5b835c0fac844cba911890dab5e3947d0b2e28a2c7964f6b10",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "parallel.score_distributions",
+        "query_hash": "4f636bde5cf83c715d0759295171e3f7d8306c045afff410f6be41fc02a1a388",
+        "sample_id": "sample-ae25278ad1e7fc11c93b611b0557fbafebca6b4283af0b3408f21cbf90bfa76b",
+        "seed": 42,
+        "semantic_group": "score_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "parallel-two-distributions",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "a39be1a4d9ccaca1d9230de302478cb4107f56b57a757956eca51cdc0dc500a0",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "irrelevance.out_of_scope",
+        "query_hash": "657ae22e03320c8f02c867c8c4fd79cde23fe3fbf7c548e66c853e669038b528",
+        "sample_id": "sample-c96948c9ce921f58d16534586f92d0370c2d9680f3dbfdaed0b447ac6723aebb",
+        "seed": 42,
+        "semantic_group": "no_tool_out_of_scope",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "irr-out-of-scope",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "bd9caa44b4237a97eed99d556c6e87fae2ef82ac2d007e574f46c2a5260072fe",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "irrelevance.greeting",
+        "query_hash": "07571060d93a07c445e127725ed27f0e64aa191d8b5b4ada6fd91fb0abe0138c",
+        "sample_id": "sample-cb29fe57463cc66569a16a3e14cfe69a4653ae4a65691b047efda425628a2ac5",
+        "seed": 42,
+        "semantic_group": "no_tool_social",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "irr-greeting",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "8d02486c9729479bffbe579de409b3855f5bde0a252b671d80e093d93a769ca0",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "single.code_execution",
+        "query_hash": "b34c302d9b9978fe8219107fee8eaae118165a05d5ed1de8b781defc5b5838be",
+        "sample_id": "sample-cf28de00376c9a5fe1947818eb97ac78765cd9a99a31a308ffe211ae4d2f8af0",
+        "seed": 42,
+        "semantic_group": "code_execution",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "single-run-code",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "f90f13c021890442cf862cd5127b0bdcc5af9b5a32e60c0e1fa3b60f3df069b4",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "relevance.practice_search",
+        "query_hash": "a7aad29ebbc79754241c3c5020a0394d58e08d57ba49ca7f2d433d8930c6e2b9",
+        "sample_id": "sample-d5e14ded3d2695752fef36704e179871dc380ff104e40d683ec430c333785122",
+        "seed": 42,
+        "semantic_group": "practice_search",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "rel-search-tree",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "f68f470804ebdf4a8a4736a487aed5da30947dbe53d2256bc2290fd5987047ba",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "single.class_roster",
+        "query_hash": "53bb28ee36cab4eb4c5a3aa331d57205917a80423fc3a90a6a2149798584f770",
+        "sample_id": "sample-fe27006b7eb2b4ddb6e114cae680dbb9ac4a45075b4916cc7a50f2f040c466ba",
+        "seed": 42,
+        "semantic_group": "class_roster_lookup",
+        "source": "edu_agent.synthetic",
+        "split": "dev",
+        "task_id": "single-roster",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "3a01e27a2130f3ce4167291043f0a2356093e2a61a97b654ed654e8b45b31281",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_test.build_test_tasks",
+        "intent_template_family": "test.compare_class_sizes",
+        "query_hash": "79a838ec6a6cd82470f212635a7df2d224f53a26dcdef2902dae72065f7fc7bd",
+        "sample_id": "sample-1708ba48e04723118f1f1db24ce5d1c4e14c9d8eb2947c5f419812c0ba25c94b",
+        "seed": 314,
+        "semantic_group": "test.compare_class_sizes",
+        "source": "edu_agent.synthetic",
+        "split": "test",
+        "task_id": "test-compare-class-sizes",
+        "version": "seed-314.test-v1"
+      },
+      {
+        "content_hash": "e835642f182cb8735259811498a462a2d2197db56ce6b6b36c2b8d7c7e1070d5",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_test.build_test_tasks",
+        "intent_template_family": "test.student_course_progress",
+        "query_hash": "06937608bbe59274700885ee1f2d4f02f383e820952755b2c8381a77070170c0",
+        "sample_id": "sample-455b9d1dd3b71c4b42f40ec1adad5183012430e68bbecd908d35a3e7e14907a5",
+        "seed": 314,
+        "semantic_group": "test.student_course_progress",
+        "source": "edu_agent.synthetic",
+        "split": "test",
+        "task_id": "test-progress-summary",
+        "version": "seed-314.test-v1"
+      },
+      {
+        "content_hash": "6e70f5f595ba5d6d5c46e17382d9b9a05e3915da39523eb56edf815862f433d5",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_test.build_test_tasks",
+        "intent_template_family": "test.knowledge_skill_catalog",
+        "query_hash": "9a8cd45a6550f9aeac4b1be08cab332940a503ea207abbdf4ce2be8c8411b389",
+        "sample_id": "sample-5b54326e5e44a224a8ab885965b3bdeeaadbaf925d9bbb181ca13e7e72bddd23",
+        "seed": 314,
+        "semantic_group": "test.knowledge_skill_catalog",
+        "source": "edu_agent.synthetic",
+        "split": "test",
+        "task_id": "test-knowledge-skill-catalog",
+        "version": "seed-314.test-v1"
+      },
+      {
+        "content_hash": "fcfde250a518a38e0cb764ee77524b74f31101810f3e6d5a501063ac36c3b361",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_test.build_test_tasks",
+        "intent_template_family": "test.knowledge_neighbors",
+        "query_hash": "d7da20cadf4abc7d03c88837ccd5e2794fd1956c750f3f041b9788a60a3729eb",
+        "sample_id": "sample-65bd8bf12b336b8c3f75ad553289e56f3ca44d527c9863cadbd852b1ce7a585b",
+        "seed": 314,
+        "semantic_group": "test.knowledge_neighbors",
+        "source": "edu_agent.synthetic",
+        "split": "test",
+        "task_id": "test-knowledge-neighbors",
+        "version": "seed-314.test-v1"
+      },
+      {
+        "content_hash": "ab946534618c4179957376625b8e02e4ee20b7cf149b8d0802262ea427c6a79f",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_test.build_test_tasks",
+        "intent_template_family": "test.student_exam_history",
+        "query_hash": "4a8c706d7f44a1a424fe420493f690c161c95031b81a97cee7508cbabf568cca",
+        "sample_id": "sample-e71e86b123ce5592fc231988485bd8ba1d20e842b6fe74fc475519426e7cb8e4",
+        "seed": 314,
+        "semantic_group": "test.student_exam_history",
+        "source": "edu_agent.synthetic",
+        "split": "test",
+        "task_id": "test-student-exam-history",
+        "version": "seed-314.test-v1"
+      },
+      {
+        "content_hash": "08da7d72678b51fc8b2c9aa8f0286fb324545ef472901ff9ace4b9e531eff7b1",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_test.build_test_tasks",
+        "intent_template_family": "test.exam_top_performer",
+        "query_hash": "a4346c87b4abf7e8594dfcf81d0cd5cb856bbab0e46a81b0e0fe20ad52defff3",
+        "sample_id": "sample-eb645057ea56eaa8a7398b472549cc7b1b6b254b1ad7f5b524e81cc31329e2a2",
+        "seed": 314,
+        "semantic_group": "test.exam_top_performer",
+        "source": "edu_agent.synthetic",
+        "split": "test",
+        "task_id": "test-exam-top-performer",
+        "version": "seed-314.test-v1"
+      },
+      {
+        "content_hash": "f97b2abe0318b6d8aaa0b0d96d645cd6590432a1d28b16aeb2ad1580cdfa87be",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "cf49512b85985207de03c6c52f9858f89f8afe84346aedd8bb0c02557a89864a",
+        "sample_id": "sample-07f2fda085ad0bb39928646ba39253d84f5ed8aaa78aea82bfdc956c9b94a592",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-papercreate-c4-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "4f7226ab344881d475b63b24f18f4ec7e26d8f474e8463dcdf8867f2f71ea2d1",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "4407b7bbcf09562289140f565c534b865aa313644e668e553d188c667407ce29",
+        "sample_id": "sample-08d1163d04de37b94db04a08dab4b1e88ec9f4351d24cee84f41fc287d8598ac",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-failthendist-c1-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "892046113ba8d0b7da07a8eb6c541831ad0b3298efe747ff6fb3dd2fb9abc3e9",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "3a5b8c19da7068bbc80a1357029701137741be689ff82e76a08ff2125e3878a5",
+        "sample_id": "sample-09ae8af3fd6624a52c9647eac624e369cdda1e27622645811d5fcb7a382b2d8f",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "multi-fail-then-dist",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "7ea65ef0ac31690de96b941a5dde0435a3429009ed777babf4c95a5e4b84730c",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "84078c0b60e98036b968a840aac60a2983edfff984d98ccd53274551931b5bbd",
+        "sample_id": "sample-10520125e42de6002ce1a0a066fa099b4514b7385b84c11386eb35c8308e28f2",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-classweak-c3-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "e3a7c976f06f2a2950c3671d8642e324525a7904b5857f0fa1ab02148ba9c5ba",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "de67b60398fae2a1f2135c0539ba71a7bd539e3b17a1163d292c671123cc4b27",
+        "sample_id": "sample-131d03a98f4d7b515289731a385469d96174feb1a5759aa22d2f6085843c3bce",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-classweak-c1-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "75fe5cd1c0cf6304c548428f373bdd800ce5c6bde76fab8fd043be3338d70739",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "a96b946db2c36c78703952d0b9f9157e4d88af4604bb5117a239cb5bab3593f8",
+        "sample_id": "sample-13a6159f6beb7e99d2192107d46fdd56beeed02b97b7ac5d7a2416302ed6856d",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "multi-classweak-practice",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "04d82bc6d1c15cd5a1ed594335dfed32e24e08c5a1c72d5087abd8a2cc67d301",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "e737fbba57f3ca23aa238ad0926223ab40fac1f259490f92b6280a2fc8dcbf67",
+        "sample_id": "sample-1b038881b00301793779e331de94af850d5208f63622421cfd82e70a3f6a4429",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-prereqpath-c1-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "1807545ebee25aab4ec459e568cdd30f1e6922bc0d9d9aa4c5c0ed1e6af72b7e",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "244765fc7cf9cfa31e743073d2f17903ce2fbc0eded7a351b95f119ed57ed67d",
+        "sample_id": "sample-1e2368dc54b6bba3a08e292f608dd2e1a194bb581d2a8437a34fc8d67309ae52",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-flagship-c2-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "77b69a624a7ac1c641d938df30df7e6c0129d9daa6d67d0c033685d458633429",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "2d33a01face587e6af207716c34d90301c182a50e8ef3c4dd1b6efa1a84043b4",
+        "sample_id": "sample-25ed37e7a89ea3e041881dfa731b1f566d1c2c7c6765c6dab3848eb786100e15",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-prereqpath-c2-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "7a27955440aca338f1936caf92d3dc93c6712c6daaeab57f666e4d9d9b134742",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "e2b7ead6bcef570be959c67d9ecceff7a0077d4fbab9b3e7877e010522e3904a",
+        "sample_id": "sample-271e898c6e86ef92c438eb03bdc08a050637dc81d2296949ece9dde4cdb69b3f",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-flagship-c2-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "d416aeecad99324ddd10a03d70372ee924a257674f5e2c9f82da79ae37b3bb67",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "793937913b32c28ccb528956e9201daf351b9d8485b1a85ef487461f6bd5acfa",
+        "sample_id": "sample-32f962ca787530deebf08ffa035396ad8e53543a3979a4f978d8eb793dc9569b",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "multi-flagship",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "ecb43e52d77e78ebb0ba8ae6086091bac47254070d3a68a854153e75db352836",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "e1ede3f2853d8645ca222a10cdd4e37035aa487b390dfaa4187e3ad6e340a8f9",
+        "sample_id": "sample-3708083f0157d0e831b7d89a7d7f506c2987d350f5099b8e77bca0842436158a",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-studentpath-c3-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "0605c81628bfe253df58da4797ef59163b078634ef3c444c6424af2d9d073553",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "relevance.class_weakness",
+        "query_hash": "1ea6b458303ec2db085e46574efdc1ada58515aa61c87f8971288bd649c0e4e1",
+        "sample_id": "sample-3c20bf37e75af9a39e5ee8e340b5e7d10d0f845baa89699a6f29c2c07a03af5c",
+        "seed": 42,
+        "semantic_group": "class_weakness",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "rel-class-weak",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "30977ae11a4950e2ffe078000a6a668a6a254c13916f1c0a5091a268e5c378cf",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "40d41a199eba2f7a07c6e49a74840dc1ca1bbc59d5a1dce36e7a59b4c12e56b7",
+        "sample_id": "sample-3dada41356f008b897233a02937dce417218db5d4c5c6768eb4a7c06bfa8d41f",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-classweak-c4-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "c6f56951f8dfa77de4fd08361261f40e01fafab2e9199df7d20594cc9274b084",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "e737fbba57f3ca23aa238ad0926223ab40fac1f259490f92b6280a2fc8dcbf67",
+        "sample_id": "sample-3f53d83f76b5511ace31a2f28500815d3bc98c72e76440bb6391c01d439e658c",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-prereqpath-c2-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "3b3bf76160572cce011057ce62b26cad3807f094e5b1df0f6205582a1a166cea",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "a298d6e38ab2e2349cea4aa6d23a42a55e006787e35da5fc59bf0d7a24c8a2ca",
+        "sample_id": "sample-45bd61856ead81d1313d9a2ea93465b6da3278e67de08370fc79e97bfe85c162",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-papercreate-c1-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "a2781a60443c9718dd707e8bd86f6edbd244203d12ac33beacd2ddb0b62208a9",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "e4acd0cc0969ed6a9511f3458cf312ea18000ada83492f209f0cac9cb20c7ff1",
+        "sample_id": "sample-4981880a411fd974d80150625e01789e8adbdb4084175cfba50c188deda8238c",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-studentpath-c3-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "79070165bbae9e919371027e455eddd287ce31e4cf3704b031aeeb245d01d11f",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "a5aac1951cf8562349c59b964fe68f86ef615814286fef3963484fb0f0a868a1",
+        "sample_id": "sample-4ad8d6e65574c2dabadd9668e5874a267bd4ea5a53cf7a7bf51cecb49e5c1dbf",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-classweak-c3-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "ad32d933d5852f6a609ad241ebf2b465793313ad1342bbe35de0246ce7066f21",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "235c10a70366f6192999d9e6813389171586948c28e4e9ac0320380bd6f1e4df",
+        "sample_id": "sample-51de726227c12ba7aea407b09befebdf9e989d8c4f1d7c581ba5b1f10fedd733",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-papercreate-c2-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "246d5b5a7c7695bbf1adf174a48f93c138941519d28c05eea4958755faf5232e",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "29a9a238ebbd83da86c0947303a9282aec3b5398e1a128e0a66b15357cef6423",
+        "sample_id": "sample-5400a9bcb65f51f4e42fd5e6656c22e56ea323272688c4d6faac2198e2349804",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-studentpath-c2-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "17e631b210f06c1fd644d1af2d877e18724744b660724a5a89251b7c9eac10dc",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "5a916ecf04abcea03202b5ddcc7b4b2d3d8498b9f70477b6c4923fdf4bd83897",
+        "sample_id": "sample-58cfc29bfe6653bf68a33e8ab4fd4d3c8e548c702047f1789af8b9651c7655a8",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "multi-paper-create-exam",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "276da0796c5b137f5cdbcaa9a7a7af3b6c4a3ccca85ee83e1d66fa71750e710b",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "eb4f0812cb8c604db42e140b1ad14b02dd771e90b9ef05b671e075f075398b28",
+        "sample_id": "sample-676c4418bb61a46e8276e2ac46ba0f7a116c872f1109c5dfd3bcefdfb795401b",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-prereqpath-c4-net",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "77e6e255528f71ae927b42147030309ba0b3ca7696c14554b5c3c3b1a5ce4a07",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "9c93ead2b98070b9649cff629a3be6173d4a482378c83c7c8a3d87f38de5bb28",
+        "sample_id": "sample-697d9c4e002b83db76cab91303c993352eddea2eafc0e2d6780abab73d820348",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-failthendist-c1-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "c586340f823614ab2bdbf8be7c30ddebca5d34263004c7549f7969412d745f05",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "7a568566c796dbcf4306b842260c5fc321ada61f477bb88094a8b0cf2b31bc38",
+        "sample_id": "sample-6a43839d3952b184c2ec56f7f658d0f6a781e7da66472ddb0c66b8dc64abf03c",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-classweak-c2-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "86ef97a050ee300e6f69d50634cb2a31b2cda2aeb5fb8ddc7407305f6e948b90",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "61c8c7211a75f53b3818df77b7734d1239c248b7d7ac01a24000928470d3c316",
+        "sample_id": "sample-7234467e57561335d09d3542ca15abd7176ee98578de3396ef947cedce9ff0ed",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "multi-student-diagnose-path",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "1757c8e12fb49cdfee7aeba4040658f5f226b28ae1646761906858d3ffd91237",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "2d33a01face587e6af207716c34d90301c182a50e8ef3c4dd1b6efa1a84043b4",
+        "sample_id": "sample-72e93381eb971b6022a97e18eceaf50915fb09c7242f5301aef4e548599f2ff8",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-prereqpath-c3-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "5d59a75971f8315f4eda9268c3d78c7cdb744f89a5a0414d2dc2472405795bb9",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "2d33a01face587e6af207716c34d90301c182a50e8ef3c4dd1b6efa1a84043b4",
+        "sample_id": "sample-76735255fdab3f247581a27f852c23b9cf9228cd31af76c8d73898736ffadf01",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-prereqpath-c1-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "e74b0a8f931695e0b8f1a79abd50658e96f0332421b380a0c02e4b6525a9a4cc",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "97bfd85ae0c925525de2d7d860388a4607ad531456effcd2a6c3dc36e5751b03",
+        "sample_id": "sample-780df0e7c422f10ccea481acecc42198d968e15f7add269580bb3bf2d1b03d62",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-classweak-c2-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "0d81b18b17a0d5aeec43a01af3da4c447882a99cba67feb8c10a78ce88047ea9",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "3f881840181955216a88c7fc8b51d91ca733db074b0aea807c6bf6d072b545ec",
+        "sample_id": "sample-781368686928df4f892bf0d3614014a9895e1b4c7e318cd67c7b20ac0400e7d8",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-flagship-c1-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "9885b24a2adb8d9a614023f32aab032c40f371767775f0742f774858a2ff51a8",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "05b9c62334e627f7592f92a4a4d1615abad227f7fa4f9fac6c1e1b01db3cc619",
+        "sample_id": "sample-819bd262eea9dfb437a2254e9b5c29e12a1fa31133dfc3a1c37b6c3c782abd63",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-classweak-c1-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "cceaf1c1ff69a893f9dbc473514f498e24806ffb95f7baacfc4bf83a2a28846f",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "1314e30029fbf438b7f6aac96343f6926602ff0aed91cd6cf5161d43762f6e30",
+        "sample_id": "sample-868b589b5d724e24a4f633dea946a0779cdbf6752e5071ffe4c672506c18df30",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-studentpath-c4-net",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "3bb6ecbcf2d28e91dd41835c259fbc8017e89bd4f4cc42a8794acd8885f8fcf3",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "b309ff151ade95fc099ccf75a8612ef0243fd7f834624f0ea79dd37084f49168",
+        "sample_id": "sample-87f12b836c9637a2b31c5e7a12bfd6de285247329116d6d0c9825bbea2731da2",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-papercreate-c3-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "9348c57c33bd4752c2d833d53660ded968b7906b209860dc6c629eac69430b88",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "932564c42ec3a44858996a609e4785039f332bdd8b86eda5de5846ddc650ad4a",
+        "sample_id": "sample-8943e3be3c14f3f72a25226e23515eb31cfec866b943ac23109b6fd24d1d6c5e",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-failthendist-c3-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "72a3a8306014565d333bdfe111cb6920cbba0dd5a3d5556c18d927c52b9fe4dd",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "710ab16304c9adc958be6f042dcdbf4434978e743bcfe35515e32bf8de0197f9",
+        "sample_id": "sample-9fb7a6f2668e7aee3d7405f24b227f4a20b9a0ee79322cc75f0aa21f4c408498",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-papercreate-c3-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "8078e1f6b78ce2629333bbb8506616395774047ca0139ffe732e34cbd5289351",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "5f227b8934a88f9c0e7be55191767e0e116590d85e6f7b61f3dbd7d721e3993e",
+        "sample_id": "sample-a5febe67c5bd750ff4a6a2e54437286f07acd10e3f33764832b0013375a99147",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-failthendist-c2-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "ec9127f28b2e76a1a8b645a1fc85fdb6783641dc909783d9fe183bea91486a71",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "2db0256d5f72a698da93a51654f58f8323b47159814a446a42eee0105a80c077",
+        "sample_id": "sample-a84d35872668d2530fca6420155c8e2f1ba527d497936edef8ca91b0392d950f",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-studentpath-c4-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "b61878483b35fdf2197dfaa5de6c3fa1fe23d157393b72c3d4b65a8ff656a6be",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks.build_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "d5faea7cbf6ce43e101b7664ed422f9a4c80eee7e8ff9df5e31a3764632215bb",
+        "sample_id": "sample-a9a5b581c0732449cc30e34fba10d54ddd24e951617f4546e50542e8036407ab",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "multi-prereq-path",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "f8e8f0f2f0f13233dfb99f63d2f80bb6eac99cbe212a8408bfa4fb27ef4c71bc",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "8f54fc11f38625a53ab849bf9921999fa2f2858f39938f9002f4fe5ef3dc8652",
+        "sample_id": "sample-acf14445a2e6d3062209bdf74bdb14c3824df608fc7097e29307a551dab3394b",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-flagship-c3-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "a1b04e072c9d7122bbd1bd1015e4942d60edbafac36b44068d3fc5a2cae5cd03",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.class_weakness_practice",
+        "query_hash": "368395b5f9ac1910914b1e69ab3298de24d84009e3e53b8f1ddc81e36c311d52",
+        "sample_id": "sample-af095c84cccf08d62b76df61b89f86212e9ce5687a57bee2415d7156416bd1fe",
+        "seed": 42,
+        "semantic_group": "multi.class_weakness_practice",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-classweak-c4-net",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "a986f40caa2e8945a26ce11fe65b57c3e287bae50671f22cc80d290433b5949a",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "4af8e2c5cea71babd63cb67abb4a285533ee64b44184a1162fed61164cbe03f4",
+        "sample_id": "sample-b6f8546600451c1572aad2b333cc0f69c5eb908a8898e47f4140cc70bfc08f43",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-papercreate-c4-net",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "e6a2e89c395369fd870d28f33480efdc1b7b1e9fab52f504ab9b1ee2987efa49",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "cd6a223f36fb42eddab2150c5e11d0c44b24ed3cb46f2b56945acb77698207a4",
+        "sample_id": "sample-bde3981c9a7a57aed71dfbc494c8e04bd74c2e7333b048ee57e4e8aa439262b9",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-flagship-c4-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "801b8743962e2d6ce22b8d6cd8d762eea33228a62dd6f06a70d613c9f0a59393",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "cd5bf4376a620563de248dda1c1946e5bc39f632e87132c211fadd98772e318f",
+        "sample_id": "sample-c046c3bcd68ef7784bfe7b3aa7f22da98a104803a15eb254a8d0ff5302475137",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-flagship-c3-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "2e52855966c200ba41753902a61b3ee88ee26436ca1ab497d3bb68a92af40cca",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "1670ea9c1729ebc1d97bc3f4f0189196ea90dd4f23edbb6ea42f212bff3d0053",
+        "sample_id": "sample-c4fe71a084b326bc58448a1a012ef9faba0491dcee681b7d2773f7182c549289",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-studentpath-c2-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "936fc5a910205f87ca8c34008f15c96edee658905ebd8e3cc808f7d7ee462228",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "e1e0fd491187613abd15103c907f5e9204bacdbcfef7de1509280660d283364b",
+        "sample_id": "sample-ca933bec6ffb75abede155760186af3074a741c6b20d060f8ea2b05138c79657",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-papercreate-c1-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "432eecdc6740e3e88680975e055f301f0f823dff8d201e255207566048dc0d4d",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "db222cce34f5cc917caeee3c26369d041d504b425ff83456cbd26654b17c24de",
+        "sample_id": "sample-d02eeffb38d506d42ca003a75ee19e4aa1163d138caca3faf6e88f6149b86ded",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-studentpath-c1-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "4377e2194eccfed98b2b3ea05b3678dfc565f36e78a50ed63670b67933e34764",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.paper_create_exam",
+        "query_hash": "fbbae17e1b095f56d06dcd73f9ecc5de25d7a5489b348a38e5e933338b1e6be9",
+        "sample_id": "sample-d27116261eb8ec576e7658277b4bcb155fc277719831f3c83079cb7d678fc388",
+        "seed": 42,
+        "semantic_group": "multi.paper_create_exam",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-papercreate-c2-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "7eff3f985a937717f4d33c56b47f73a4325b1cb9f63ae87fec48b71eb0881c32",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "5709510bee49461c67c7aa50f5233a4d7fdcabe3413fc66b62f9349f6ea9385c",
+        "sample_id": "sample-d6df15469e8f4f81bb02f258a5d4ffef87f401073bc4e2535305d6fdae2fa575",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-flagship-c1-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "0db698b709836249c582f92aca12b710c3121b8aa2dd49b10be7884b16ada8d9",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "af78ef2b3ba17f306ab10f4e9f5ebfa8719e989388b8770a2c34403761a04014",
+        "sample_id": "sample-d72752e0a7cf5c99e8514f200a100aac7d33336f9285f0c4e2961fba23a26dd0",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-failthendist-c4-net",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "53daca541a0250984cdcb3067b5bdaf0301a74cee942a27cdf2a444c811bd58b",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "ad40886b24742b089440ffc207f46858f662b77dcf2b586802aa7a11748a0a1e",
+        "sample_id": "sample-d7d7bfc26e5ea7d9a45b4a32b4e6f8befa6a3c8905034d72077bddab3f4da3c2",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-failthendist-c3-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "c17c5aec724841004ae10091744c2b87bef062e900a513dec29eb9cf4942332b",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "30d41511cdc61091c1395603293e6b587b0ec485d18113a05cae7bf6902bffe9",
+        "sample_id": "sample-d8dd9a3e6e4238fd95775a21a898e47594575a8b48ee36e1b97b0d1ab0c9a646",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-failthendist-c2-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "4816df8a45868ec48fbae21ef2400bc0536e2cf3e3269bdaf76f2a4ea986bedf",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "2d33a01face587e6af207716c34d90301c182a50e8ef3c4dd1b6efa1a84043b4",
+        "sample_id": "sample-e9f9e6b8179c5498fd448e6c4d8a05ca64cef38ca43b63deee876e185f2ea3f3",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-prereqpath-c4-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "04d1f06671f58da7ece52885133a37e3e88b4e05f447d257906041dc997a0554",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.prerequisite_path",
+        "query_hash": "e737fbba57f3ca23aa238ad0926223ab40fac1f259490f92b6280a2fc8dcbf67",
+        "sample_id": "sample-f3dcd8a73132ccfaf1ef4de32e816d3f171274631da84897a177b01c3d7119db",
+        "seed": 42,
+        "semantic_group": "multi.prerequisite_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-prereqpath-c3-ds",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "0506f7aa6a8b3f72029c3a8e395c7874f0fafd549b69a510942b7bfd5664e0fe",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.student_diagnosis_path",
+        "query_hash": "02004708ac7cb4719562e18ebb3ffcab6aa62289f4be52153f09cebf1b535f47",
+        "sample_id": "sample-f3fb1599824497653279c979d[REDACTED]b737fff68e401d833aef8bae2a93",
+        "seed": 42,
+        "semantic_group": "multi.student_diagnosis_path",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-studentpath-c1-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "01033b9ce240e9f5d024c7cac9b7c2a4f59ab115c89f8aa513385f719d65d231",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.failure_count_distribution",
+        "query_hash": "4afa52c55e7fc61dc7f8b3aa5ac28993c9a2d3490803949e8e6186b1e06d0d38",
+        "sample_id": "sample-f4dc3925c2ce4bb737dbd0ff3df91cf902604a846078b3da060df2a3a52c3eaf",
+        "seed": 42,
+        "semantic_group": "multi.failure_count_distribution",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-failthendist-c4-py",
+        "version": "seed-42.tasks-v2"
+      },
+      {
+        "content_hash": "cb2748cfcec57ec1ec4c07b3892b03466649d6e5ddee5e8dc8a4d68c065aee24",
+        "deterministic": true,
+        "generator": "edu_agent.eval.tasks_derived.build_derived_tasks",
+        "intent_template_family": "multi.flagship_remediation",
+        "query_hash": "da593299ec4792c3940541384d6987a880b2712a5907d57acd84f715bd9b3aaa",
+        "sample_id": "sample-f5ecab483131482d29556cf25a87fcdd10e752ebc06affafb5c6c3d05ca20800",
+        "seed": 42,
+        "semantic_group": "multi.flagship_remediation",
+        "source": "edu_agent.synthetic",
+        "split": "train",
+        "task_id": "d-flagship-c4-net",
+        "version": "seed-42.tasks-v2"
+      }
+    ],
+    "schema_version": "edu-agent.eval-lineage.v1",
+    "sources": [
+      "edu_agent.synthetic"
+    ],
+    "split_counts": {
+      "dev": 12,
+      "test": 6,
+      "train": 55
+    },
+    "template_families": {
+      "irrelevance.concept_explanation": [
+        "dev"
+      ],
+      "irrelevance.greeting": [
+        "dev"
+      ],
+      "irrelevance.out_of_scope": [
+        "dev"
+      ],
+      "irrelevance.thanks": [
+        "dev"
+      ],
+      "multi.class_weakness_practice": [
+        "train"
+      ],
+      "multi.failure_count_distribution": [
+        "train"
+      ],
+      "multi.flagship_remediation": [
+        "train"
+      ],
+      "multi.paper_create_exam": [
+        "train"
+      ],
+      "multi.prerequisite_path": [
+        "train"
+      ],
+      "multi.student_diagnosis_path": [
+        "train"
+      ],
+      "parallel.score_distributions": [
+        "dev"
+      ],
+      "relevance.class_weakness": [
+        "train"
+      ],
+      "relevance.exam_overview": [
+        "dev"
+      ],
+      "relevance.practice_search": [
+        "dev"
+      ],
+      "single.class_roster": [
+        "dev"
+      ],
+      "single.code_execution": [
+        "dev"
+      ],
+      "single.exam_list": [
+        "dev"
+      ],
+      "single.practice_search": [
+        "dev"
+      ],
+      "single.score_distribution": [
+        "dev"
+      ],
+      "test.compare_class_sizes": [
+        "test"
+      ],
+      "test.exam_top_performer": [
+        "test"
+      ],
+      "test.knowledge_neighbors": [
+        "test"
+      ],
+      "test.knowledge_skill_catalog": [
+        "test"
+      ],
+      "test.student_course_progress": [
+        "test"
+      ],
+      "test.student_exam_history": [
+        "test"
+      ]
+    },
+    "versions": [
+      "seed-314.test-v1",
+      "seed-42.tasks-v2"
+    ]
+  },
+  "manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+  "passed": true,
+  "sample_count": 73,
+  "schema_version": "edu-agent.eval-lineage.v1",
+  "split_counts": {
+    "dev": 12,
+    "test": 6,
+    "train": 55
+  },
+  "template_families": {
+    "irrelevance.concept_explanation": [
+      "dev"
+    ],
+    "irrelevance.greeting": [
+      "dev"
+    ],
+    "irrelevance.out_of_scope": [
+      "dev"
+    ],
+    "irrelevance.thanks": [
+      "dev"
+    ],
+    "multi.class_weakness_practice": [
+      "train"
+    ],
+    "multi.failure_count_distribution": [
+      "train"
+    ],
+    "multi.flagship_remediation": [
+      "train"
+    ],
+    "multi.paper_create_exam": [
+      "train"
+    ],
+    "multi.prerequisite_path": [
+      "train"
+    ],
+    "multi.student_diagnosis_path": [
+      "train"
+    ],
+    "parallel.score_distributions": [
+      "dev"
+    ],
+    "relevance.class_weakness": [
+      "train"
+    ],
+    "relevance.exam_overview": [
+      "dev"
+    ],
+    "relevance.practice_search": [
+      "dev"
+    ],
+    "single.class_roster": [
+      "dev"
+    ],
+    "single.code_execution": [
+      "dev"
+    ],
+    "single.exam_list": [
+      "dev"
+    ],
+    "single.practice_search": [
+      "dev"
+    ],
+    "single.score_distribution": [
+      "dev"
+    ],
+    "test.compare_class_sizes": [
+      "test"
+    ],
+    "test.exam_top_performer": [
+      "test"
+    ],
+    "test.knowledge_neighbors": [
+      "test"
+    ],
+    "test.knowledge_skill_catalog": [
+      "test"
+    ],
+    "test.student_course_progress": [
+      "test"
+    ],
+    "test.student_exam_history": [
+      "test"
+    ]
+  }
+}

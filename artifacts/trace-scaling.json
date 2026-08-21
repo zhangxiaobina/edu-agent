@@ -4,32 +4,64 @@
     "complete": true,
     "no_page_times_full_projection": true
   },
-  "commit": "not_available",
+  "commit": "8c645099ce27b9a3f00c5ea755ab3108c8f67dad",
   "config": {
     "event_count": 10000,
+    "input_hashes": {
+      "edu_agent/observability/trace.py": "84c423ea3e8e945d3e9a75de95acc3f46643d38720976511bda09370b8fb0fc2",
+      "edu_agent/state/trace_index.py": "0cb9795566f0a206cfb3442dff0c8e7733930873a8cee4739ebe178c7a1f52f2",
+      "pyproject.toml": "79f0ecbba840c2c75725fb3fbcba030357fbfa3292fcbfd445467ba898640359",
+      "scripts/benchmark_trace_scaling.py": "dd24991808678e2f909206198e47bc81517bcb92f52b1ccc41a1f6141f466ef9",
+      "uv.lock": "532efde753958567081d3a4957302e3b2695cd69c0f7fbe97db27c9a42b3a65c"
+    },
+    "model": {
+      "mode": "offline_runtime_benchmark",
+      "name": "none"
+    },
     "page_size": 100,
     "seed": 42
   },
-  "config_hash": "3e1efb906014cd88a1d7b481fe51890e56ddc7121a9e803bfe1296b4409eb50b",
+  "config_hash": "1f5ccacfeb68a5b695a2f7c76af5c37ce9e3a4381a20cfdcd50c3c32cc4a1bbc",
   "environment": {
-    "platform": "macOS-26.5.2-arm64-arm-64bit",
-    "python": "3.12.13"
+    "architecture": "arm64",
+    "os": "Darwin",
+    "os_release": "25.5.0",
+    "python": "3.12.13",
+    "python_implementation": "CPython",
+    "sqlite": "3.50.4"
   },
-  "generated_at": "2026-08-18T03:01:58.008734+00:00",
+  "evidence_mode": "development",
+  "generated_at": "2026-08-21T14:49:27.151447+00:00",
+  "git": {
+    "available": true,
+    "dirty": true
+  },
   "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
   "metrics": {
     "digest": "3d8820b4646b700465464c2521f5db647f2c1215817fdee0aa240ac3517f891d",
-    "elapsed_seconds": 0.874516,
-    "events_per_second": 11436.039,
+    "elapsed_seconds": 0.788119,
+    "events_per_second": 12689.701,
     "exported_events": 10001,
     "indexed_events": 10000,
     "max_rows_loaded_per_page": 101,
     "pages": 101,
-    "peak_memory_bytes": 385970,
+    "peak_memory_bytes": 386034,
     "projected_events": 10001,
     "rows_loaded": 10101,
     "sql_queries": 203
   },
-  "schema_version": "edu-agent.trace-scaling.v1",
+  "model": {
+    "mode": "offline_runtime_benchmark",
+    "name": "none"
+  },
+  "provenance_gate": {
+    "reasons": [
+      "git_worktree_dirty"
+    ],
+    "required": false,
+    "status": "not_enforced"
+  },
+  "provenance_schema_version": "edu-agent.eval-provenance.v1",
+  "schema_version": "edu-agent.trace-scaling.v2",
   "seed": 42
 }

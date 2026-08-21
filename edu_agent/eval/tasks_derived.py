@@ -1,25 +1,21 @@
-"""DPO 用「派生」多步任务集：把 tasks.py 的 6 个 multi_step 模板参数化，铺满 seed-42
-合成库现有的 8 个 (班,课) 锚点，给 dump_trajectories 提供更多真实多步轨迹来构造偏好对。
+"""DPO Train 派生集：把六个 multi-step 意图族铺到 seed-42 合成锚点。
 
-与基准 19 题严格隔离：
-- 默认评测 ``build_tasks(conn)`` 不含这些（基准集冻结，用于 before/after 对照）。
-- 仅 ``build_tasks(conn, include_derived=True)`` 或本模块 ``build_derived_tasks(conn)`` 返回。
+加载路径与冻结的 19 题分开，但 lineage 不声称它们语义隔离：六个原始 multi-step
+任务与这里的参数化变体共享意图模板族，因此全部明确归入 Train。Dev/Test 不会复用这些族。
 
 每条派生任务对 seed-42 可复现：所有锚点（exam_id / 薄弱学生 / 班级薄弱知识点 / 知识图谱
 先修链）在构造时从库实时解析，故任务集对该库自洽。派生任务一律用静态 oracle（``oracle="auto"``，
 回放 expected_tools），不依赖只认 三班/Python 的 demo_policy，因此任意锚点离线 oracle 都可
 满分——证明 harness 同样能正确评判它们。
 
-注意：8 个锚点里含 (3班, Python) / (3班, 数据结构)，与基准里的 6 个 multi_step 原题同锚点、
-query 近似。派生集刻意做成「完整网格」（自含、覆盖全部 8 锚点），dump DPO 数据时取派生集即可
-全覆盖；如同时 dump 基准原题，class3 处会有少量重复 query，由下游 build_dpo_dataset 去重即可。
+8 个锚点里含与原题相同的班级/课程，部分 query 也近似；这正是它们不能进入 Dev/Test 的原因。
 """
 from __future__ import annotations
 
 import sqlite3
 
 from ..tools.analysis_tools import analyze_class_errors
-from .tasks import ANY, EvalTask, ExpectedCall, SuccessSpec
+from .tasks import ANY, EvalTask, ExpectedCall, SuccessSpec, attach_lineage
 
 # 课程 id → 任务 id 用的短代号
 _COURSE_CODE = {1: "py", 2: "ds", 3: "net"}
@@ -181,12 +177,12 @@ def _t_student_diagnose_path(cl, co, names, eid, sid, weak_kp, _conn):
 
 # 工厂与其对锚点的依赖：sid 缺失 → 跳过依赖薄弱学生的两个模板；weak_kp 缺失 → 跳过依赖薄弱点的两个。
 _TEMPLATES = [
-    (_t_flagship,             ("sid", "kp")),
-    (_t_fail_then_dist,       ()),
-    (_t_classweak_practice,   ("kp",)),
-    (_t_prereq_path,          ()),
-    (_t_paper_create_exam,    ()),
-    (_t_student_diagnose_path, ("sid",)),
+    (_t_flagship, ("sid", "kp"), "multi.flagship_remediation"),
+    (_t_fail_then_dist, (), "multi.failure_count_distribution"),
+    (_t_classweak_practice, ("kp",), "multi.class_weakness_practice"),
+    (_t_prereq_path, (), "multi.prerequisite_path"),
+    (_t_paper_create_exam, (), "multi.paper_create_exam"),
+    (_t_student_diagnose_path, ("sid",), "multi.student_diagnosis_path"),
 ]
 
 
@@ -207,10 +203,17 @@ def build_derived_tasks(conn: sqlite3.Connection) -> list[EvalTask]:
         sid = _a_failed_student(conn, eid)
         weak_kp = _top_error_kp(conn, eid)
         names = _names(conn, cl, co)
-        for factory, needs in _TEMPLATES:
+        for factory, needs, family in _TEMPLATES:
             if "sid" in needs and sid is None:
                 continue
             if "kp" in needs and weak_kp is None:
                 continue
-            tasks.append(factory(cl, co, names, eid, sid, weak_kp, conn))
+            task = factory(cl, co, names, eid, sid, weak_kp, conn)
+            tasks.append(attach_lineage(
+                task,
+                split="train",
+                family=family,
+                semantic_group=family,
+                generator="edu_agent.eval.tasks_derived.build_derived_tasks",
+            ))
     return tasks

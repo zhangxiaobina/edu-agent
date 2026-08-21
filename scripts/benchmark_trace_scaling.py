@@ -4,32 +4,32 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import platform
-import subprocess
 import tempfile
 import time
 import tracemalloc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from edu_agent.eval.provenance import (
+    EVIDENCE_MODES,
+    build_provenance,
+    credential_literals,
+    file_hash,
+    provenance_gate_passed,
+    sanitize_artifact,
+)
 from edu_agent.observability import TraceRepository
 from edu_agent.runtime.models import RunContext
 from edu_agent.state import StateStore
 
 
 SEED = 42
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _commit() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "not_available"
-
-
-def benchmark(*, event_count: int, page_size: int) -> dict:
+def benchmark(
+    *, event_count: int, page_size: int, evidence_mode: str = "development"
+) -> dict:
     if event_count <= 0 or page_size <= 0 or page_size > 500:
         raise ValueError("event_count must be positive and page_size must be 1..500")
     with tempfile.TemporaryDirectory(prefix="edu-agent-trace-benchmark-") as directory:
@@ -97,19 +97,35 @@ def benchmark(*, event_count: int, page_size: int) -> dict:
         _, peak_bytes = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         elapsed = time.perf_counter() - started
-    config = {"event_count": event_count, "page_size": page_size, "seed": SEED}
-    return {
-        "schema_version": "edu-agent.trace-scaling.v1",
-        "generated_at": datetime.now(UTC).isoformat(),
-        "commit": _commit(),
-        "environment": {
-            "python": platform.python_version(),
-            "platform": platform.platform(),
-        },
+    input_hashes = {
+        relative: file_hash(PROJECT_ROOT / relative)
+        for relative in (
+            "pyproject.toml",
+            "uv.lock",
+            "scripts/benchmark_trace_scaling.py",
+            "edu_agent/observability/trace.py",
+            "edu_agent/state/trace_index.py",
+        )
+    }
+    config = {
+        "event_count": event_count,
+        "page_size": page_size,
         "seed": SEED,
-        "config_hash": hashlib.sha256(
-            json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        "model": {"name": "none", "mode": "offline_runtime_benchmark"},
+        "input_hashes": input_hashes,
+    }
+    provenance = build_provenance(
+        repo_root=PROJECT_ROOT,
+        config=config,
+        seed=SEED,
+        model_name="none",
+        model_mode="offline_runtime_benchmark",
+        evidence_mode=evidence_mode,
+    )
+    report = {
+        "schema_version": "edu-agent.trace-scaling.v2",
+        "generated_at": datetime.now(UTC).isoformat(),
+        **provenance,
         "config": config,
         "metrics": {
             "indexed_events": event_count,
@@ -134,6 +150,7 @@ def benchmark(*, event_count: int, page_size: int) -> dict:
             "It is not a long-term latency or production-capacity claim."
         ),
     }
+    return sanitize_artifact(report, secrets=credential_literals())
 
 
 def main() -> int:
@@ -141,15 +158,26 @@ def main() -> int:
     parser.add_argument("--events", type=int, default=10_000)
     parser.add_argument("--page-size", type=int, default=100)
     parser.add_argument("--output")
+    parser.add_argument("--evidence-mode", choices=EVIDENCE_MODES, default="development")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
-    report = benchmark(event_count=args.events, page_size=args.page_size)
+    report = benchmark(
+        event_count=args.events,
+        page_size=args.page_size,
+        evidence_mode=args.evidence_mode,
+    )
     encoded = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(encoded, encoding="utf-8")
-    print(encoded, end="")
-    return 0 if all(report["assertions"].values()) else 1
+    if not args.quiet:
+        print(encoded, end="")
+    elif all(report["assertions"].values()) and provenance_gate_passed(report):
+        print("trace scaling evaluation passed")
+    else:
+        print("trace scaling evaluation failed")
+    return 0 if all(report["assertions"].values()) and provenance_gate_passed(report) else 1
 
 
 if __name__ == "__main__":

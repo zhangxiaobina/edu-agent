@@ -1,6 +1,6 @@
 """评测框架测试：
 
-1. 任务集结构合法（id 唯一、类别合法、期望工具都在注册表里）。
+1. 任务集结构合法（lineage/id 唯一、类别合法、期望工具都在注册表里）。
 2. 用离线 oracle 跑全集 → 轨迹成功率/参数准确率/relevance 判对率 == 100%
    （证明 harness 把「正确行为」判为成功）。
 3. 指标能区分对错（喂入残缺/越界轨迹 → 相应指标下降；证明不是恒为满分）。
@@ -47,6 +47,9 @@ def test_tasks_wellformed():
     for t in tasks:
         assert t.category in CATEGORIES
         assert t.query.strip()
+        assert t.lineage is not None
+        assert t.sample_id and t.source and t.version and t.split
+        assert t.intent_template_family and t.semantic_group
         for ec in t.expected_tools:
             names = ec.tool if isinstance(ec.tool, list) else [ec.tool]
             assert set(names) <= valid_tools, f"{t.id} 引用了未知工具 {names}"
@@ -75,7 +78,7 @@ def test_oracle_full_run_is_correct():
     assert set(report["by_category"]) == set(CATEGORIES)
 
 
-# ----------------- 2b. DPO 派生集：与基准隔离 + oracle 可满分 ----------------- #
+# ----------------- 2b. DPO 派生集：加载隔离、lineage 同属 Train ----------------- #
 def test_derived_tasks_isolated_and_wellformed():
     base = build_tasks(_CONN)
     derived = build_derived_tasks(_CONN)
@@ -85,12 +88,18 @@ def test_derived_tasks_isolated_and_wellformed():
     assert len(base) == 19, "基准集应保持 19 题不变"
     assert len(with_d) == len(base) + len(derived)
 
-    # 派生集：8 锚点 × 6 模板 = 48，全 multi_step，id 唯一且与基准不撞
+    # 派生集：8 锚点 × 6 模板 = 48，全 multi_step，id 唯一且与基准不撞。
+    # 它们与六个基准 multi_step 共享模板族，所以不能进入 Dev/Test。
     assert len(derived) == 48
     assert all(t.category == "multi_step" for t in derived)
     dids = [t.id for t in derived]
     assert len(dids) == len(set(dids)), "派生任务 id 必须唯一"
     assert not (set(dids) & {t.id for t in base}), "派生 id 不得与基准撞车"
+    assert {task.split for task in derived} == {"train"}
+    base_multi_families = {
+        task.intent_template_family for task in base if task.category == "multi_step"
+    }
+    assert {task.intent_template_family for task in derived} == base_multi_families
 
     # 引用的工具均合法
     valid_tools = set(registry.tool_names())

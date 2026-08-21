@@ -26,6 +26,12 @@ _BINARY_PATTERNS: dict[DataClass, tuple[re.Pattern[bytes], ...]] = {
         re.compile(rb"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
         re.compile(rb"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)"),
     ),
+    DataClass.PRIVATE_PATH: (
+        re.compile(rb"(?<![A-Za-z0-9:])/(?:Users|home|private|tmp|var/folders)/[^\s\"'<>]*"),
+        re.compile(
+            rb"(?i)\b[A-Z]:\\(?:Users|Documents and Settings|Temp)\\[^\s\"'<>]*"
+        ),
+    ),
 }
 
 
@@ -64,7 +70,7 @@ def _walk_json(value: Any, counts: Counter[DataClass]) -> None:
         counts.update(_scan_bytes(value.encode("utf-8", errors="ignore")))
 
 
-def _sqlite_findings(path: Path) -> list[AuditFinding]:
+def _sqlite_findings(path: Path, location_label: str) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     uri = f"file:{quote(str(path.resolve()))}?mode=ro"
     try:
@@ -91,7 +97,13 @@ def _sqlite_findings(path: Path) -> list[AuditFinding]:
                     f'WHERE "{name}" IS NOT NULL AND CAST("{name}" AS TEXT) != \'\''
                 ).fetchone()
                 if row["count"]:
-                    findings.append(AuditFinding(category.value, f"{path}:{table}.{name}", row["count"]))
+                    findings.append(
+                        AuditFinding(
+                            category.value,
+                            f"{location_label}:{table}.{name}",
+                            row["count"],
+                        )
+                    )
             text_columns = [
                 column["name"]
                 for column in columns
@@ -108,7 +120,11 @@ def _sqlite_findings(path: Path) -> list[AuditFinding]:
                 for category, count in counts.items():
                     if count:
                         findings.append(
-                            AuditFinding(category.value, f"{path}:{table}.{name}:content", count)
+                            AuditFinding(
+                                category.value,
+                                f"{location_label}:{table}.{name}:content",
+                                count,
+                            )
                         )
     except sqlite3.Error:
         # A malformed or non-state SQLite file still receives a raw byte scan.
@@ -137,9 +153,10 @@ def audit_paths(paths: Iterable[str | Path]) -> dict[str, Any]:
     """Scan explicitly supplied paths without mutating or revealing matched values."""
     files = _candidate_files(paths)
     findings: list[AuditFinding] = []
-    for path in files:
+    for index, path in enumerate(files, start=1):
+        location_label = f"file[{index}]"
         if path.suffix in {".db", ".sqlite", ".sqlite3"}:
-            findings.extend(_sqlite_findings(path))
+            findings.extend(_sqlite_findings(path, location_label))
         counts: Counter[DataClass] = Counter()
         try:
             payload = path.read_bytes()
@@ -159,7 +176,7 @@ def audit_paths(paths: Iterable[str | Path]) -> dict[str, Any]:
                 _walk_json(value, counts)
         for category, count in counts.items():
             if count:
-                findings.append(AuditFinding(category.value, str(path), count))
+                findings.append(AuditFinding(category.value, location_label, count))
     totals = Counter()
     for finding in findings:
         totals[finding.classification] += finding.count

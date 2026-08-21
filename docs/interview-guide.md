@@ -13,7 +13,8 @@
 
 第三分钟讲可验证性：Trace Repository 不重写运行时，而是把 runs、plan/evidence、provider、operation、
 scheduler、subagent、sandbox 等现有状态投影成 `RuntimeEvent v1`。CLI/API 在 owner scope 和二次脱敏后
-分页导出。综合评测把 oracle/mock、真实模型和真实代码执行后端分栏，失败保留脱敏轨迹。
+分页导出。73 条合成评测样本先按模板族分成 Train/Dev/Test 并通过泄漏/确定性门禁；综合评测把
+oracle/mock、真实模型和真实代码执行后端分栏，失败保留带 config hash 与 repeat id 的脱敏轨迹。
 
 ## 五个最难问题与源码证据
 

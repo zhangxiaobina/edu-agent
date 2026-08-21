@@ -2,6 +2,7 @@
 全部锚定 seed-42 可复现合成库，对照 BFCL V4 的能力维度自建。
 
 每个任务声明：
+- lineage         ：稳定 sample id、来源/版本、split、模板族和等价语义组
 - query           ：用户自然语言（中文，交给被测引擎）
 - expected_tools  ：期望的工具调用序列（ExpectedCall），用于工具选择 / 参数（AST 式）打分
 - success         ：轨迹成功判据（必需工具 + 顺序 + 答案关键词 / 或 forbid_tools）
@@ -15,6 +16,8 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+
+from .lineage import SampleLineage, make_sample_lineage
 
 # 参数匹配哨兵：依赖前序工具结果的动态参数，只要存在（任意值）即算命中。
 ANY = object()
@@ -60,6 +63,92 @@ class EvalTask:
     parallel: bool = False                              # oracle 是否在一步内并行发起
     oracle: str = "auto"                                # "demo"=复用 demo_policy 动态决策
     notes: str = ""
+    lineage: SampleLineage | None = None
+
+    @property
+    def sample_id(self) -> str | None:
+        return self.lineage.sample_id if self.lineage else None
+
+    @property
+    def source(self) -> str | None:
+        return self.lineage.source if self.lineage else None
+
+    @property
+    def version(self) -> str | None:
+        return self.lineage.version if self.lineage else None
+
+    @property
+    def split(self) -> str | None:
+        return self.lineage.split if self.lineage else None
+
+    @property
+    def intent_template_family(self) -> str | None:
+        return self.lineage.intent_template_family if self.lineage else None
+
+    @property
+    def semantic_group(self) -> str | None:
+        return self.lineage.semantic_group if self.lineage else None
+
+
+# The frozen 19-task set predates R0 lineage.  Its six multi-step families are
+# also used by the derived DPO corpus, so both forms belong to Train.  The
+# remaining historical tasks are Dev evidence; none is relabelled as unseen
+# Test data after having already been used for prompt experiments.
+_BASE_LINEAGE: dict[str, tuple[str, str, str]] = {
+    "single-list-exams": ("dev", "single.exam_list", "exam_list"),
+    "single-score-dist": ("dev", "single.score_distribution", "score_distribution"),
+    "single-roster": ("dev", "single.class_roster", "class_roster_lookup"),
+    "single-search-questions": ("dev", "single.practice_search", "practice_search"),
+    "single-run-code": ("dev", "single.code_execution", "code_execution"),
+    "multi-flagship": ("train", "multi.flagship_remediation", "multi.flagship_remediation"),
+    "multi-fail-then-dist": (
+        "train", "multi.failure_count_distribution", "multi.failure_count_distribution"
+    ),
+    "multi-classweak-practice": (
+        "train", "multi.class_weakness_practice", "multi.class_weakness_practice"
+    ),
+    "multi-prereq-path": ("train", "multi.prerequisite_path", "multi.prerequisite_path"),
+    "multi-paper-create-exam": (
+        "train", "multi.paper_create_exam", "multi.paper_create_exam"
+    ),
+    "multi-student-diagnose-path": (
+        "train", "multi.student_diagnosis_path", "multi.student_diagnosis_path"
+    ),
+    "parallel-two-distributions": (
+        "dev", "parallel.score_distributions", "score_distribution"
+    ),
+    "rel-implicit-exam": ("dev", "relevance.exam_overview", "exam_overview"),
+    "rel-search-tree": ("dev", "relevance.practice_search", "practice_search"),
+    # This is a direct sub-intent of the Train class-weakness chain.  Keeping it
+    # in Train is the conservative choice even though the wording is different.
+    "rel-class-weak": ("train", "relevance.class_weakness", "class_weakness"),
+    "irr-greeting": ("dev", "irrelevance.greeting", "no_tool_social"),
+    "irr-thanks": ("dev", "irrelevance.thanks", "no_tool_social"),
+    "irr-concept": ("dev", "irrelevance.concept_explanation", "no_tool_concept"),
+    "irr-out-of-scope": ("dev", "irrelevance.out_of_scope", "no_tool_out_of_scope"),
+}
+
+
+def attach_lineage(
+    task: EvalTask,
+    *,
+    split: str,
+    family: str,
+    semantic_group: str | None = None,
+    version: str = "seed-42.tasks-v2",
+    seed: int = 42,
+    generator: str = "edu_agent.eval.tasks.build_tasks",
+) -> EvalTask:
+    task.lineage = make_sample_lineage(
+        task,
+        split=split,
+        intent_template_family=family,
+        semantic_group=semantic_group,
+        version=version,
+        seed=seed,
+        generator=generator,
+    )
+    return task
 
 
 # --------------------------------------------------------------------------- #
@@ -274,6 +363,10 @@ def build_tasks(conn: sqlite3.Connection, include_derived: bool = False) -> list
                  success=SuccessSpec(forbid_tools=True), should_call_tool=False,
                  notes="超出教学教务域，应礼貌说明无法处理，不调工具。"),
     ]
+
+    for task in tasks:
+        task_split, family, semantic_group = _BASE_LINEAGE[task.id]
+        attach_lineage(task, split=task_split, family=family, semantic_group=semantic_group)
 
     if include_derived:
         from .tasks_derived import build_derived_tasks

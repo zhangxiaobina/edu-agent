@@ -16,19 +16,29 @@ HTTP / Scheduler / Demo
 
 数据红线：仓库只使用固定 seed 的合成教学数据和公开材料；真实学生数据、业务代码、API key、cookie、审批秘密不进入仓库、trace 或 Artifact preview。代码执行默认关闭，只有同一真实后端完成健康、能力与 E2E attestation 后才暴露 `run_code`。
 
-一键离线验收（包含 Stage 7 回归；耗时取决于本机性能与 Docker 后端状态）：
+唯一完整验收入口如下。机器只需预先安装 `uv`；脚本会先按 `.python-version` 和 `uv.lock` 幂等准备
+Python/依赖（首次运行可能下载），再以离线模式执行 Stage 8、前序回归和一次全量测试：
 
 ```bash
 zsh scripts/accept_stage8.sh
 ```
 
-该命令执行数据边界审计、专项/全量测试、10k Trace 基准、核心 Demo 和 Stage 7 回归，并生成离线综合评测；结果写入 `artifacts/system-eval.json`，其中 oracle/mock、真实模型和真实代码执行后端分栏。架构与边界见 [`docs/architecture.md`](docs/architecture.md)，现场演示见 [`docs/demo-script.md`](docs/demo-script.md)。
+该命令执行 Train/Dev/Test lineage 泄漏门禁、数据边界审计、专项/全量测试、10k Trace 基准、核心 Demo
+和 Stage 7 回归，并生成 `artifacts/eval-lineage.json` 与离线综合评测。综合报告中的 oracle/mock、真实模型
+和真实代码执行后端严格分栏。运行期数据库、缓存和中间报告位于本次私有临时目录，成功或失败都会有界
+清理；不会读取或覆盖 `edu_agent/data/edu.db`。Docker 后端不可用时报告保持 `sandbox=not_verified`，
+真实模型未运行保持 `not_run`，都不伪装成已验证。架构与边界见 [`docs/architecture.md`](docs/architecture.md)，
+现场演示见 [`docs/demo-script.md`](docs/demo-script.md)。
+
+GitHub Actions 使用单一 Ubuntu / Python 3.12 环境，按 `uv.lock` frozen 安装后离线运行 ruff、全量
+pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计。workflow 显式清空模型/平台凭据，不使用预建 `.venv`、
+本机数据库或 Docker；上传证据前要求 candidate provenance 和 artifact 边界审计通过。
 
 ## 这是什么 / 为什么
 
 工具的入参与语义对照一套真实 Spring Boot 教学平台的 Controller、知识图谱、AI 出题和代码执行接口抽取；仓库只保留重建后的工具契约和合成数据，不包含真实平台源码或数据。
 
-## 工具集（~15 个，五类，mirror 真实 Controller）
+## 工具集（16 个，五类，mirror 真实 Controller）
 
 | 类别 | 工具 | mirror 的真实端点（语义来源） |
 |---|---|---|
@@ -47,7 +57,7 @@ zsh scripts/accept_stage8.sh
 | | `assign_homework` 布置作业 | `POST /teacher/v1/homeworks` |
 | AI·执行 | `generate_questions` AI出题 | `POST /teacher/v1/ai-questions/generate` |
 | | `recommend_study_path` 学习路径 | 知识图谱 shortestPath（cost=Σ(1−weight)） |
-| | `run_code` 真隔离代码执行 | `POST /coding/execute/{lang}`（Docker Provider 已验收；默认关闭） |
+| | `run_code` 隔离代码执行 | `POST /coding/execute/{lang}`（Provider 与离线契约已测；当前真实 Docker 状态见当次报告） |
 | 条件式知识检索 | `retrieve_course_materials` 版本化课件检索 | 仅知识库启用且存在时暴露；tenant/course 双层 ACL |
 
 ## 典型 demo 任务（多工具多步）
@@ -60,7 +70,7 @@ zsh scripts/accept_stage8.sh
 ```
 合成数据层 (零依赖, stdlib)        工具层               编排层                引擎层 (可替换)
 ┌──────────────────────┐   ┌──────────────┐   ┌──────────────┐   ┌────────────────────┐
-│ SQLite 关系库         │←──│ 15 个工具      │←──│ LangGraph     │──▶│ vLLM W4A16 Qwen3-14B │
+│ SQLite 关系库         │←──│ 16 个工具      │←──│ LangGraph     │──▶│ vLLM W4A16 Qwen3-14B │
 │ 内存知识图谱 (Dijkstra)│   │ + OpenAI schema│   │ ReAct/supervisor│   │ 或 通义千问/任意 API   │
 └──────────────────────┘   └──────────────┘   └──────────────┘   └────────────────────┘
 ```
@@ -123,7 +133,7 @@ edu-agent/
 │   │   ├── generate.py           固定种子、字节级可复现地生成合成库
 │   │   ├── db.py                 连接 / 查询封装
 │   │   └── kg.py                 内存知识图谱（mirror Neo4j 设计 + 纯 stdlib 加权最短路）
-│   ├── tools/                    工具层（~15 个工具，五类）
+│   ├── tools/                    工具层（16 个工具，五类）
 │   │   ├── schemas.py            OpenAI function 格式工具定义（入参对照真实 Controller）
 │   │   ├── {query,analysis,kg,ops,ai}_tools.py   各类工具实现 fn(conn, **params)->dict
 │   │   └── registry.py           dispatch + openai_tools 导出
@@ -143,7 +153,8 @@ edu-agent/
 │   │   ├── client.py            MCPToolProvider —— 与 registry 同契约、经 MCP 协议调用
 │   │   └── __init__.py          get_tool_provider()（EDU_AGENT_TOOLSOURCE=local/mcp）
 │   └── eval/                     引擎无关 agentic 评测
-│       ├── tasks.py              5 类 19 任务（锚定 seed-42 库）
+│       ├── tasks*.py             Train/Dev 历史集 + 独立 Test 意图（73 条合成样本）
+│       ├── lineage.py            稳定 id / provenance / 模板族 split 泄漏门禁
 │       ├── metrics.py            工具选择 F1 / 参数准确率 / 轨迹成功率 / relevance
 │       ├── oracle.py             离线确定性回放（验证 harness 本身）
 │       └── harness.py            run_eval(tasks, make_engine) 运行器
@@ -169,15 +180,15 @@ edu-agent/
 
 ## 快速开始
 
-项目统一使用 **uv + Python 3.12**。`.python-version` 固定 Python 3.12 系列，
-`.venv/` 由 uv 在项目根目录创建，依赖版本由 `uv.lock` 锁定；不要使用系统 Python
+项目统一使用 **uv + Python 3.12**。先按
+[`uv` 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/)安装 `uv`；
+`.python-version` 固定 Python 3.12 系列，`.venv/` 由准备脚本在项目根目录创建，依赖版本由 `uv.lock` 锁定；不要使用系统 Python
 或手工执行 `pip install`。`pyproject.toml` 中的 `requires-python >= 3.10` 是发行包的
 兼容范围，不代表本项目日常开发应改用系统 Python 3.10/3.11。
 
 ```bash
-# 1. 首次准备环境：安装 Python 3.12，并同步核心、测试和 MCP 依赖
-uv python install 3.12
-uv sync --frozen --extra dev --extra mcp
+# 1. 显式、幂等准备：检查 lock 漂移，按需安装 Python 3.12，再 frozen sync
+zsh scripts/prepare_acceptance.sh
 
 # 2. 确认当前项目解释器
 uv run --frozen python --version
@@ -188,6 +199,10 @@ uv run --frozen python -m edu_agent.data.generate
 # 4. 运行完整测试
 uv run --frozen python -m pytest tests/ -q
 ```
+
+完整门禁会自动执行同一准备步骤，无需先运行上面的命令。只检查调用图和将执行的命令时可运行
+`zsh scripts/accept_stage8.sh --dry-run`；dry-run 不执行 Docker，也不会将其标为已验证。缺少 `uv`、
+Python 不兼容或 `uv.lock` 漂移时，准备脚本会在业务测试前停止并给出修复命令。
 
 日常开发不需要手动 `source .venv/bin/activate`，直接使用 `uv run --frozen ...`：
 
@@ -222,11 +237,13 @@ uv run --frozen python scripts/code_sandbox_demo.py --provider docker --e2e --re
 # 工具经 MCP 协议被 Agent 调用（起 MCP server 子进程，stdio 传输；同样不需 key、不联网）
 uv run --frozen python scripts/mcp_demo.py
 
-# agentic 评测（离线 oracle 验证框架；接真引擎用同一 harness 出真数）
-uv run --frozen python scripts/eval_demo.py                  # 离线（无 key）
-uv run --frozen python scripts/eval_demo.py --engine openai  # 接真引擎，配下方环境变量
+# agentic 评测：两次生成完整 corpus preflight 后只消费独立 Test
+uv run --frozen --offline python scripts/eval_demo.py --engine oracle --repeats 2 \
+  --output artifacts/oracle-harness-eval.json
+uv run --frozen python scripts/eval_demo.py --engine openai --repeats 3 \
+  --output artifacts/real-model-eval.json
 
-# PlanGraph 严格消融；oracle 只证明 harness，--engine openai 才是真模型数据
+# 历史 Train/Dev PlanGraph 诊断，不是独立 Test 证据
 uv run --frozen python scripts/eval_plan_ablation.py --engine oracle
 uv run --frozen python scripts/eval_plan_ablation.py --engine openai
 
@@ -240,17 +257,18 @@ export EDU_AGENT_MODEL=...      # 如 qwen-plus / Qwen/Qwen3-14B
 
 ## agentic 评测（口径对齐 BFCL V4）
 
-自建一套**引擎无关**的多工具评测（`edu_agent/eval/`，方法学见 [`docs/eval.md`](docs/eval.md)）：
-5 类共 19 个任务（`single` / `multi_step` / `parallel` / `relevance` / `irrelevance`），全部
-锚定 seed-42 可复现合成库。指标：**轨迹成功率**（multi-turn 式整段判定）、**工具选择 F1**、
-**参数准确率**（AST 式 possible-answer 匹配）、**relevance 判对率**。
+自建一套**引擎无关**的多工具评测（`edu_agent/eval/`，方法学见 [`docs/eval.md`](docs/eval.md)）。
+73 条合成样本在模板族定义阶段分为 Train 55 / Dev 12 / Test 6；Test 使用独立 seed、实体分布和新意图族，
+不是随机行切分。门禁检查稳定 id、来源/版本、跨 split 重复、模板族/等价语义重叠、敏感字段和两次生成
+一致性。指标包括轨迹成功率、工具选择 F1、参数准确率和 relevance 判对率。
 
 离线用确定性 oracle 回放期望轨迹**验证框架本身**（任务加载 / 工具执行回灌 / 指标计算正确
 且能区分对错，见 `tests/test_eval.py`）；**真实模型能力须接真引擎后用同一 `run_eval` 跑出。**
 
-PlanGraph 消融还报告步骤完成率、提前结束率和平均模型/工具调用数。不要从 README 读取“当前
-指标”；请运行 `scripts/eval_plan_ablation.py` 或 `scripts/eval_system.py` 获取带时间、环境、模型、
-seed 与 config hash 的结果。oracle 只验证 harness；未运行的真实模型档会明确标为 `not_run`。
+历史 PlanGraph 消融还报告步骤完成率、提前结束率和平均模型/工具调用数，但只消费 Train/Dev。不要从
+README 读取“当前指标”；正式模型结果由 `eval_demo.py --engine openai --split test --output ...` 保存，包含
+lineage/config hash、重复运行、均值/方差和脱敏失败轨迹。oracle 只验证 harness；未运行的真实模型档明确
+标为 `not_run`。
 
 ## 与算法仓的连接
 
@@ -258,14 +276,14 @@ seed 与 config hash 的结果。oracle 只验证 harness；未运行的真实�
 - **本仓 (应用仓)**：把那个量化模型当工具调用大脑，搭成撑得住的多工具 Agent。
 - 两仓互相印证：一层证明"会微调/评测/压缩部署一个工具调用模型"，一层证明"会把它搭成真实场景的多工具应用"。
 
-## 主要结论（定性 · 真实跑出 · 可复现）
+## 历史实验记录（定性 · 非当前门禁证据）
 
-> 用 `scripts/eval_demo.py --engine openai` 接 **算法仓自微调 + W4A16 量化的 Qwen3-14B**（单卡 vLLM 端点）跑出；
-> 19 任务锚定 seed-42 合成库，温度 0。本节只给定性结论，复现后可在本地拿到逐项精确数字（见 `docs/eval.md`）。
+> 下述观察来自 lineage 建立前的 seed-42 19-task 实验，没有可作为当前候选版证据的独立 Test artifact。
+> 它们只保留为研究背景；当前仓库真实模型状态仍是 `not_run`，不能据此声称当前模型能力已验证。
 
-**① 三档 agentic 对照（base 未微调 / 微调 fp16 / 微调+W4A16，同机同套 19 任务）**
+**① 历史三档 agentic 对照（base / fp16 / W4A16，同机同套 19 个 Train/Dev 任务）**
 
-一个**反直觉但可复现**的结论：
+当时观察到：
 
 - **base（未微调）多步推理本就强**，旗舰多步任务完成度最高；
 - **窄域单轮 FC-SFT 提升了工具选择与 relevance 判断，却以多步链式推理为代价**——多步任务成功率明显下降；

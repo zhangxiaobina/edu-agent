@@ -39,8 +39,7 @@ def main():
     ap.add_argument("--tag", required=True,
                     help="档位标识，决定输出文件名，如 base / sft / w4a16")
     ap.add_argument("--cats", default="multi_step",
-                    help="逗号分隔的任务类别；默认只跑 multi_step（DPO 目标）。"
-                         "可加 single,relevance 看附带损伤")
+                    help="逗号分隔的 Train 任务类别；默认只跑 multi_step（DPO 目标）")
     ap.add_argument("--include-derived", action="store_true",
                     help="并入 tasks_derived 派生集（6 模板 × 8 锚点 = 48 条），"
                          "DPO 想要更多真实多步轨迹时开启")
@@ -78,14 +77,16 @@ def main():
 
     from edu_agent.engine import get_engine  # 延迟导入，避免无端点时报错
     engine = get_engine()
-    print(f"档位 {args.tag} · 引擎 model={engine.model} · 类别 {cats} · nudges={args.nudges}"
+    print(f"档位 {args.tag} · 引擎 model={engine.model} · split=train · 类别 {cats}"
           f" · 派生集={'on' if args.include_derived else 'off'} · workers={args.workers}\n")
 
     out_path = os.path.join(args.out_dir, f"traj_{args.tag}.jsonl")
     n_ok = 0
     try:
-        tasks = [t for t in build_tasks(conn, include_derived=args.include_derived)
-                 if t.category in cats]
+        tasks = [
+            task for task in build_tasks(conn, include_derived=args.include_derived)
+            if task.split == "train" and task.category in cats
+        ]
         if args.ids:
             subs = [s.strip() for s in args.ids.split(",") if s.strip()]
             tasks = [t for t in tasks if any(s in t.id for s in subs)]
@@ -142,6 +143,7 @@ def main():
             n_ok += int(success)
             row = {
                 "id": task.id,
+                "lineage": task.lineage.to_dict(),
                 "category": task.category,
                 "query": task.query,
                 "success": success,

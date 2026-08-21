@@ -1,7 +1,7 @@
-"""快速子集评测：默认只跑 multi_step（迭代修复早停/幻觉时用），可选带上 single/relevance 看附带损伤。
+"""快速 Train/Dev 子集评测；独立 Test 只由 eval_demo.py 消费。
 
   uv run --frozen python scripts/eval_subset.py
-  uv run --frozen python scripts/eval_subset.py --cats multi_step,single,relevance
+  uv run --frozen python scripts/eval_subset.py --split train --cats multi_step
 """
 import argparse
 import os
@@ -16,9 +16,10 @@ from edu_agent.eval import build_tasks, run_eval  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cats", default="multi_step")
+    ap.add_argument("--split", choices=["train", "dev"], default="dev")
+    ap.add_argument("--cats", default="", help="comma-separated categories; empty selects all")
     args = ap.parse_args()
-    cats = set(args.cats.split(","))
+    cats = {item for item in args.cats.split(",") if item}
 
     db_path = os.path.join(tempfile.gettempdir(), "edu_agent_eval.db")
     generate.build(seed=42, out_path=db_path)
@@ -28,8 +29,13 @@ def main():
     from edu_agent.engine import get_engine
     eng = get_engine()
 
-    tasks = [t for t in build_tasks(conn) if t.category in cats]
-    print(f"model={eng.model} cats={sorted(cats)} n={len(tasks)}")
+    tasks = [
+        task for task in build_tasks(conn)
+        if task.split == args.split and (not cats or task.category in cats)
+    ]
+    if not tasks:
+        raise SystemExit(f"no tasks selected for split={args.split} cats={sorted(cats)}")
+    print(f"model={eng.model} split={args.split} cats={sorted(cats) or ['all']} n={len(tasks)}")
     report = run_eval(tasks, lambda _t: eng, db_conn=conn)
     conn.close()
 

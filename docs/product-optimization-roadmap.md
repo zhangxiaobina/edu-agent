@@ -156,7 +156,7 @@ private-contract/
 | 结束持久化与后台复盘 | `agent/turn_finalizer.py`、`agent/background_review.py` | 主 turn 会落 run/messages/Trace；无统一 finalizer 和自动复盘 | 先统一持久化/usage/cleanup；后台只产 Memory/Skill candidate，主链失败不受影响 | R2/L2 |
 | Memory/Skill 生命周期 | `agent/memory_provider.py`、`tools/skill_usage.py`、`agent/curator.py` | Memory 有 FTS5/scope/冲突/过期；无 Skill 实体和 usage/rollback | 先做人工创建、评测、审批和回滚，再考虑 Curator | L2 |
 | 验证、Artifact 与审计 | `agent/verification_evidence.py`、`tools/tool_result_storage.py`、`agent/trajectory.py` | 教学 Plan/Evidence、scoped Artifact、Trace index 和导出已更完整 | 保持当前设计，只补新事件类型和真实 Provider 故障 E2E | 持续 |
-| CI 与供应链 | `.github/workflows/`、精确依赖约束 | 本地验收较全，但当前目录无 Git 元数据/CI，依赖多为只有下界 | 先建立可追溯 commit、CI、lock 漂移和 secret-free 门禁 | R0 |
+| CI 与供应链 | `.github/workflows/`、精确依赖约束 | 已建立单平台 secret-free CI、真实 Git provenance 和 lock 漂移门禁；本地等价流程已通过，尚未观察托管 GitHub Actions 运行 | 保持凭据清空、冻结安装、离线评测和敏感数据审计门禁 | R0 |
 
 ### 3.1 必须如实描述的现状
 
@@ -452,20 +452,20 @@ artifacts/data-profiles/      # 提交前审核：只保留无个人信息的聚
 
 ### 6.4 Train/Dev/Test 隔离
 
-当前冻结基准是 seed-42 的 19 个任务；DPO 派生集复用了六类多步模板，并包含与基准相同的部分
-班级/课程锚点和近似 query。即使代码上分开加载，模型训练后再用这 19 题作为主要结论，仍存在模板
-污染风险。
-
-训练与评测必须再按模板族建立真正隔离的三类 split：
+R0.4 已把历史冻结题、DPO 派生集和新 Test 统一纳入 stable lineage。六类派生多步模板与原题共享
+意图族，因此都归 Train；历史 19 题中其余已用于实验的题只归 Dev，不在事后改称独立 Test。Test 使用
+同一合成生成器的独立 seed 314、5 个班、每班 3 门课和六个新意图族：
 
 | 数据集 | 用途 | 约束 |
 |---|---|---|
-| Train | SFT/DPO、技能候选学习 | 可使用派生模板，不得进入最终报告 |
-| Dev | Prompt、Plan 和阈值选择 | 不与 Train 共享具体 query/实体组合 |
-| Test | 最终真实模型报告 | 新意图模板、新 seed、新实体分布，训练过程不可见 |
+| Train（55） | SFT/DPO、技能候选学习 | 含 48 条派生任务；不得进入最终模型报告 |
+| Dev（12） | Prompt、Plan 和阈值选择 | 历史实验集；不得进入训练或最终报告 |
+| Test（6） | 最终真实模型报告 | 新意图模板、新 seed、新实体分布；训练/调参不可见 |
 
-建议按“意图模板族”切分，而不只是随机切行；对 base/SFT/W4A16 至少重复多次运行，保存模型、参数、
-数据 hash、配置 hash、均值/方差和脱敏失败轨迹。Oracle 继续只证明 harness 正确。
+切分在模板族声明时完成，不做随机行切分。自动门禁复查跨 split sample/query 重复、模板族与等价语义
+组重叠、缺 provenance、敏感字段和两次生成不一致。真实模型 runner 在完整 corpus preflight 后只消费
+Test，并保存模型参数、lineage/config hash、重复 run、均值/方差和脱敏失败轨迹；当前仍未运行真实模型。
+Oracle 继续只证明 harness 正确。
 
 ## 7. 实施路线与验收门禁
 
@@ -485,13 +485,14 @@ R5 之后按真实需求选择：L1 平台接入 / L2 Memory-Skill / L3 外部�
 
 交付：
 
-- 将项目置于真实 Git 根并确保评测能写入 commit；当前 `artifacts/system-eval.json` 的
-  `commit="unavailable"` 只能作为本地快照，不能作为发布证据。
+- 评测只从真实 Git 元数据写入 commit，并同时记录 dirty 状态；当前开发态 artifact 已记录真实 commit，
+  但 `dirty=true`，只能作为本地快照，不能作为候选版或发布证据。候选版/发布模式会拒绝 Git 元数据
+  不可用、状态不可判定或工作区不干净的报告。
 - GitHub Actions 或等价 CI：`uv sync --frozen`、ruff、全量测试、离线综合评测和敏感数据扫描。
 - 对外统一使用 `accept_stage8.sh`；它调用 `accept_stage7.sh`，后者只保留为内部回归边界。后续新增阶段
   继续保持“最高阶段脚本包含前序回归”的单入口约定。
 - 固定 Python、lockfile、依赖兼容范围和测试环境；CI 清空真实凭据并禁止读取私有数据库。
-- 建立按意图模板族隔离的 Train/Dev/Test lineage；真实模型结果保存原始脱敏 JSON、配置 hash 和失败轨迹。
+- 建立按意图模板族隔离的 Train/Dev/Test lineage；结果保存脱敏 JSON、配置 hash、重复运行和失败轨迹。
 
 门禁：干净环境从 clone 到验收一条命令通过；报告含非空 commit/config hash；最终 Test 与训练模板无重叠；
 CI 不依赖 `.venv`、本机数据库、API key 或已生成的 `edu.db`。

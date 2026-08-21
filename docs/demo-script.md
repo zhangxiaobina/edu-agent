@@ -89,10 +89,13 @@ curl -sS -H 'Authorization: Bearer local-only-demo' \
 
 ## 9:15-10:00：综合评测与收尾
 
-先演示历史审计、API recovery socket 契约和大 Trace：
+先演示 lineage/数据审计、API recovery socket 契约和大 Trace：
 
 ```bash
+uv run --frozen --offline python scripts/audit_eval_lineage.py \
+  --output artifacts/eval-lineage.json
 uv run --frozen python scripts/audit_data_boundaries.py \
+  --fail-on-findings \
   /tmp/edu_agent_production_demo.db /tmp/edu_agent_production_demo.db-wal \
   /tmp/edu_agent_production_demo.db-shm artifacts
 uv run --frozen python -m pytest \
@@ -101,7 +104,9 @@ uv run --frozen python scripts/benchmark_trace_scaling.py \
   --events 10000 --page-size 100 --output artifacts/trace-scaling.json
 ```
 
-讲解审计报告只给分类/位置/计数、不回显秘密；API 测试经过 `127.0.0.1:0` 真 socket，包含 run 完成但
+讲解 73 条样本按模板族分成 Train 55 / Dev 12 / Test 6，Test 使用独立 seed/实体/意图而非随机行切分；
+lineage 审计会因跨 split 重复、族/等价语义重叠、缺 provenance、敏感字段或重复生成不一致而失败。数据
+审计报告只给分类/位置/计数、不回显秘密；API 测试经过 `127.0.0.1:0` 真 socket，包含 run 完成但
 response 未提交后的恢复与首次/重放字节一致；benchmark 证明每页读取不超过 page size+1，峰值内存不随
 总历史线性增长。不要把本机一次耗时写成容量承诺。
 
@@ -111,9 +116,14 @@ response 未提交后的恢复与首次/重放字节一致；benchmark 证明每
 zsh scripts/accept_stage8.sh
 ```
 
-打开该命令生成的 `artifacts/system-eval.json`，按 Agent、RAG、Reliability、Transaction、
-Multi-agent、Sandbox、Performance 分栏讲。
-oracle 只证明 harness，真实模型为 `not_run`；没有传真实代码执行报告时 Sandbox 为 `not_verified`。
+该入口会先校验 `uv.lock`、按需准备 `.python-version` 指定的解释器和依赖；业务门禁随后使用离线模式。
+运行期数据库和中间报告在本次私有临时目录中，并在成功或失败后清理。现场只检查调用图时可给同一入口增加
+`--dry-run`，但 dry-run 不是通过证据。
+
+打开该命令生成的 `artifacts/eval-lineage.json` 和 `artifacts/system-eval.json`，先确认 lineage gate，
+再按 Agent、RAG、Reliability、Transaction、Multi-agent、Sandbox、Performance 分栏讲。Agent oracle
+只证明独立 Test harness，真实模型为 `not_run`；没有传当次真实代码执行报告时 Sandbox 为 `not_verified`。
 最后给出技术债：真实语义/模型评测、跨主机协调、强取消、生产认证、trace 冷存储和自由文本 DLP。
 
-`accept_stage8.sh` 是唯一对外完整门禁；它会在末尾调用 `accept_stage7.sh`，后者仅保留为内部回归边界。
+`accept_stage8.sh` 是唯一对外完整门禁；它会显式调用 Stage 7 内部回归边界，再运行一次全量测试。Stage 7
+只保留用于独立调试，不作为第二个公开完整入口，也不重复全量测试。

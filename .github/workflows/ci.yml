@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-quality-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      EDU_AGENT_ENGINE: mock
+      EDU_AGENT_TOOLSOURCE: local
+      EDU_AGENT_API_KEY: ""
+      EDU_AGENT_FALLBACK_API_KEY: ""
+      EDU_AGENT_BASE_URL: ""
+      EDU_AGENT_MODEL: ""
+      EDU_AGENT_JOBE_TOKEN: ""
+      EDU_AGENT_JOBE_ENDPOINT: ""
+      EDU_AGENT_CONFIG: ""
+      EDU_AGENT_DEMO_TOKEN: ""
+      OPENAI_API_KEY: ""
+      OPENAI_BASE_URL: ""
+      DASHSCOPE_API_KEY: ""
+      VLLM_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      GOOGLE_API_KEY: ""
+      AZURE_OPENAI_API_KEY: ""
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+      HF_TOKEN: ""
+      LANGCHAIN_API_KEY: ""
+      LANGSMITH_API_KEY: ""
+      OTEL_EXPORTER_OTLP_HEADERS: ""
+      GH_TOKEN: ""
+      GITHUB_TOKEN: ""
+      OTEL_SDK_DISABLED: "true"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Verify clean source inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .venv
+          if find . -path ./.git -prune -o -type f \
+            \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) \
+            -print -quit | grep -q .; then
+            echo 'pre-existing database files are forbidden'
+            exit 1
+          fi
+
+      - name: Validate lock and install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv python install 3.12
+          uv lock --check
+          uv sync --frozen --python 3.12 --managed-python --extra dev --extra mcp
+          uv pip check --python .venv/bin/python
+
+      - name: Ruff
+        run: uv run --frozen --offline ruff check .
+
+      - name: Full test suite
+        run: uv run --frozen --offline python -m pytest -p no:cacheprovider tests -q
+
+      - name: Evaluation lineage and leakage gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          uv run --frozen --offline python scripts/audit_eval_lineage.py \
+            --quiet --output ci-artifacts/eval-lineage.json
+
+      - name: Offline evaluation and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+          mkdir -p ci-artifacts
+          uv run --frozen --offline python scripts/eval_system.py \
+            --evidence-mode candidate --quiet --output ci-artifacts/system-eval.json
+          uv run --frozen --offline python scripts/benchmark_trace_scaling.py \
+            --events 10000 --page-size 100 --evidence-mode candidate --quiet \
+            --output ci-artifacts/trace-scaling.json
+
+      - name: Sensitive data boundary audit
+        run: >-
+          uv run --frozen --offline python scripts/audit_data_boundaries.py
+          --fail-on-findings --output ci-artifacts/data-boundary-audit.json ci-artifacts
+
+      - name: Upload redacted evaluation evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: offline-evaluation-evidence
+          path: ci-artifacts/
+          if-no-files-found: error
+          retention-days: 14

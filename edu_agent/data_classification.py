@@ -19,6 +19,7 @@ REDACTED = "[REDACTED]"
 class DataClass(StrEnum):
     CREDENTIAL = "credential"
     STUDENT_PII = "student_pii"
+    PRIVATE_PATH = "private_path"
     OWNER_SCOPE = "owner_scope"
     BUSINESS = "business"
     FREE_TEXT = "free_text"
@@ -33,6 +34,7 @@ SCOPE_KEYS = frozenset({
 METRIC_KEYS = frozenset({
     "context_tokens", "estimated_tokens", "fencing_token", "input_tokens",
     "max_tokens", "output_tokens", "token_count", "total_tokens",
+    "tokens",
     "model_calls", "max_model_calls", "tool_calls", "max_tool_calls",
     "duration_ms", "size_bytes", "attempt", "attempt_count", "sequence",
 })

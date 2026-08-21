@@ -1,34 +1,25 @@
 {
   "agent": {
+    "capability_claim": "not_measured",
+    "evidence_scope": "harness_only",
     "metrics": {
-      "avg_model_calls": 2.3157894736842106,
-      "avg_tool_calls": 1.368421052631579,
+      "avg_model_calls": 2.1666666666666665,
+      "avg_tool_calls": 1.3333333333333333,
       "early_termination_rate": 0.0,
-      "irrelevance": {
-        "avg_model_calls": 1.0,
-        "avg_tool_calls": 0.0,
-        "early_termination_rate": null,
-        "n": 4,
-        "param_accuracy": null,
-        "step_completion_rate": null,
-        "tool_f1": null,
-        "tool_precision": null,
-        "tool_recall": null,
-        "trajectory_success_rate": 1.0
-      },
+      "irrelevance": {},
       "latency_ms": {
-        "p50": 0.001479,
-        "p95": 0.012417
+        "p50": 0.001833,
+        "p95": 0.003209
       },
       "model_calls": {
-        "p50": 2,
-        "p95": 4.0
+        "p50": 2.0,
+        "p95": 3.0
       },
       "multi_step": {
-        "avg_model_calls": 3.6666666666666665,
-        "avg_tool_calls": 2.6666666666666665,
+        "avg_model_calls": 3.0,
+        "avg_tool_calls": 2.0,
         "early_termination_rate": 0.0,
-        "n": 6,
+        "n": 1,
         "param_accuracy": 1.0,
         "step_completion_rate": 1.0,
         "tool_f1": 1.0,
@@ -37,23 +28,12 @@
         "trajectory_success_rate": 1.0
       },
       "plan_completion_rate": 1.0,
-      "relevance": {
-        "avg_model_calls": 2.0,
-        "avg_tool_calls": 1.0,
-        "early_termination_rate": 0.0,
-        "n": 3,
-        "param_accuracy": 1.0,
-        "step_completion_rate": 1.0,
-        "tool_f1": 1.0,
-        "tool_precision": 1.0,
-        "tool_recall": 1.0,
-        "trajectory_success_rate": 1.0
-      },
+      "relevance": {},
       "single_step": {
         "avg_model_calls": 2.0,
         "avg_tool_calls": 1.0,
         "early_termination_rate": 0.0,
-        "n": 5,
+        "n": 4,
         "param_accuracy": 1.0,
         "step_completion_rate": 1.0,
         "tool_f1": 1.0,
@@ -62,12 +42,27 @@
         "trajectory_success_rate": 1.0
       },
       "tool_calls": {
-        "p50": 1,
-        "p95": 3.0
+        "p50": 1.0,
+        "p95": 2.0
       },
       "trajectory_success_rate": 1.0
     },
+    "repetitions": {
+      "completed": 1,
+      "record_counts": [
+        6
+      ],
+      "requested": 1,
+      "run_ids": [
+        "offline-oracle-1"
+      ],
+      "trajectory_success_rates": [
+        1.0
+      ],
+      "variance": 0.0
+    },
     "source": "offline_oracle",
+    "split": "test",
     "status": "verified"
   },
   "api_recovery": {
@@ -81,26 +76,184 @@
     "source": "offline_sqlite_crash_window_recovery",
     "status": "verified"
   },
-  "commit": "unavailable",
-  "config_hash": "5be2a535691c4c908c0a7895066a139a4b25c81d13ddc492cb31283038250a96",
+  "commit": "8c645099ce27b9a3f00c5ea755ab3108c8f67dad",
+  "config": {
+    "agent_source": "offline_oracle",
+    "input_hashes": {
+      "edu_agent/data/generate.py": "e5f6cb4eb7c7cf153afaf2b91fc8dc09cff525857f194439ce2bef41be6d16bd",
+      "edu_agent/data/schema.sql": "0393b05064aa0ed66ffd72bb48e2684da403d3e9126209c8d301474a3699140b",
+      "edu_agent/eval/corpus.py": "74d303da2d12ab74905cab2cb4b246e5744c8828f238d46d933d14e7d3ac6509",
+      "edu_agent/eval/harness.py": "c82c9d24fe22f20b24a667cd730bd4c807a28043b5250a0ebdbe22e939dacdd4",
+      "edu_agent/eval/lineage.py": "3598740cfbb454cc083b28bc63717a2d3bacd1183923343f7aab726ae99a32b7",
+      "edu_agent/eval/metrics.py": "939cddc18f9dd68142dd852c0c0280c35d3d6b83252176c0ae1c6cd8a43e5a9c",
+      "edu_agent/eval/oracle.py": "604990fe2e075cbccc1d05669c5771ef5f08102a39ddc236853f80168d792958",
+      "edu_agent/eval/tasks.py": "af5769543b13e67de45564b19c2cda876f75f770f88156cc231a377203f77cef",
+      "edu_agent/eval/tasks_derived.py": "8718976261858cd49b404e25b4d91ac6e2cf509e04c0e943bfbaad9519d9fb09",
+      "edu_agent/eval/tasks_test.py": "5ad3d5cc31d4f7d7cd5c0650d7947a935d88cd3fd676f872b1b1d8218096ddb0",
+      "pyproject.toml": "79f0ecbba840c2c75725fb3fbcba030357fbfa3292fcbfd445467ba898640359",
+      "scripts/audit_eval_lineage.py": "e49e1639c19e40fe3c4633cb6b4a1a47e925f5a0b368a24e3f87fee5cabb34fd",
+      "scripts/eval_system.py": "996e3afa1494d084000d53ed9eed8b0093b8f4998df1f086a85975ea97cf6112",
+      "uv.lock": "532efde753958567081d3a4957302e3b2695cd69c0f7fbe97db27c9a42b3a65c"
+    },
+    "lineage_manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+    "model": {
+      "mode": "offline_oracle",
+      "name": "oracle"
+    },
+    "repeats": 1,
+    "sandbox": {
+      "backend": null,
+      "report_hash": "not_provided",
+      "source": "no_real_backend_report"
+    },
+    "seed": 42,
+    "test_seed": 314,
+    "test_task_count": 6
+  },
+  "config_hash": "494294e8d46fbd41f687b0c844126f68f63bb5bd6bc98573893e5fc9d6ea06f0",
   "environment": {
-    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "architecture": "arm64",
+    "os": "Darwin",
+    "os_release": "25.5.0",
     "python": "3.12.13",
+    "python_implementation": "CPython",
     "sqlite": "3.50.4"
   },
+  "evaluation": {
+    "harness": {
+      "scope": "harness_only",
+      "source": "offline_oracle",
+      "status": "verified"
+    },
+    "real_model": {
+      "metrics": null,
+      "status": "not_run"
+    }
+  },
+  "evidence_mode": "development",
   "failed_trajectories": null,
-  "generated_at": "2026-08-18T03:02:15.467244+00:00",
+  "generated_at": "2026-08-21T14:49:32.181464+00:00",
+  "git": {
+    "available": true,
+    "dirty": true
+  },
+  "lineage": {
+    "checks": {
+      "all_splits_present": true,
+      "complete_provenance": true,
+      "cross_split_duplicates": true,
+      "deterministic_declarations": true,
+      "deterministic_generation": true,
+      "semantic_group_isolation": true,
+      "sensitive_fields": true,
+      "stable_ids": true,
+      "template_family_isolation": true
+    },
+    "deterministic_generation": {
+      "error": null,
+      "first_hash": "40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b",
+      "passed": true,
+      "sample_count": 73,
+      "second_hash": "40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b"
+    },
+    "errors": [],
+    "manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+    "passed": true,
+    "sample_count": 73,
+    "schema_version": "edu-agent.eval-lineage.v1",
+    "split_counts": {
+      "dev": 12,
+      "test": 6,
+      "train": 55
+    },
+    "template_families": {
+      "irrelevance.concept_explanation": [
+        "dev"
+      ],
+      "irrelevance.greeting": [
+        "dev"
+      ],
+      "irrelevance.out_of_scope": [
+        "dev"
+      ],
+      "irrelevance.thanks": [
+        "dev"
+      ],
+      "multi.class_weakness_practice": [
+        "train"
+      ],
+      "multi.failure_count_distribution": [
+        "train"
+      ],
+      "multi.flagship_remediation": [
+        "train"
+      ],
+      "multi.paper_create_exam": [
+        "train"
+      ],
+      "multi.prerequisite_path": [
+        "train"
+      ],
+      "multi.student_diagnosis_path": [
+        "train"
+      ],
+      "parallel.score_distributions": [
+        "dev"
+      ],
+      "relevance.class_weakness": [
+        "train"
+      ],
+      "relevance.exam_overview": [
+        "dev"
+      ],
+      "relevance.practice_search": [
+        "dev"
+      ],
+      "single.class_roster": [
+        "dev"
+      ],
+      "single.code_execution": [
+        "dev"
+      ],
+      "single.exam_list": [
+        "dev"
+      ],
+      "single.practice_search": [
+        "dev"
+      ],
+      "single.score_distribution": [
+        "dev"
+      ],
+      "test.compare_class_sizes": [
+        "test"
+      ],
+      "test.exam_top_performer": [
+        "test"
+      ],
+      "test.knowledge_neighbors": [
+        "test"
+      ],
+      "test.knowledge_skill_catalog": [
+        "test"
+      ],
+      "test.student_course_progress": [
+        "test"
+      ],
+      "test.student_exam_history": [
+        "test"
+      ]
+    }
+  },
   "model": {
     "mode": "offline_oracle",
-    "name": "oracle",
-    "seed": 42
+    "name": "oracle"
   },
   "multi_agent": {
     "metrics": {
       "hidden_cost_model_calls": 0,
-      "parallel_elapsed_seconds": 0.065734,
+      "parallel_elapsed_seconds": 0.067778,
       "permission_leak_rate": 0.0,
-      "scheduling_overhead_seconds": 0.035734,
+      "scheduling_overhead_seconds": 0.037778,
       "success_rate": 1.0
     },
     "source": "offline_teaching_delegation_runtime",
@@ -110,12 +263,12 @@
     "metrics": {
       "estimated_cost_usd": 0.0,
       "model_calls": {
-        "p50": 2,
-        "p95": 4.0
+        "p50": 2.0,
+        "p95": 3.0
       },
       "model_latency_ms": {
-        "p50": 0.001479,
-        "p95": 0.012417
+        "p50": 0.001833,
+        "p95": 0.003209
       },
       "tokens": {
         "input": 0,
@@ -123,10 +276,10 @@
         "total": 0
       },
       "tool_calls": {
-        "p50": 1,
-        "p95": 3.0
+        "p50": 1.0,
+        "p95": 2.0
       },
-      "wall_seconds": 0.411521
+      "wall_seconds": 0.567525
     },
     "real_model": {
       "metrics": null,
@@ -135,6 +288,14 @@
     "source": "offline_mock",
     "status": "verified"
   },
+  "provenance_gate": {
+    "reasons": [
+      "git_worktree_dirty"
+    ],
+    "required": false,
+    "status": "not_enforced"
+  },
+  "provenance_schema_version": "edu-agent.eval-provenance.v1",
   "rag": {
     "hybrid": {
       "metrics": null,
@@ -157,7 +318,7 @@
   },
   "reliability": {
     "metrics": {
-      "cancel_latency_ms": 1.017583,
+      "cancel_latency_ms": 1.020584,
       "cancel_requested": 1,
       "circuit_or_fallback_hit": 1,
       "lease_fencing_conflicts": 1,
@@ -169,47 +330,25 @@
     "status": "verified"
   },
   "sandbox": {
-    "backend": "xiaobiny/jobe-custom@sha256:173036eb3b5cdc2a2634da0bd70eba56d22efced2b2981568359cc2c6bf63bd4",
-    "metrics": {
-      "cases": 15,
-      "escape": {
-        "cases": 2,
-        "pass_rate": 1.0,
-        "passed": 2
-      },
-      "network": {
-        "cases": 2,
-        "pass_rate": 1.0,
-        "passed": 2
-      },
-      "oom": {
-        "cases": 1,
-        "pass_rate": 1.0,
-        "passed": 1
-      },
-      "passed": 15,
-      "timeout": {
-        "cases": 1,
-        "pass_rate": 1.0,
-        "passed": 1
-      }
-    },
-    "source": "real_backend_report",
-    "status": "verified"
+    "metrics": null,
+    "reason": "Docker/Jobe backend was not started",
+    "source": "no_real_backend_report",
+    "status": "not_verified"
   },
-  "schema_version": "edu-agent.system-eval.v2",
+  "schema_version": "edu-agent.system-eval.v4",
+  "seed": 42,
   "trace_scaling": {
-    "config_hash": "05604cad1ff6cb4e51d35adced2d7f4ffba0cd93864d5e3bc6f387608b66c266",
+    "config_hash": "5813d7f4d78efdf0a3c707924a3458a5093c860b5754673e0d5470a8583160d9",
     "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
     "metrics": {
       "digest": "6cb9f01a5bfa291d3b38050fceba53d4ca0f9a8ebab6dae3158a466e4b000cb6",
-      "elapsed_seconds": 0.080731,
-      "events_per_second": 12399.138,
+      "elapsed_seconds": 0.08129,
+      "events_per_second": 12313.938,
       "exported_events": 1001,
       "indexed_events": 1000,
       "max_rows_loaded_per_page": 65,
       "pages": 16,
-      "peak_memory_bytes": 250425,
+      "peak_memory_bytes": 250625,
       "projected_events": 1001,
       "rows_loaded": 1016,
       "sql_queries": 33
