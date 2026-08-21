@@ -1,0 +1,318 @@
+# EduAgent · 可恢复、可审计的教学 Agent Runtime
+
+EduAgent 解决的不是“再包一层聊天界面”，而是教学 Agent 的工程失效：多步任务提前结束、写工具重试产生重复副作用、并发 Worker 污染同一会话、检索越权，以及故障发生后无法还原过程。它以 `EduAgentService` 为唯一运行入口，在同一条执行链上组合 Plan/Evidence、课程 RAG、事务写工具、SQLite lease/fencing、受限子 Agent、真实代码执行 Provider 和统一 Trace。
+
+```text
+HTTP / Scheduler / Demo
+        -> EduAgentService -> Agent Loop -> Engine / Tool Provider
+                |                 |
+                +-> StateStore <- +-> Plan / Evidence / Operation / Artifact
+                +-> TraceRepository -> Inspector / JSON(L) / opt-in OTLP
+```
+
+核心不变量：system prompt 在会话内保持字节稳定；tool call/result 原子配对；权限、课程范围、审批、预算在执行层复验；同 session 由 SQLite lease 单飞并以 fencing token 拒绝旧 Worker；写入是“至少一次调度 + 幂等业务键/消费”，不宣称 exactly-once；trace 导出前再次执行 owner scope 与中心脱敏。
+
+技术亮点：16 个教学工具复用本地/MCP 窄接口；PlanGraph 只接受真实工具事件、完整 Artifact 或验真的 citation；写工具把业务变更、operation 和 outbox 放在同一教学库事务；Trace Repository 将已有 run/plan/evidence/provider/operation/job/subagent/sandbox 状态投影为稳定时间线，不另建第二套运行状态。
+
+数据红线：仓库只使用固定 seed 的合成教学数据和公开材料；真实学生数据、业务代码、API key、cookie、审批秘密不进入仓库、trace 或 Artifact preview。代码执行默认关闭，只有同一真实后端完成健康、能力与 E2E attestation 后才暴露 `run_code`。
+
+一键离线验收（包含 Stage 7 回归；耗时取决于本机性能与 Docker 后端状态）：
+
+```bash
+zsh scripts/accept_stage8.sh
+```
+
+该命令执行数据边界审计、专项/全量测试、10k Trace 基准、核心 Demo 和 Stage 7 回归，并生成离线综合评测；结果写入 `artifacts/system-eval.json`，其中 oracle/mock、真实模型和真实代码执行后端分栏。架构与边界见 [`docs/architecture.md`](docs/architecture.md)，现场演示见 [`docs/demo-script.md`](docs/demo-script.md)。
+
+## 这是什么 / 为什么
+
+工具的入参与语义对照一套真实 Spring Boot 教学平台的 Controller、知识图谱、AI 出题和代码执行接口抽取；仓库只保留重建后的工具契约和合成数据，不包含真实平台源码或数据。
+
+## 工具集（~15 个，五类，mirror 真实 Controller）
+
+| 类别 | 工具 | mirror 的真实端点（语义来源） |
+|---|---|---|
+| 查询 | `query_student_scores` 查成绩 | `GET /teacher/v1/exams/{examId}/results` |
+| | `list_exams` 列考试 | `GET /teacher/v1/exams` |
+| | `get_class_roster` 班级名单 | `GET /teacher/v1/classes/{classId}/students` |
+| | `search_questions` 搜题 | `GET /teacher/v1/questions` |
+| | `get_learning_progress` 学习进度 | `GET /student/v1/learning-progress/...` |
+| 知识图谱 | `query_knowledge_graph` 图谱查询 | Neo4j `:KnowledgePoint` + 先修/相关/相似 关系 |
+| 分析 | `analyze_class_errors` 班级错题Top | `GET /teacher/v1/grading/error-analysis/class/{classId}/top` |
+| | `diagnose_weak_points` 薄弱诊断 | `.../student/{studentId}/weak-points` |
+| | `get_score_distribution` 成绩分布 | `GET /teacher/v1/exams/{examId}/score-statistics` |
+| 操作 | `create_exam` 建考试 | `POST /teacher/v1/exams` |
+| | `generate_paper` 组卷 | `POST /paper-generation/auto` |
+| | `batch_grade` 批量判分 | `POST /teacher/v1/exams/{examId}/batch-grade` |
+| | `assign_homework` 布置作业 | `POST /teacher/v1/homeworks` |
+| AI·执行 | `generate_questions` AI出题 | `POST /teacher/v1/ai-questions/generate` |
+| | `recommend_study_path` 学习路径 | 知识图谱 shortestPath（cost=Σ(1−weight)） |
+| | `run_code` 真隔离代码执行 | `POST /coding/execute/{lang}`（Docker Provider 已验收；默认关闭） |
+| 条件式知识检索 | `retrieve_course_materials` 版本化课件检索 | 仅知识库启用且存在时暴露；tenant/course 双层 ACL |
+
+## 典型 demo 任务（多工具多步）
+
+> 「三班这次 Python 考试谁不及格、普遍错在哪个知识点、给薄弱的同学各推 3 道练习题」
+> → `list_exams` → `query_student_scores` → `analyze_class_errors` → `query_knowledge_graph` → `recommend_study_path` / `search_questions`
+
+## 架构
+
+```
+合成数据层 (零依赖, stdlib)        工具层               编排层                引擎层 (可替换)
+┌──────────────────────┐   ┌──────────────┐   ┌──────────────┐   ┌────────────────────┐
+│ SQLite 关系库         │←──│ 15 个工具      │←──│ LangGraph     │──▶│ vLLM W4A16 Qwen3-14B │
+│ 内存知识图谱 (Dijkstra)│   │ + OpenAI schema│   │ ReAct/supervisor│   │ 或 通义千问/任意 API   │
+└──────────────────────┘   └──────────────┘   └──────────────┘   └────────────────────┘
+```
+
+- **数据 + 工具层**：纯标准库，离线可跑、可复现（`sqlite3` + 纯 Python 加权最短路）。
+- **引擎层**：`EDU_AGENT_ENGINE` 环境变量切换（离线 mock / 通义千问 / 本地 vLLM / 算法仓 W4A16 端点），同一张图复用。
+- **工具来源可切换**：默认本地直调；同一批工具也可暴露为 **MCP server**（stdio 传输），Agent 经 **MCP 协议**往返调用（`MCPToolProvider` 与本地 registry 同契约，图 / 引擎均无需改动）。见 `edu_agent/mcp/` 与 `scripts/mcp_demo.py`。
+- **可靠 Agent Runtime**：`EduAgentService` 统一管理身份/租户、模型与工具预算、短期会话、
+  FTS5 长期记忆、上下文窗口、角色工具面、写操作审批、运行轨迹和审计；插件与 MCP 共用
+  ToolProvider 契约，SQLite Scheduler 使用租约领取计划任务。详见
+  [`docs/production-runtime.md`](docs/production-runtime.md)。
+- **PlanGraph + Evidence Verifier**：只为真正复杂的多步教学任务生成严格 DAG；步骤按依赖推进，
+  真实 `tool_event`、完整性校验通过的 Artifact 或 citation 才能完成步骤。模型提前回答会被确定性门禁拦截，
+  重试或计划预算耗尽后返回 `blocked/budget_exceeded` 与缺失证据；轻量任务不增加 planner 调用。
+- **教学 RAG + 引用**：固定 seed 合成课件带 course/chapter/knowledge point/version/section/chunk id；
+  SQLite FTS5 提供离线 sparse 基线，可选语义 Provider 失败时记录事件并降级。检索前后都执行
+  tenant/course/document ACL，Plan 最终门禁复验 citation、作用域及同句主张关系。
+- **长会话可靠性链**：`RuntimeManager` 以进程内锁 + SQLite session lease 保证同 session 跨进程
+  单飞；heartbeat、单调 fencing token、actor/tenant cancel 和启动恢复阻止旧 worker 污染新 owner。
+  可插拔 `ContextEngine` 将旧历史原地归档为可恢复 checkpoint，system prompt 保持稳定；超大工具
+  结果按单结果/整轮预算写入 tenant/actor 隔离的 Artifact，并以 SHA-256 校验完整性。该保证限于
+  共享同一 SQLite 文件的本机 Worker，不宣称跨主机或跨区域共识。
+- **模型与后台任务容错**：模型错误按连接/超时/429/5xx/auth/上下文溢出分类，只重试瞬态故障；
+  熔断后跳过故障 Provider 并切 fallback，事件关联 run_id 落库。Scheduler 支持幂等键、自动续租、
+  指数退避、取消和 dead-letter 状态。
+- **事务写工具**：`create_exam`、`assign_homework`、`batch_grade` 与
+  `generate_questions(save_to_bank)` 进入持久 `ToolOperation` 状态机；业务写入、`committed` 和
+  outbox 在同一教学库事务中提交。Scheduler 重试复用稳定写入键，outbox 为至少一次投递并由消费者
+  按 event id 去重；可逆操作保存前置快照，不安全补偿进入 `manual_review`。
+- **真隔离代码执行**：窄 Provider 接口支持 Jobe HTTP 与受限 Docker Engine；只有健康、能力完整、
+  真实 E2E attested 的后端才暴露 `run_code`。固定 digest、禁网、无挂载、只读 rootfs、非 root、
+  cgroup/rlimit、输出 Artifact 预算与运行中取消均在执行层复验。威胁模型和部署边界见
+  [`docs/code-execution.md`](docs/code-execution.md)。
+- **产品优化路线**：基于 Hermes 当前源码选择性补齐 Provider/API Mode、真流式与中断、
+  增量 loop journal、安全工具并发、上下文恢复和全树预算；Memory/Skill、后台复盘与
+  大型公开数据集后置，同时保留真实教学平台和私有数据边界，见
+  [`docs/product-optimization-roadmap.md`](docs/product-optimization-roadmap.md)。按多个独立会话实施时，使用
+  [`docs/optimization-implementation-prompts.md`](docs/optimization-implementation-prompts.md) 中的 33 段提示词。
+- **统一 Trace 与薄 HTTP API**：`RuntimeEvent v1` 把现有状态表投影成稳定时间线；CLI 支持筛选、
+  summary、plan/subagent tree 和流式 JSON/JSONL。标准库 HTTP 层只调用 `EduAgentService`，本地
+  Demo auth、actor/tenant/role 复验、持久 request id 幂等、结构化错误与 SSE 断流取消均有专项测试。
+  OTLP 默认关闭；只有安装 `otel` extra 并显式配置 endpoint 后才尝试导出，失败不击穿主路径。
+
+## 目录结构
+
+```
+edu-agent/
+├── README.md
+├── LICENSE                       Apache-2.0
+├── pyproject.toml / uv.lock      依赖（langgraph / openai / pytest / ruff）
+├── docs/
+│   ├── architecture.md           系统边界、状态机与故障恢复
+│   ├── production-runtime.md     当前可靠 Runtime 实现
+│   ├── eval.md                   agentic 评测方法学
+│   ├── product-optimization-roadmap.md  Runtime、Provider、真实平台与受控演进路线
+│   └── optimization-implementation-prompts.md  R0-R5 分会话实施提示词
+├── edu_agent/
+│   ├── data/                     合成数据层（零依赖）
+│   │   ├── schema.sql            教学库表结构
+│   │   ├── generate.py           固定种子、字节级可复现地生成合成库
+│   │   ├── db.py                 连接 / 查询封装
+│   │   └── kg.py                 内存知识图谱（mirror Neo4j 设计 + 纯 stdlib 加权最短路）
+│   ├── tools/                    工具层（~15 个工具，五类）
+│   │   ├── schemas.py            OpenAI function 格式工具定义（入参对照真实 Controller）
+│   │   ├── {query,analysis,kg,ops,ai}_tools.py   各类工具实现 fn(conn, **params)->dict
+│   │   └── registry.py           dispatch + openai_tools 导出
+│   ├── engine/                   可替换工具调用引擎
+│   │   ├── base.py               引擎抽象接口
+│   │   ├── mock.py               离线确定性 mock（不联网、无 key）
+│   │   └── openai_compat.py      OpenAI 兼容适配器（通义千问 / 本地 vLLM / W4A16）
+│   ├── agent/                    LangGraph 编排
+│   │   ├── graph.py              ReAct + ready step + 确定性完成门禁
+│   │   ├── prompts.py            系统提示（含多步执行纪律）
+│   │   └── demo_policy.py        旗舰任务的动态决策策略
+│   ├── planning/                 PlanGraph / planner / coordinator / evidence verifier
+│   ├── knowledge/                合成课件、FTS5、hybrid fusion、citation verifier
+│   ├── runtime/transactions.py   写工具 operation / outbox / 补偿事务
+│   ├── mcp/                      MCP 集成（工具经 MCP 协议对外/被调）
+│   │   ├── server.py            把 16 工具暴露为 MCP server（stdio；复用 registry，逻辑不重写）
+│   │   ├── client.py            MCPToolProvider —— 与 registry 同契约、经 MCP 协议调用
+│   │   └── __init__.py          get_tool_provider()（EDU_AGENT_TOOLSOURCE=local/mcp）
+│   └── eval/                     引擎无关 agentic 评测
+│       ├── tasks.py              5 类 19 任务（锚定 seed-42 库）
+│       ├── metrics.py            工具选择 F1 / 参数准确率 / 轨迹成功率 / relevance
+│       ├── oracle.py             离线确定性回放（验证 harness 本身）
+│       └── harness.py            run_eval(tasks, make_engine) 运行器
+├── scripts/
+│   ├── demo_trajectory.py        纯工具层五工具闭环 demo（零依赖）
+│   ├── agent_demo.py             LangGraph 多工具 Agent（离线 mock 引擎）
+│   ├── mcp_demo.py               工具经 MCP server + MCP 协议被 Agent 调用
+│   ├── eval_demo.py              agentic 评测（oracle / 真引擎）
+│   ├── eval_ablation.py          修复 before/after 两档对照（一次出对照）
+│   ├── eval_plan_ablation.py     PlanGraph 严格 before/after（oracle/真实端点）
+│   ├── plan_runtime_demo.py      早停被拦截、证据绑定、最终完成
+│   ├── rag_runtime_demo.py       hybrid 降级、带引用回答、ACL 拒绝
+│   ├── eval_retrieval.py         Recall/MRR/nDCG/citation/ACL 离线评测
+│   ├── transactional_tools_demo.py  Scheduler 重放、outbox 去重、补偿
+│   ├── runtime_recovery_demo.py  跨实例 lease、fencing、取消与恢复
+│   ├── code_sandbox_demo.py      Docker/Jobe 真后端资源与逃逸验收
+│   ├── eval_subset.py            子集快测（调参用）
+│   └── debug_trace.py            打印完整消息序列定位失败轨迹
+└── tests/                        工具 / Agent / Plan / Eval / MCP / Runtime / Scheduler
+```
+
+> 合成数据库 `edu_agent/data/edu.db` 由 `generate.py` 可复现地生成，已被 `.gitignore` 排除，不入库。
+
+## 快速开始
+
+项目统一使用 **uv + Python 3.12**。`.python-version` 固定 Python 3.12 系列，
+`.venv/` 由 uv 在项目根目录创建，依赖版本由 `uv.lock` 锁定；不要使用系统 Python
+或手工执行 `pip install`。`pyproject.toml` 中的 `requires-python >= 3.10` 是发行包的
+兼容范围，不代表本项目日常开发应改用系统 Python 3.10/3.11。
+
+```bash
+# 1. 首次准备环境：安装 Python 3.12，并同步核心、测试和 MCP 依赖
+uv python install 3.12
+uv sync --frozen --extra dev --extra mcp
+
+# 2. 确认当前项目解释器
+uv run --frozen python --version
+
+# 3. 生成合成教学库（可复现，固定种子；产物在 .gitignore 内）
+uv run --frozen python -m edu_agent.data.generate
+
+# 4. 运行完整测试
+uv run --frozen python -m pytest tests/ -q
+```
+
+日常开发不需要手动 `source .venv/bin/activate`，直接使用 `uv run --frozen ...`：
+
+```bash
+# 纯工具层五工具闭环 demo（不访问网络）
+uv run --frozen python scripts/demo_trajectory.py
+
+# 离线 mock 引擎跑通编排循环（不需 key、不联网）
+uv run --frozen python scripts/agent_demo.py
+
+# 可靠运行时纵向演示（记忆 + 压缩 checkpoint + 状态 + 调度）
+uv run --frozen python scripts/production_runtime_demo.py
+
+# PlanGraph：创建计划、拦截无证据早停、绑定真实工具事件并完成
+uv run --frozen python scripts/plan_runtime_demo.py
+
+# 教学 RAG：hybrid 请求降级 sparse、引用验真、课程 ACL
+uv run --frozen python scripts/rag_runtime_demo.py
+
+# 检索评测：stdout 为机器可读 JSON，stderr 为人类可读表格
+uv run --frozen python scripts/eval_retrieval.py
+
+# 事务写工具：Scheduler 重放只写一次、outbox 消费去重、作业补偿
+uv run --frozen python scripts/transactional_tools_demo.py
+
+# 跨进程运行控制：同 session 争抢、旧 owner fencing、取消与僵尸恢复
+uv run --frozen python scripts/runtime_recovery_demo.py
+
+# 隔离代码执行：固定 digest Docker 后端完整逃逸/资源/取消验收
+uv run --frozen python scripts/code_sandbox_demo.py --provider docker --e2e --require-all
+
+# 工具经 MCP 协议被 Agent 调用（起 MCP server 子进程，stdio 传输；同样不需 key、不联网）
+uv run --frozen python scripts/mcp_demo.py
+
+# agentic 评测（离线 oracle 验证框架；接真引擎用同一 harness 出真数）
+uv run --frozen python scripts/eval_demo.py                  # 离线（无 key）
+uv run --frozen python scripts/eval_demo.py --engine openai  # 接真引擎，配下方环境变量
+
+# PlanGraph 严格消融；oracle 只证明 harness，--engine openai 才是真模型数据
+uv run --frozen python scripts/eval_plan_ablation.py --engine oracle
+uv run --frozen python scripts/eval_plan_ablation.py --engine openai
+
+# 切换到真实引擎（通义千问 / 本地 vLLM / 算法仓 W4A16 Qwen3-14B）：
+export EDU_AGENT_ENGINE=openai
+export EDU_AGENT_BASE_URL=...   # 如 https://dashscope.aliyuncs.com/compatible-mode/v1 或 http://127.0.0.1:8000/v1
+export EDU_AGENT_API_KEY=...    # vLLM 本地可填占位
+export EDU_AGENT_MODEL=...      # 如 qwen-plus / Qwen/Qwen3-14B
+# 同一张 LangGraph 图无需改代码：edu_agent.engine.get_engine() → run_agent(task, engine)
+```
+
+## agentic 评测（口径对齐 BFCL V4）
+
+自建一套**引擎无关**的多工具评测（`edu_agent/eval/`，方法学见 [`docs/eval.md`](docs/eval.md)）：
+5 类共 19 个任务（`single` / `multi_step` / `parallel` / `relevance` / `irrelevance`），全部
+锚定 seed-42 可复现合成库。指标：**轨迹成功率**（multi-turn 式整段判定）、**工具选择 F1**、
+**参数准确率**（AST 式 possible-answer 匹配）、**relevance 判对率**。
+
+离线用确定性 oracle 回放期望轨迹**验证框架本身**（任务加载 / 工具执行回灌 / 指标计算正确
+且能区分对错，见 `tests/test_eval.py`）；**真实模型能力须接真引擎后用同一 `run_eval` 跑出。**
+
+PlanGraph 消融还报告步骤完成率、提前结束率和平均模型/工具调用数。不要从 README 读取“当前
+指标”；请运行 `scripts/eval_plan_ablation.py` 或 `scripts/eval_system.py` 获取带时间、环境、模型、
+seed 与 config hash 的结果。oracle 只验证 harness；未运行的真实模型档会明确标为 `not_run`。
+
+## 与算法仓的连接
+
+- **算法仓** [`function-calling-sft`](https://github.com/zhangxiaobina/function-calling-sft)：把 Qwen3-14B 微调成更强的工具调用引擎，BFCL V4 出 before/after，再 W4A16 量化 + vLLM 部署。
+- **本仓 (应用仓)**：把那个量化模型当工具调用大脑，搭成撑得住的多工具 Agent。
+- 两仓互相印证：一层证明"会微调/评测/压缩部署一个工具调用模型"，一层证明"会把它搭成真实场景的多工具应用"。
+
+## 主要结论（定性 · 真实跑出 · 可复现）
+
+> 用 `scripts/eval_demo.py --engine openai` 接 **算法仓自微调 + W4A16 量化的 Qwen3-14B**（单卡 vLLM 端点）跑出；
+> 19 任务锚定 seed-42 合成库，温度 0。本节只给定性结论，复现后可在本地拿到逐项精确数字（见 `docs/eval.md`）。
+
+**① 三档 agentic 对照（base 未微调 / 微调 fp16 / 微调+W4A16，同机同套 19 任务）**
+
+一个**反直觉但可复现**的结论：
+
+- **base（未微调）多步推理本就强**，旗舰多步任务完成度最高；
+- **窄域单轮 FC-SFT 提升了工具选择与 relevance 判断，却以多步链式推理为代价**——多步任务成功率明显下降；
+- **再叠加 W4A16 量化**，长链路上误差累积进一步放大。
+
+抓失败轨迹定位根因：SFT 把 `<think>` 思考链压成空块、模型在第二跳**直接编造结果**（成绩分布 / 学习路径 / 题号）
+而不调用对应工具（「拿到部分结果就早停 + 工具调用幻觉」），量化再放大长链误差。
+这也**修正了「量化零损失」的边界**：在 BFCL 单轮 AST 口径成立，多步 agentic 任务上有额外损伤。
+
+**② 历史实验：强制中间反思兜底在部署档 W4A16 上的 before → after**
+
+针对上面的根因，在 LangGraph 编排层加：强化的多步执行纪律提示（A）+ 早停时注入一次
+**反幻觉自检兜底**、逼模型核对「每条数据是否来自工具真实返回、否则重新调工具」（B）+ 反螺旋调用上限；
+兜底触发门槛设为「**已调过工具才生效**」，从而**零干扰** irrelevance（寒暄 / 越域）任务。
+
+同端点 before→after（2 次完整跑一致）的定性结果：
+
+- **轨迹成功率明显提升**、**多步任务完成数提升**、**relevance 判对率提升到满分**；
+- **如实记录代价**：反幻觉兜底引入额外 / 重复调用，**工具调用精确率明显下降**（召回反升）。
+
+> **诚实边界**：编排兜底**只能缓解、不能根治**——它救得回「该继续却早停」，救不了模型层面的
+> 选错工具 / 不敢调写操作 / 长链路自信编造。残余几个未达成任务（旗舰多步链、组卷→建考、
+> 学生诊断→路径、某 relevance 任务过度搜题）即属此类，根治需更强 SFT 数据（多跳 FC）或
+> 现已实现 PlanGraph 显式分解与确定性证据门禁；个别多步任务受 vLLM 非完全确定性影响在边界处
+> 轻微波动，新的 PlanGraph 真实端点严格消融仍未运行。
+
+> 这组结果保留为历史研究结论。当前生产运行时已移除中途伪造 `user` 消息的 reflect 节点，
+> 因为它污染会话角色语义并妨碍稳定上下文。现行实现使用稳定系统提示、结构化工具错误、
+> 调用预算和安全执行器；`scripts/eval_ablation.py` 现在只比较旧/新系统提示词。
+
+**③ 从模型层根治：DPO 偏好对齐（脚手架）**
+
+历史编排兜底不是根治方案；要从模型层改进，可把本仓多步任务的轨迹按档位 dump 出来，
+配成「真实逐跳调用的成功轨迹（chosen） vs 编造中间结果的失败轨迹（rejected）」偏好对，
+在算法仓做 DPO。`scripts/dump_trajectories.py` 即用于 dump 某模型档的**原生**多步轨迹
+（当前循环不再注入 synthetic-user reflect，直接记录模型层行为）：
+
+```bash
+# 接某档 vLLM 端点，dump 多步任务原生轨迹 → dpo_dumps/traj_<tag>.jsonl（不入库）
+EDU_AGENT_ENGINE=openai EDU_AGENT_BASE_URL=http://127.0.0.1:8000/v1 EDU_AGENT_API_KEY=dummy \
+EDU_AGENT_MODEL=<model> uv run --frozen python scripts/dump_trajectories.py --tag base
+```
+
+偏好对配对 / 校验 / DPO 训练在算法仓
+[`function-calling-sft`](https://github.com/zhangxiaobina/function-calling-sft)（见其 `docs/dpo.md`）。
+仓库只提供脚手架，不分发轨迹 / 偏好数据；数据够了即可照此复现。
+
+## License
+
+Apache-2.0。合成数据生成逻辑与工具 schema 为原创；语义对照的真实平台代码**不包含**在本仓库内。

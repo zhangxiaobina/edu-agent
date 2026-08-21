@@ -1,0 +1,127 @@
+[model]
+provider = "openai"
+model = "qwen-plus"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+timeout_seconds = 1800
+temperature = 0.0
+max_retries = 2
+circuit_failure_threshold = 3
+circuit_cooldown_seconds = 30.0
+# fallback_model = "Qwen/Qwen3-14B"
+# fallback_base_url = "http://127.0.0.1:8001/v1"
+# fallback key 使用 EDU_AGENT_FALLBACK_API_KEY，不写入 TOML。
+
+[runtime]
+max_model_calls = 12
+max_tool_calls = 24
+context_token_budget = 12000
+recent_message_limit = 80
+compression_enabled = true
+compression_trigger_ratio = 0.7
+compression_keep_recent = 12
+compression_summary_max_chars = 4000
+tool_result_inline_chars = 12000
+tool_result_preview_chars = 1500
+tool_turn_budget_chars = 32000
+session_lease_seconds = 30
+session_heartbeat_seconds = 10
+run_stall_seconds = 90
+
+[planning]
+enabled = true
+max_steps = 8
+max_step_retries = 2
+max_iterations = 12
+
+[memory]
+enabled = true
+max_recalled_items = 6
+max_item_chars = 800
+
+[knowledge]
+# 仅在 enabled=true 且数据库存在时暴露 retrieve_course_materials。
+enabled = false
+path = "~/.edu-agent/knowledge.db"
+max_results = 5
+
+[security]
+require_write_approval = true
+allow_local_code_execution = false
+default_role = "teacher"
+
+[code_execution]
+# 只有真实隔离后端通过健康与安全能力门禁后，run_code 才会进入工具面。
+enabled = false
+provider = "disabled"
+endpoint = "http://127.0.0.1:4000"
+# Docker provider 必须使用不可变 digest；示例留空以保持默认关闭。
+image = ""
+docker_socket = "~/.docker/run/docker.sock"
+docker_python_path = "/usr/bin/python3"
+max_cpus = 1.0
+allowed_languages = ["python"]
+request_timeout_seconds = 15
+health_interval_seconds = 30
+max_source_bytes = 65536
+max_stdin_bytes = 65536
+max_cpu_time_seconds = 10
+max_wall_time_seconds = 15
+min_memory_mb = 384
+max_memory_mb = 1024
+max_output_bytes = 131072
+max_processes = 32
+max_file_size_mb = 32
+max_artifact_bytes = 262144
+network_policy = "disabled"
+# token 只从 EDU_AGENT_JOBE_TOKEN 读取，不进入 TOML、日志或 SQLite。
+token_env = "EDU_AGENT_JOBE_TOKEN"
+# 仅在 scripts/code_sandbox_demo.py --e2e 对同一后端全部通过后改为 true。
+security_attested = false
+
+[storage]
+state_path = "~/.edu-agent/state.db"
+artifact_path = "~/.edu-agent/artifacts"
+
+[scheduler]
+enabled = false
+lease_seconds = 300
+
+[transaction]
+approval_ttl_seconds = 900
+outbox_lease_seconds = 30
+
+[delegation]
+# Only the concrete read-only teaching consumers use this surface.
+enabled = true
+max_depth = 1
+max_children_per_parent = 8
+max_concurrency = 3
+child_timeout_seconds = 30
+worker_lease_seconds = 45
+max_model_calls_per_child = 2
+max_tool_calls_per_child = 6
+max_tokens_per_child = 4000
+max_cost_usd_per_child = 0.05
+max_root_model_calls = 16
+max_root_tool_calls = 48
+max_root_tokens = 32000
+max_root_cost_usd = 0.40
+allowed_tool_categories = ["query", "analysis", "knowledge"]
+allowed_models = ["deterministic-readonly-v1"]
+allowed_child_roles = ["student", "teacher"]
+default_model = "deterministic-readonly-v1"
+allow_child_delegation = false
+
+[observability]
+# 本地 Trace/JSON(L) 始终可用；第三方遥测默认关闭且不会导入 OTel 包。
+otel_enabled = false
+# otlp_endpoint = "http://127.0.0.1:4318/v1/traces"
+trace_page_size = 100
+export_preview_chars = 512
+
+[api]
+# API request lease 应覆盖同步请求超时；过期 claim 会先检查持久 run/operation 状态。
+request_lease_seconds = 330
+request_retention_seconds = 604800
+failed_request_retention_seconds = 86400
+request_gc_batch_size = 200

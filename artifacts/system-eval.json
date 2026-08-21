@@ -1,0 +1,231 @@
+{
+  "agent": {
+    "metrics": {
+      "avg_model_calls": 2.3157894736842106,
+      "avg_tool_calls": 1.368421052631579,
+      "early_termination_rate": 0.0,
+      "irrelevance": {
+        "avg_model_calls": 1.0,
+        "avg_tool_calls": 0.0,
+        "early_termination_rate": null,
+        "n": 4,
+        "param_accuracy": null,
+        "step_completion_rate": null,
+        "tool_f1": null,
+        "tool_precision": null,
+        "tool_recall": null,
+        "trajectory_success_rate": 1.0
+      },
+      "latency_ms": {
+        "p50": 0.001479,
+        "p95": 0.012417
+      },
+      "model_calls": {
+        "p50": 2,
+        "p95": 4.0
+      },
+      "multi_step": {
+        "avg_model_calls": 3.6666666666666665,
+        "avg_tool_calls": 2.6666666666666665,
+        "early_termination_rate": 0.0,
+        "n": 6,
+        "param_accuracy": 1.0,
+        "step_completion_rate": 1.0,
+        "tool_f1": 1.0,
+        "tool_precision": 1.0,
+        "tool_recall": 1.0,
+        "trajectory_success_rate": 1.0
+      },
+      "plan_completion_rate": 1.0,
+      "relevance": {
+        "avg_model_calls": 2.0,
+        "avg_tool_calls": 1.0,
+        "early_termination_rate": 0.0,
+        "n": 3,
+        "param_accuracy": 1.0,
+        "step_completion_rate": 1.0,
+        "tool_f1": 1.0,
+        "tool_precision": 1.0,
+        "tool_recall": 1.0,
+        "trajectory_success_rate": 1.0
+      },
+      "single_step": {
+        "avg_model_calls": 2.0,
+        "avg_tool_calls": 1.0,
+        "early_termination_rate": 0.0,
+        "n": 5,
+        "param_accuracy": 1.0,
+        "step_completion_rate": 1.0,
+        "tool_f1": 1.0,
+        "tool_precision": 1.0,
+        "tool_recall": 1.0,
+        "trajectory_success_rate": 1.0
+      },
+      "tool_calls": {
+        "p50": 1,
+        "p95": 3.0
+      },
+      "trajectory_success_rate": 1.0
+    },
+    "source": "offline_oracle",
+    "status": "verified"
+  },
+  "api_recovery": {
+    "metrics": {
+      "claim_before_run_recovery": 1.0,
+      "payload_conflict_rejected": 1.0,
+      "response_committed_client_lost_replay": 1.0,
+      "run_completed_response_pending_recovery": 1.0,
+      "run_in_progress_recovery": "covered_by_stage8_socket_and_state_tests"
+    },
+    "source": "offline_sqlite_crash_window_recovery",
+    "status": "verified"
+  },
+  "commit": "unavailable",
+  "config_hash": "5be2a535691c4c908c0a7895066a139a4b25c81d13ddc492cb31283038250a96",
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.12.13",
+    "sqlite": "3.50.4"
+  },
+  "failed_trajectories": null,
+  "generated_at": "2026-08-18T03:02:15.467244+00:00",
+  "model": {
+    "mode": "offline_oracle",
+    "name": "oracle",
+    "seed": 42
+  },
+  "multi_agent": {
+    "metrics": {
+      "hidden_cost_model_calls": 0,
+      "parallel_elapsed_seconds": 0.065734,
+      "permission_leak_rate": 0.0,
+      "scheduling_overhead_seconds": 0.035734,
+      "success_rate": 1.0
+    },
+    "source": "offline_teaching_delegation_runtime",
+    "status": "verified"
+  },
+  "performance": {
+    "metrics": {
+      "estimated_cost_usd": 0.0,
+      "model_calls": {
+        "p50": 2,
+        "p95": 4.0
+      },
+      "model_latency_ms": {
+        "p50": 0.001479,
+        "p95": 0.012417
+      },
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "total": 0
+      },
+      "tool_calls": {
+        "p50": 1,
+        "p95": 3.0
+      },
+      "wall_seconds": 0.411521
+    },
+    "real_model": {
+      "metrics": null,
+      "status": "not_run"
+    },
+    "source": "offline_mock",
+    "status": "verified"
+  },
+  "rag": {
+    "hybrid": {
+      "metrics": null,
+      "status": "not_verified_without_semantic_provider"
+    },
+    "metrics": {
+      "acl_leak_rate": 0.0,
+      "citation_coverage": 1.0,
+      "citation_precision": 0.416667,
+      "mrr_at_3": 1.0,
+      "ndcg_at_3": 1.0,
+      "recall_at_3": 1.0
+    },
+    "semantic": {
+      "metrics": null,
+      "status": "not_enabled"
+    },
+    "source": "synthetic_course_materials_seed_42",
+    "status": "verified"
+  },
+  "reliability": {
+    "metrics": {
+      "cancel_latency_ms": 1.017583,
+      "cancel_requested": 1,
+      "circuit_or_fallback_hit": 1,
+      "lease_fencing_conflicts": 1,
+      "provider_events": 3,
+      "provider_recovery_rate": 1.0,
+      "recovery_success_rate": 1.0
+    },
+    "source": "offline_fault_injection_and_sqlite_lease",
+    "status": "verified"
+  },
+  "sandbox": {
+    "backend": "xiaobiny/jobe-custom@sha256:173036eb3b5cdc2a2634da0bd70eba56d22efced2b2981568359cc2c6bf63bd4",
+    "metrics": {
+      "cases": 15,
+      "escape": {
+        "cases": 2,
+        "pass_rate": 1.0,
+        "passed": 2
+      },
+      "network": {
+        "cases": 2,
+        "pass_rate": 1.0,
+        "passed": 2
+      },
+      "oom": {
+        "cases": 1,
+        "pass_rate": 1.0,
+        "passed": 1
+      },
+      "passed": 15,
+      "timeout": {
+        "cases": 1,
+        "pass_rate": 1.0,
+        "passed": 1
+      }
+    },
+    "source": "real_backend_report",
+    "status": "verified"
+  },
+  "schema_version": "edu-agent.system-eval.v2",
+  "trace_scaling": {
+    "config_hash": "05604cad1ff6cb4e51d35adced2d7f4ffba0cd93864d5e3bc6f387608b66c266",
+    "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
+    "metrics": {
+      "digest": "6cb9f01a5bfa291d3b38050fceba53d4ca0f9a8ebab6dae3158a466e4b000cb6",
+      "elapsed_seconds": 0.080731,
+      "events_per_second": 12399.138,
+      "exported_events": 1001,
+      "indexed_events": 1000,
+      "max_rows_loaded_per_page": 65,
+      "pages": 16,
+      "peak_memory_bytes": 250425,
+      "projected_events": 1001,
+      "rows_loaded": 1016,
+      "sql_queries": 33
+    },
+    "source": "offline_keyset_trace_benchmark",
+    "status": "verified"
+  },
+  "transaction": {
+    "metrics": {
+      "compensation_success_rate": 1.0,
+      "duplicate_side_effect_rate": 0.0,
+      "manual_review_ratio": 0.0,
+      "outbox_replay_dedup_rate": 1.0
+    },
+    "source": "offline_transaction_runtime",
+    "status": "verified"
+  },
+  "version": "0.1.0"
+}

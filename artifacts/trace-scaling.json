@@ -1,0 +1,35 @@
+{
+  "assertions": {
+    "bounded_page_reads": true,
+    "complete": true,
+    "no_page_times_full_projection": true
+  },
+  "commit": "not_available",
+  "config": {
+    "event_count": 10000,
+    "page_size": 100,
+    "seed": 42
+  },
+  "config_hash": "3e1efb906014cd88a1d7b481fe51890e56ddc7121a9e803bfe1296b4409eb50b",
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.12.13"
+  },
+  "generated_at": "2026-08-18T03:01:58.008734+00:00",
+  "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
+  "metrics": {
+    "digest": "3d8820b4646b700465464c2521f5db647f2c1215817fdee0aa240ac3517f891d",
+    "elapsed_seconds": 0.874516,
+    "events_per_second": 11436.039,
+    "exported_events": 10001,
+    "indexed_events": 10000,
+    "max_rows_loaded_per_page": 101,
+    "pages": 101,
+    "peak_memory_bytes": 385970,
+    "projected_events": 10001,
+    "rows_loaded": 10101,
+    "sql_queries": 203
+  },
+  "schema_version": "edu-agent.trace-scaling.v1",
+  "seed": 42
+}
