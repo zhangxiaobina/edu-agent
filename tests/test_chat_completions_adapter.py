@@ -13,6 +13,7 @@ from edu_agent.engine import (
     CredentialRef,
     GatewayEngine,
     OpenAICompatEngine,
+    ProviderCapabilities,
     ProviderGateway,
     ProviderSpec,
     ResilientEngine,
@@ -176,6 +177,42 @@ def test_plain_provider_gateway_has_the_default_chat_adapter():
     adapter = gateway.adapter_for(gateway.begin_turn(_spec()))
     assert isinstance(adapter, ChatCompletionsAdapter)
     assert adapter.api_mode is ApiMode.CHAT_COMPLETIONS
+
+
+def test_chat_tool_capability_fails_before_client_call():
+    calls = 0
+
+    class FakeCompletions:
+        def create(self, **request):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("client must not be called")
+
+    engine = GatewayEngine(
+        ProviderGateway(
+            adapters={
+                ApiMode.CHAT_COMPLETIONS: ChatCompletionsAdapter(
+                    SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+                )
+            }
+        ),
+        _spec(capabilities=ProviderCapabilities(tool_calling=False)),
+    )
+
+    with pytest.raises(ValueError, match="不支持 tool calling"):
+        engine.chat(
+            [{"role": "user", "content": "hello"}],
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_exams",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+    assert calls == 0
 
 
 def test_chat_completions_timeout_propagates_sdk_exception():

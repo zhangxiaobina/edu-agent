@@ -25,6 +25,7 @@ from .gateway import (
 )
 from .mock import MockEngine
 from .openai_compat import OpenAICompatEngine
+from .responses import ResponsesAdapter, ResponsesAPIError
 from .resilient import CircuitBreaker, FailureKind, ResilientEngine, classify_failure
 
 __all__ = [
@@ -46,6 +47,8 @@ __all__ = [
     "normalize_endpoint",
     "MockEngine",
     "OpenAICompatEngine",
+    "ResponsesAdapter",
+    "ResponsesAPIError",
     "ResilientEngine",
     "CircuitBreaker",
     "FailureKind",
@@ -83,22 +86,20 @@ def get_engine(config=None, **kwargs) -> Engine:
             timeout = kwargs.pop("timeout", None)
             if timeout is None:
                 timeout = float(os.environ.get("EDU_AGENT_TIMEOUT", "1800"))
-            adapter = _chat_completions_adapter(
+            adapters = _openai_adapters(
                 temperature=temperature,
                 timeout=timeout,
                 kwargs=kwargs,
             )
-            gateway = ProviderGateway(
-                adapters={ApiMode.CHAT_COMPLETIONS: adapter}
-            )
+            gateway = ProviderGateway(adapters=adapters)
             return GatewayEngine(gateway, spec, name="openai")
         spec = config.provider_spec()
-        adapter = _chat_completions_adapter(
+        adapters = _openai_adapters(
             temperature=config.temperature,
             timeout=config.timeout_seconds,
             kwargs=kwargs,
         )
-        gateway = ProviderGateway(adapters={ApiMode.CHAT_COMPLETIONS: adapter})
+        gateway = ProviderGateway(adapters=adapters)
         primary = GatewayEngine(gateway, spec, name="openai")
         fallback = None
         if config.fallback_model:
@@ -123,22 +124,25 @@ def get_engine(config=None, **kwargs) -> Engine:
     raise ValueError(f"未知引擎类型：{kind}")
 
 
-def _chat_completions_adapter(
+def _openai_adapters(
     *,
     temperature: float,
     timeout: float,
     kwargs: dict,
-) -> ChatCompletionsAdapter:
+) -> dict[ApiMode, ProviderAdapter]:
     client = kwargs.pop("client", None)
     client_factory = kwargs.pop("client_factory", None)
     api_key = kwargs.pop("api_key", None)
     if kwargs:
         unknown = ", ".join(sorted(kwargs))
         raise TypeError(f"OpenAI-compatible engine 不支持参数：{unknown}")
-    return ChatCompletionsAdapter(
-        client,
-        client_factory=client_factory,
-        api_key=api_key,
-        temperature=temperature,
-        timeout=timeout,
-    )
+    common = {
+        "client_factory": client_factory,
+        "api_key": api_key,
+        "temperature": temperature,
+        "timeout": timeout,
+    }
+    return {
+        ApiMode.CHAT_COMPLETIONS: ChatCompletionsAdapter(client, **common),
+        ApiMode.RESPONSES: ResponsesAdapter(client, **common),
+    }

@@ -373,8 +373,12 @@ class ProviderGateway:
             # Lazy import keeps gateway.py independent from the concrete SDK
             # adapter while making the default R1 route usable on its own.
             from .chat_completions import ChatCompletionsAdapter
+            from .responses import ResponsesAdapter
 
-            adapters = {ApiMode.CHAT_COMPLETIONS: ChatCompletionsAdapter()}
+            adapters = {
+                ApiMode.CHAT_COMPLETIONS: ChatCompletionsAdapter(),
+                ApiMode.RESPONSES: ResponsesAdapter(),
+            }
         resolved_adapters: dict[ApiMode, ProviderAdapter] = {}
         for configured_mode, adapter in adapters.items():
             mode = ApiMode.parse(configured_mode)

@@ -1,0 +1,20 @@
+{
+  "id": "resp-bad-arguments",
+  "object": "response",
+  "created_at": 6.0,
+  "model": "response-bad-arguments-model",
+  "output": [
+    {
+      "id": "fc-bad",
+      "type": "function_call",
+      "call_id": "call-bad",
+      "name": "list_exams",
+      "arguments": "{not-json",
+      "status": "completed"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": [],
+  "status": "completed"
+}

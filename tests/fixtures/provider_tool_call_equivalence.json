@@ -1,0 +1,77 @@
+{
+  "chat_completions": {
+    "id": "chatcmpl-equivalent",
+    "object": "chat.completion",
+    "created": 7,
+    "model": "equivalent-model",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Checking both.",
+          "tool_calls": [
+            {
+              "id": "call-a",
+              "type": "function",
+              "function": {
+                "name": "list_exams",
+                "arguments": "{}"
+              }
+            },
+            {
+              "id": "call-b",
+              "type": "function",
+              "function": {
+                "name": "query_student_scores",
+                "arguments": "{\"exam_id\":17}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ]
+  },
+  "responses": {
+    "id": "resp-equivalent",
+    "object": "response",
+    "created_at": 7.0,
+    "model": "equivalent-model",
+    "output": [
+      {
+        "id": "msg-equivalent",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "Checking both.",
+            "annotations": []
+          }
+        ]
+      },
+      {
+        "id": "fc-a",
+        "type": "function_call",
+        "call_id": "call-a",
+        "name": "list_exams",
+        "arguments": "{}",
+        "status": "completed"
+      },
+      {
+        "id": "fc-b",
+        "type": "function_call",
+        "call_id": "call-b",
+        "name": "query_student_scores",
+        "arguments": "{\"exam_id\":17}",
+        "status": "completed"
+      }
+    ],
+    "parallel_tool_calls": true,
+    "tool_choice": "auto",
+    "tools": [],
+    "status": "completed"
+  }
+}

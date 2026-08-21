@@ -1,0 +1,15 @@
+{
+  "id": "resp-error",
+  "object": "response",
+  "created_at": 4.0,
+  "model": "response-error-model",
+  "output": [],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": [],
+  "status": "failed",
+  "error": {
+    "code": "server_error",
+    "message": "fixture generation failed"
+  }
+}

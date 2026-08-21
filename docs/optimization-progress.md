@@ -2,13 +2,13 @@
 
 ## Current
 
-- last_completed_prompt: R1.2
-- next_prompt: R1.3
+- last_completed_prompt: R1.3
+- next_prompt: R1.4
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0 gate 保持 passed；R1.2 已将 Chat Completions 收口到 Gateway adapter 并通过离线
-  wire/异常/Agent/Runtime 回归，但 Responses、恢复策略、Retry-After/jitter 和 capability fallback 尚待
-  R1.3-R1.5，不能提前把 R1 总门禁标为 passed
+- stage_gate_reason: R0 gate 保持 passed；R1.3 已接入最小同步 Responses adapter，并通过双 mode 离线
+  wire/契约/Trace 脱敏和全量回归，但 Retry-After/jitter、per-route breaker 与 capability fallback 尚待
+  R1.4-R1.5，不能提前把 R1 总门禁标为 passed
 
 ## Baseline Reproduction
 
@@ -323,3 +323,45 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   的离线 fixture 继续覆盖。R1 总门禁保持 `in_progress`。
 - next: R1.3，基于锁定 SDK/fake wire 实现最小 Responses adapter，并为 Chat/Responses 建立等价 tool-call
   契约；保持同步 Agent Loop，不实现 streaming 或额外厂商。
+
+### R1.3 - 2026-08-22
+
+- commit/evidence: 会话从与 `origin/main` 同步的 R1.2 提交
+  `2e4712c9dab51548c2cc760cc7e25781de647ade` 开始；R1.3 实现 commit 以包含本交接记录的 Git 提交为准，
+  不在提交内容中自引用无法预先确定的哈希。开始时工作区干净，未覆盖用户改动。实现前直接检查锁定的
+  `openai 2.43.0`：`Responses.create`、`FunctionToolParam`、`ResponseFunctionToolCall`、`Response.output/status`
+  与 `ResponseUsage` 的生成签名/类型，而非凭记忆推断字段。
+- changes: 新增同步 `ResponsesAdapter`，把内部 system/developer/user/assistant 消息映射为 Responses text
+  input，把历史 Chat 形态 assistant tool call/result 映射为扁平 `function_call/function_call_output` item，
+  并把嵌套 Chat function tools 转成 SDK 2.43.0 要求的扁平 function tool。响应按 output 顺序聚合交错
+  `output_text`，使用 `call_id/name/arguments` 生成现有 `ToolCall`；坏 JSON arguments 原样保留给既有工具
+  参数校验，未知 output item 忽略。Responses 的 input/output usage 名称映射到 Chat 的
+  prompt/completion 语义，completed/incomplete status 映射为 `stop/tool_calls/length/content_filter`，响应内
+  failed/cancelled/非终态由 `ResponsesAPIError` 明确失败，model 缺失时回落冻结 route。
+- capabilities: adapter 明确声明 `tool_calling=true`、`usage=true`、`structured_output=false`、
+  `streaming=false`，model-specific `context_window_tokens/max_output_tokens=None` 表示未知而非无限。route
+  禁用 tool calling、strict schema、非 function tool、非文本 message、孤立 tool result 和超过已声明
+  context window 的输入均在创建 SDK client/发 HTTP 前失败；Chat adapter 同步增加 route tool capability
+  预检。`ProviderGateway` 与 `get_engine` 同时注册两种 mode，旧 `OpenAICompatEngine`、同步 Agent Loop、
+  DashScope/vLLM Chat 路径和 fallback 形态不变。
+- fixtures/contracts: 新增六组 Responses JSON fixture，覆盖单/多 function call、交错 text、缺失 usage、
+  incomplete、response error、未知 output item 和坏 arguments；均通过 `httpx.MockTransport` 穿过真实锁定
+  SDK。新增同一语义双 mode fixture，分别经 `/chat/completions` 与 `/responses` Gateway 路径得到完全等价
+  的内部 tool-call 序列。Responses 端到端 canary 测试确认秘密进入 Provider input，但不进入冻结 route、
+  SQLite provider event/持久化消息或导出 Trace，凭据环境变量名同样不落审计面。
+- migrations/config: 无数据库 migration、无新环境变量、无依赖或 lockfile 变化；现有 `api_mode=responses`
+  配置现在可执行。README/architecture 补充第二个 adapter、同步边界与 capability 口径。本会话未增加
+  Anthropic、Gemini、消息平台 Gateway、多厂商认证、structured text output 或 streaming。
+- verification: Responses/Chat/双 mode contract/Provider Gateway 专项 `48 passed (0.45s)`；显式清空模型及
+  平台凭据、mock/local、`--frozen --offline` 全量 `244 passed (13.82s)`；全仓 offline ruff 为 0
+  diagnostics。`uv lock --check` 解析 91 packages，`uv pip check` 检查 62 packages/0 conflicts；全部 JSON
+  fixture 可解析，`git diff --check` 通过。所有 Provider 测试均离线，无真实模型请求。
+- not_verified: 没有访问真实 Provider、模型或发送真实凭据，没有验证 Docker/Jobe、semantic provider、
+  GitHub-hosted CI 或真实 OpenAI model-specific context/output limits。尝试只读获取官方 OpenAI Responses/
+  function-calling 页面时站点返回 HTTP 403，因此协议字段的本会话证据是锁定 SDK 2.43.0 生成类型与离线
+  fake HTTP wire；普通切片按协议未运行阶段收口用 `accept_stage8.sh`。
+- residual_risks: Responses adapter 仅支持同步 text/function-call 小面；model-specific capability 仍需部署
+  显式声明，未知限制不会被伪装成无限。`ResponsesAPIError` 的重试分类、Retry-After/jitter、并发上限和
+  per-route breaker 留给 R1.4；跨 mode fallback capability 门禁留给 R1.5。R1 总门禁保持 `in_progress`。
+- next: R1.4，读取本交接、`engine/resilient.py`、Provider 事件与现有故障测试，实现 Retry-After、确定性
+  jitter、有界并发和 per-route circuit breaker；不得提前做 capability fallback、凭据池或流式重试。

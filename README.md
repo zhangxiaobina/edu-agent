@@ -141,6 +141,7 @@ edu-agent/
 │   │   ├── base.py               引擎抽象接口
 │   │   ├── gateway.py            Provider route、adapter 选择与同步 Engine facade
 │   │   ├── chat_completions.py   OpenAI-compatible Chat Completions wire adapter
+│   │   ├── responses.py          OpenAI Responses API 同步 wire adapter
 │   │   ├── mock.py               离线确定性 mock（不联网、无 key）
 │   │   └── openai_compat.py      旧构造参数兼容薄层（请求逻辑已迁入 Gateway adapter）
 │   ├── agent/                    LangGraph 编排

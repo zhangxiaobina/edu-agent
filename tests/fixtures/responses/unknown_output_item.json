@@ -1,0 +1,30 @@
+{
+  "id": "resp-unknown",
+  "object": "response",
+  "created_at": 5.0,
+  "model": "response-unknown-model",
+  "output": [
+    {
+      "id": "future-one",
+      "type": "future_output_item",
+      "payload": "ignored"
+    },
+    {
+      "id": "msg-known",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Known text",
+          "annotations": []
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": [],
+  "status": "completed"
+}

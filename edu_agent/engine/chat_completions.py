@@ -119,6 +119,10 @@ class ChatCompletionsAdapter:
             raise ValueError(
                 f"ChatCompletionsAdapter 不能处理 {route.api_mode.value} route"
             )
+        if tools and (
+            not self.capabilities.tool_calling or not route.capabilities.tool_calling
+        ):
+            raise ValueError("当前 Chat Completions route 不支持 tool calling")
         request: dict[str, Any] = {
             "model": route.model,
             "messages": messages,

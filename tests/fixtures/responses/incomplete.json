@@ -1,0 +1,39 @@
+{
+  "id": "resp-incomplete",
+  "object": "response",
+  "created_at": 3.0,
+  "model": "response-incomplete-model",
+  "output": [
+    {
+      "id": "msg-partial",
+      "type": "message",
+      "role": "assistant",
+      "status": "incomplete",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Partial",
+          "annotations": []
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": [],
+  "status": "incomplete",
+  "incomplete_details": {
+    "reason": "max_output_tokens"
+  },
+  "usage": {
+    "input_tokens": 5,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 3,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 8
+  }
+}

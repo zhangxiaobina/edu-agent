@@ -17,6 +17,7 @@ from edu_agent.engine import (
     ProviderMetadata,
     ProviderSpec,
     ResolvedRoute,
+    ResponsesAdapter,
     get_engine,
     normalize_endpoint,
 )
@@ -349,12 +350,15 @@ def test_legacy_environment_builds_chat_route_without_network(monkeypatch):
     assert canary not in json.dumps(route.to_event())
 
 
-def test_responses_mode_is_parsed_but_not_sent_through_chat_adapter(monkeypatch):
+def test_responses_mode_is_parsed_and_selects_responses_adapter(monkeypatch):
     monkeypatch.setenv("EDU_AGENT_ENGINE", "openai")
     monkeypatch.setenv("EDU_AGENT_API_MODE", "responses")
     monkeypatch.setenv("EDU_AGENT_BASE_URL", "https://api.openai.com/v1")
-    with pytest.raises(ValueError, match="仅支持 chat_completions"):
-        get_engine()
+    engine = get_engine()
+
+    route = engine.begin_turn_routes()[0]
+    assert route.api_mode is ApiMode.RESPONSES
+    assert isinstance(engine.gateway.adapter_for(route), ResponsesAdapter)
 
 
 class _RoutedFakeEngine(Engine):

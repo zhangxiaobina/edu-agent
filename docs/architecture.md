@@ -36,17 +36,22 @@ flowchart LR
 
 ## Provider Gateway 与同步兼容面
 
-当前真实模型调用路径是 `Engine.chat -> GatewayEngine -> ProviderGateway ->
-ChatCompletionsAdapter -> OpenAI SDK`。`ProviderSpec` 先解析为不可变 `ResolvedRoute`，Gateway 再按
-`ApiMode` 选择 adapter；Chat Completions adapter 是唯一负责拼装 `messages/model/temperature/tools`、
-调用 SDK 和规范化 `EngineResponse/ToolCall` 的位置。通义兼容端点与本地 vLLM 仍走同一条路径，
-`MockEngine`、Agent 图和 eval 继续只依赖同步 `Engine.chat(messages, tools)`。
+当前真实模型调用路径是 `Engine.chat -> GatewayEngine -> ProviderGateway -> API-mode adapter ->
+OpenAI SDK`。`ProviderSpec` 先解析为不可变 `ResolvedRoute`，Gateway 再按 `ApiMode` 选择
+`ChatCompletionsAdapter` 或 `ResponsesAdapter`。每个 adapter 独占自己的 wire 映射和
+`EngineResponse/ToolCall` 规范化；Responses adapter 会把 Chat 形态的历史 function call/result 分别转成
+`function_call`/`function_call_output` item，并把 token 名称和 completion status 归一到现有 Chat 语义。
+通义兼容端点与本地 vLLM 仍走 Chat Completions，`MockEngine`、Agent 图和 eval 继续只依赖同步
+`Engine.chat(messages, tools)`。
 
 新代码通过 `edu_agent.engine.get_engine()` 获取 Gateway-backed Engine（配置启用韧性层时外包一层
 `ResilientEngine`）。直接构造
 `OpenAICompatEngine(base_url, api_key, model, ...)` 的旧调用仍兼容，但该类只是把旧参数翻译成
-`ProviderSpec + ChatCompletionsAdapter` 的薄层，不再维护第二套请求逻辑。当前只注册
-`chat_completions`；Responses 和真正的 Provider streaming 尚未实现。
+`ProviderSpec + ChatCompletionsAdapter` 的薄层，不再维护第二套请求逻辑。Gateway 工厂注册
+`chat_completions` 与 `responses` 两种 mode；两者当前均为同步调用。Responses mode 的 tool calling 与
+usage 已启用，text-format structured output 和 Provider streaming 明确关闭；model-specific context/output
+上限为 `None` 时表示未知，不能解释为无限。已声明不支持的 tool/strict schema、非文本输入或已超过明确
+context window 的请求会在 SDK 调用前失败。
 
 ## 请求数据流
 

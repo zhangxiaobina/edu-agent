@@ -1,0 +1,44 @@
+{
+  "id": "resp-single",
+  "object": "response",
+  "created_at": 1.0,
+  "model": "response-single-model",
+  "output": [
+    {
+      "id": "msg-single",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Checking.",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "id": "fc-single",
+      "type": "function_call",
+      "call_id": "call-single",
+      "name": "list_exams",
+      "arguments": "{}",
+      "status": "completed"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": [],
+  "status": "completed",
+  "usage": {
+    "input_tokens": 11,
+    "input_tokens_details": {
+      "cached_tokens": 2
+    },
+    "output_tokens": 7,
+    "output_tokens_details": {
+      "reasoning_tokens": 1
+    },
+    "total_tokens": 18
+  }
+}

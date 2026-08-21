@@ -1,0 +1,67 @@
+{
+  "id": "resp-multi",
+  "object": "response",
+  "created_at": 2.0,
+  "model": "response-multi-model",
+  "output": [
+    {
+      "id": "msg-before",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Before. ",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "id": "fc-one",
+      "type": "function_call",
+      "call_id": "call-one",
+      "name": "list_exams",
+      "arguments": "{}",
+      "status": "completed"
+    },
+    {
+      "id": "msg-between",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Between. ",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "id": "fc-two",
+      "type": "function_call",
+      "call_id": "call-two",
+      "name": "query_student_scores",
+      "arguments": "{\"exam_id\":17}",
+      "status": "completed"
+    },
+    {
+      "id": "msg-after",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "After.",
+          "annotations": []
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": [],
+  "status": "completed"
+}
