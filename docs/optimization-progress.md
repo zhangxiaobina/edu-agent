@@ -2,13 +2,13 @@
 
 ## Current
 
-- last_completed_prompt: R1.1
-- next_prompt: R1.2
+- last_completed_prompt: R1.2
+- next_prompt: R1.3
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0 gate 保持 passed；R1.1 已建立 Provider route/config 契约并通过离线专项与全量回归，
-  但 Chat Completions adapter 迁移、Responses、恢复策略和 capability fallback 尚待 R1.2-R1.5，不能提前把
-  R1 总门禁标为 passed
+- stage_gate_reason: R0 gate 保持 passed；R1.2 已将 Chat Completions 收口到 Gateway adapter 并通过离线
+  wire/异常/Agent/Runtime 回归，但 Responses、恢复策略、Retry-After/jitter 和 capability fallback 尚待
+  R1.3-R1.5，不能提前把 R1 总门禁标为 passed
 
 ## Baseline Reproduction
 
@@ -293,3 +293,33 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   和 per-route breaker 仍按路线留给 R1.4。R1 总门禁保持 `in_progress`。
 - next: R1.2，将现有 OpenAI-compatible Chat Completions 迁到本契约后的 adapter，并保持 Agent/同步返回和
   旧配置行为不变；不得提前接 Responses 或改变流式协议。
+
+### R1.2 - 2026-08-22
+
+- commit/evidence: 会话从 R1.1 提交 `279f46afa14de367ea34e0bd30e80a1b21abd5fd` 开始；R1.2 实现 commit
+  以包含本交接记录的 Git 提交为准，不在提交内容中自引用无法预先确定的哈希。开始时工作区干净，未覆盖
+  用户改动。
+- changes: 新增 `ChatCompletionsAdapter`，唯一负责 normalized messages/tools 到 OpenAI-compatible
+  `chat.completions.create` 的同步 wire 映射，以及 response 到 `EngineResponse/ToolCall` 的规范化；保留
+  `usage`、`finish_reason`、`model`、`None`/空 content、多 tool call 和字符串 arguments。`ProviderGateway`
+  增加默认 Chat adapter 注册、按 `ApiMode` 选择和 `GatewayEngine` 同步 facade；`get_engine` 的 primary/fallback
+  均走同一 adapter/Gateway 路径，Agent、eval、mock 的 `Engine.chat` 面不变。`OpenAICompatEngine` 保留旧
+  构造参数和 `configure_provider_route`，但已薄化为 Gateway 兼容层，删除重复 SDK 请求/响应逻辑。补充
+  架构/README 的迁移说明。
+- migrations/config: 无数据库 migration、无新环境变量、无依赖变更；不实现 Responses 或 streaming。
+  adapter 支持注入 SDK client/client factory，按冻结 route endpoint/credential 创建 client，保留旧
+  `EDU_AGENT_*`、DashScope/vLLM endpoint 和 fallback 配置行为。
+- verification: 新增 `tests/test_chat_completions_adapter.py`，用 `httpx.MockTransport` 穿过真实 OpenAI
+  SDK 验证 `/chat/completions` URL、Authorization、空/非空 tools、tool_choice、temperature、超时设置；
+  fixture 覆盖空 content、空字符串 arguments、多 tool call、usage、finish reason/model，并验证
+  `APITimeoutError`/`BadRequestError` 原样传播。adapter/provider/韧性专项 `48 passed`；Agent/Runtime/
+  service/observability 组合专项在获准回环环境 `129 passed`；显式空凭据、mock/local、offline 全量
+  `233 passed (13.62s)`；`uv lock --check`、`uv pip check`、全仓 offline ruff 和 `git diff --check` 均通过。
+- not_verified: 没有访问公网或真实模型；Responses、streaming、Docker/Jobe、semantic provider 和托管 CI
+  仍未运行。受限沙箱中 4 个既有 HTTP/SSE 测试因禁止绑定 `127.0.0.1:0` 无法验证，已在获准本机回环环境
+  通过，不计为代码失败。
+- residual_risks: adapter 当前只支持同步 Chat Completions；Provider capability 尚未用于跨 route fallback
+  兼容性门禁，Retry-After/jitter/concurrency/breaker 细化留给 R1.4；真实厂商 wire 差异尚需 R1.3/R1.5
+  的离线 fixture 继续覆盖。R1 总门禁保持 `in_progress`。
+- next: R1.3，基于锁定 SDK/fake wire 实现最小 Responses adapter，并为 Chat/Responses 建立等价 tool-call
+  契约；保持同步 Agent Loop，不实现 streaming 或额外厂商。

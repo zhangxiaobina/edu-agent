@@ -1,82 +1,60 @@
-"""OpenAI 兼容端点引擎：接通义千问 DashScope / 本地 vLLM / 算法仓 W4A16 Qwen3-14B。
+"""Legacy OpenAI-compatible engine constructor.
 
-通过环境变量配置，不写死任何 key：
-  EDU_AGENT_BASE_URL   端点(如 https://dashscope.aliyuncs.com/compatible-mode/v1
-                       或 http://127.0.0.1:8000/v1)
-  EDU_AGENT_API_KEY    API key（vLLM 本地可填任意占位）
-  EDU_AGENT_MODEL      模型名（如 qwen-plus / Qwen/Qwen3-14B）
-
-vLLM 起 Qwen3 时需 `--tool-call-parser hermes --enable-auto-tool-choice`，
-其 /v1 接口即 OpenAI 兼容，故本适配器同时覆盖「通义 API」与「自部署 vLLM」两条路。
+New code should use ``get_engine`` (or ``GatewayEngine`` with an explicitly
+registered ``ChatCompletionsAdapter``). ``OpenAICompatEngine`` remains as a
+thin constructor-compatible facade; all request building, SDK calls, response
+normalization, and adapter selection now go through the Provider Gateway.
 """
 from __future__ import annotations
 
 import os
+from typing import Any
 
-from .base import Engine, EngineResponse, ToolCall
-from .gateway import ProviderGateway, ProviderSpec, ResolvedRoute
+from .chat_completions import ChatCompletionsAdapter
+from .gateway import ApiMode, GatewayEngine, ProviderGateway, ProviderSpec
 
 
-class OpenAICompatEngine(Engine):
+class OpenAICompatEngine(GatewayEngine):
+    """Deprecated constructor-compatible alias for the Gateway chat engine."""
+
     name = "openai"
 
-    def __init__(self, base_url: str | None = None, api_key: str | None = None,
-                 model: str | None = None, temperature: float = 0.0,
-                 timeout: float | None = None):
-        try:
-            from openai import OpenAI
-        except ImportError as e:  # pragma: no cover
-            raise RuntimeError("需要 openai 包：uv pip install openai") from e
-        self.base_url = base_url or os.environ.get("EDU_AGENT_BASE_URL")
-        self.api_key = api_key or os.environ.get("EDU_AGENT_API_KEY", "EMPTY")
-        self.model = model or os.environ.get("EDU_AGENT_MODEL", "qwen-plus")
-        self.temperature = temperature
-        # 慢端点（GB10 上 fp16 14B 单请求约几 tok/s，并发时更低）会让长 think 生成超过
-        # openai 客户端默认 600s 而抛 APITimeoutError → 整条轨迹记为空。放宽到默认 1800s，
-        # 可用 EDU_AGENT_TIMEOUT 覆盖。
-        self.timeout = timeout if timeout is not None else \
-            float(os.environ.get("EDU_AGENT_TIMEOUT", "1800"))
-        self._client = OpenAI(base_url=self.base_url, api_key=self.api_key,
-                              timeout=self.timeout)
-        self._provider_spec: ProviderSpec | None = None
-        self._provider_gateway: ProviderGateway | None = None
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.0,
+        timeout: float | None = None,
+        *,
+        client: Any | None = None,
+        client_factory=None,
+    ):
+        resolved_base_url = base_url or os.environ.get("EDU_AGENT_BASE_URL") or None
+        resolved_api_key = api_key or os.environ.get("EDU_AGENT_API_KEY") or "EMPTY"
+        resolved_model = model or os.environ.get("EDU_AGENT_MODEL") or "qwen-plus"
+        resolved_timeout = (
+            timeout
+            if timeout is not None
+            else float(os.environ.get("EDU_AGENT_TIMEOUT", "1800"))
+        )
+        adapter = ChatCompletionsAdapter(
+            client,
+            client_factory=client_factory,
+            api_key=resolved_api_key,
+            temperature=temperature,
+            timeout=resolved_timeout,
+        )
+        gateway = ProviderGateway(adapters={ApiMode.CHAT_COMPLETIONS: adapter})
+        spec = ProviderSpec(model=resolved_model, endpoint=resolved_base_url)
+        super().__init__(gateway, spec, name=self.name)
+        self.api_key = resolved_api_key
+        self._adapter = adapter
 
     def configure_provider_route(
         self,
         spec: ProviderSpec,
         gateway: ProviderGateway,
     ) -> None:
-        self._provider_spec = spec
-        self._provider_gateway = gateway
-
-    def begin_turn_routes(self) -> tuple[ResolvedRoute, ...]:
-        if self._provider_spec is None or self._provider_gateway is None:
-            return ()
-        return (self._provider_gateway.begin_turn(self._provider_spec),)
-
-    def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
-        request = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-        }
-        if tools:
-            request.update({"tools": tools, "tool_choice": "auto"})
-        resp = self._client.chat.completions.create(**request)
-        msg = resp.choices[0].message
-        tool_calls = [
-            ToolCall(
-                id=tool_call.id,
-                name=tool_call.function.name,
-                arguments=tool_call.function.arguments or "{}",
-            )
-            for tool_call in (msg.tool_calls or [])
-        ]
-        usage = resp.usage.model_dump() if resp.usage is not None else {}
-        return EngineResponse(
-            content=msg.content,
-            tool_calls=tool_calls,
-            usage=usage,
-            finish_reason=resp.choices[0].finish_reason,
-            model=resp.model,
-        )
+        """Keep the R1.1 setup hook while routing through the shared adapter."""
+        self._configure_route(gateway.with_adapter(self._adapter), spec)

@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
 
-from .base import EngineResponse
+from .base import Engine, EngineResponse
 
 
 class ApiMode(str, Enum):
@@ -358,13 +358,68 @@ _OFFICIAL_HOST_RULES: Mapping[str, _OfficialHostRule] = MappingProxyType(
 
 
 class ProviderGateway:
-    """Resolve a complete, immutable route before a turn can issue provider calls."""
+    """Resolve immutable routes and dispatch them to the matching API-mode adapter."""
 
-    def __init__(self, registry: Mapping[str, ProviderMetadata] | None = None):
+    def __init__(
+        self,
+        registry: Mapping[str, ProviderMetadata] | None = None,
+        adapters: Mapping[ApiMode | str, ProviderAdapter] | None = None,
+    ):
         source = DEFAULT_PROVIDER_REGISTRY if registry is None else registry
         self._registry = MappingProxyType(
             {_validate_identifier(name, "provider registry key"): metadata for name, metadata in source.items()}
         )
+        if adapters is None:
+            # Lazy import keeps gateway.py independent from the concrete SDK
+            # adapter while making the default R1 route usable on its own.
+            from .chat_completions import ChatCompletionsAdapter
+
+            adapters = {ApiMode.CHAT_COMPLETIONS: ChatCompletionsAdapter()}
+        resolved_adapters: dict[ApiMode, ProviderAdapter] = {}
+        for configured_mode, adapter in adapters.items():
+            mode = ApiMode.parse(configured_mode)
+            try:
+                adapter_mode = ApiMode.parse(adapter.api_mode)
+            except AttributeError as error:
+                raise ValueError("provider adapter 缺少 api_mode") from error
+            if adapter_mode is not mode:
+                raise ValueError("provider adapter 注册 mode 与声明不一致")
+            if not isinstance(getattr(adapter, "capabilities", None), ProviderCapabilities):
+                raise ValueError("provider adapter capabilities 无效")
+            if not callable(getattr(adapter, "chat", None)):
+                raise ValueError("provider adapter 缺少 chat")
+            resolved_adapters[mode] = adapter
+        self._adapters = MappingProxyType(resolved_adapters)
+
+    def with_adapter(self, adapter: ProviderAdapter) -> ProviderGateway:
+        """Return a gateway with one adapter added or replaced, preserving route metadata."""
+        mode = ApiMode.parse(adapter.api_mode)
+        return ProviderGateway(
+            self._registry,
+            adapters={**self._adapters, mode: adapter},
+        )
+
+    def adapter_for(self, route: ResolvedRoute) -> ProviderAdapter:
+        """Select the adapter declared for the route's frozen API mode."""
+        adapter = self._adapters.get(route.api_mode)
+        if adapter is not None:
+            return adapter
+        supported = ", ".join(mode.value for mode in self._adapters)
+        if supported:
+            raise ValueError(
+                f"当前 Provider Gateway 仅支持 {supported}；"
+                f"未注册 {route.api_mode.value} adapter"
+            )
+        raise ValueError(f"当前 Provider Gateway 未注册 {route.api_mode.value} adapter")
+
+    def chat(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> EngineResponse:
+        """Dispatch one normalized synchronous request without changing Engine.chat."""
+        return self.adapter_for(route).chat(route, messages, tools)
 
     def begin_turn(self, spec: ProviderSpec) -> ResolvedRoute:
         _reject_credential_in_route_fields(spec)
@@ -434,10 +489,54 @@ class ProviderGateway:
         )
 
 
+class GatewayEngine(Engine):
+    """Synchronous Engine facade over one route selected by ProviderGateway."""
+
+    def __init__(
+        self,
+        gateway: ProviderGateway,
+        spec: ProviderSpec,
+        *,
+        name: str | None = None,
+    ):
+        self._configure_route(gateway, spec)
+        self.name = name or f"{self.route.provider}:{self.route.api_mode.value}"
+
+    def _configure_route(self, gateway: ProviderGateway, spec: ProviderSpec) -> None:
+        route = gateway.begin_turn(spec)
+        gateway.adapter_for(route)
+        self.gateway = gateway
+        self.spec = spec
+        self.route = route
+
+    @property
+    def model(self) -> str:
+        return self.route.model
+
+    @property
+    def base_url(self) -> str:
+        return self.route.endpoint
+
+    @property
+    def temperature(self) -> float:
+        return float(getattr(self.gateway.adapter_for(self.route), "temperature", 0.0))
+
+    @property
+    def timeout(self) -> float:
+        return float(getattr(self.gateway.adapter_for(self.route), "timeout", 0.0))
+
+    def begin_turn_routes(self) -> tuple[ResolvedRoute, ...]:
+        return (self.route,)
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
+        return self.gateway.chat(self.route, messages, tools)
+
+
 __all__ = [
     "ApiMode",
     "CredentialRef",
     "DEFAULT_PROVIDER_REGISTRY",
+    "GatewayEngine",
     "ModeSource",
     "ProviderAdapter",
     "ProviderCapabilities",

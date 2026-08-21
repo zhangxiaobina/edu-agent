@@ -139,8 +139,10 @@ edu-agent/
 │   │   └── registry.py           dispatch + openai_tools 导出
 │   ├── engine/                   可替换工具调用引擎
 │   │   ├── base.py               引擎抽象接口
+│   │   ├── gateway.py            Provider route、adapter 选择与同步 Engine facade
+│   │   ├── chat_completions.py   OpenAI-compatible Chat Completions wire adapter
 │   │   ├── mock.py               离线确定性 mock（不联网、无 key）
-│   │   └── openai_compat.py      OpenAI 兼容适配器（通义千问 / 本地 vLLM / W4A16）
+│   │   └── openai_compat.py      旧构造参数兼容薄层（请求逻辑已迁入 Gateway adapter）
 │   ├── agent/                    LangGraph 编排
 │   │   ├── graph.py              ReAct + ready step + 确定性完成门禁
 │   │   ├── prompts.py            系统提示（含多步执行纪律）

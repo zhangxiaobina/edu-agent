@@ -34,6 +34,20 @@ flowchart LR
 | `RuntimeManager` | session lease、heartbeat、fencing、取消 | `session_leases/runs` | 宣称跨主机共识 |
 | `TraceRepository` | owner-scoped keyset 查询与分页导出 | 可重建 `trace_event_index` | 修改业务状态、读取 Artifact 全文 |
 
+## Provider Gateway 与同步兼容面
+
+当前真实模型调用路径是 `Engine.chat -> GatewayEngine -> ProviderGateway ->
+ChatCompletionsAdapter -> OpenAI SDK`。`ProviderSpec` 先解析为不可变 `ResolvedRoute`，Gateway 再按
+`ApiMode` 选择 adapter；Chat Completions adapter 是唯一负责拼装 `messages/model/temperature/tools`、
+调用 SDK 和规范化 `EngineResponse/ToolCall` 的位置。通义兼容端点与本地 vLLM 仍走同一条路径，
+`MockEngine`、Agent 图和 eval 继续只依赖同步 `Engine.chat(messages, tools)`。
+
+新代码通过 `edu_agent.engine.get_engine()` 获取 Gateway-backed Engine（配置启用韧性层时外包一层
+`ResilientEngine`）。直接构造
+`OpenAICompatEngine(base_url, api_key, model, ...)` 的旧调用仍兼容，但该类只是把旧参数翻译成
+`ProviderSpec + ChatCompletionsAdapter` 的薄层，不再维护第二套请求逻辑。当前只注册
+`chat_completions`；Responses 和真正的 Provider streaming 尚未实现。
+
 ## 请求数据流
 
 ```mermaid

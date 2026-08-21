@@ -8,9 +8,11 @@ from __future__ import annotations
 import os
 
 from .base import Engine, EngineResponse, ToolCall
+from .chat_completions import ChatCompletionsAdapter
 from .gateway import (
     ApiMode,
     CredentialRef,
+    GatewayEngine,
     ModeSource,
     ProviderAdapter,
     ProviderCapabilities,
@@ -30,7 +32,9 @@ __all__ = [
     "EngineResponse",
     "ToolCall",
     "ApiMode",
+    "ChatCompletionsAdapter",
     "CredentialRef",
+    "GatewayEngine",
     "ModeSource",
     "ProviderAdapter",
     "ProviderCapabilities",
@@ -62,31 +66,40 @@ def get_engine(config=None, **kwargs) -> Engine:
             raise ValueError("mock 引擎需提供 policy 参数")
         return MockEngine(kwargs["policy"])
     if kind == "openai":
-        gateway = ProviderGateway()
         if config is None:
             spec = ProviderSpec(
-                model=kwargs.get("model") or os.environ.get("EDU_AGENT_MODEL") or "qwen-plus",
-                endpoint=kwargs.get("base_url") or os.environ.get("EDU_AGENT_BASE_URL") or None,
+                model=kwargs.pop("model", None)
+                or os.environ.get("EDU_AGENT_MODEL")
+                or "qwen-plus",
+                endpoint=kwargs.pop("base_url", None)
+                or os.environ.get("EDU_AGENT_BASE_URL")
+                or None,
                 api_mode=os.environ.get("EDU_AGENT_API_MODE") or None,
                 provider=os.environ.get("EDU_AGENT_PROVIDER") or None,
                 deployment=os.environ.get("EDU_AGENT_DEPLOYMENT") or None,
                 credential=CredentialRef("EDU_AGENT_API_KEY"),
             )
-            _require_chat_completions(gateway.begin_turn(spec))
-            engine = OpenAICompatEngine(**kwargs)
-            engine.configure_provider_route(spec, gateway)
-            return engine
+            temperature = kwargs.pop("temperature", 0.0)
+            timeout = kwargs.pop("timeout", None)
+            if timeout is None:
+                timeout = float(os.environ.get("EDU_AGENT_TIMEOUT", "1800"))
+            adapter = _chat_completions_adapter(
+                temperature=temperature,
+                timeout=timeout,
+                kwargs=kwargs,
+            )
+            gateway = ProviderGateway(
+                adapters={ApiMode.CHAT_COMPLETIONS: adapter}
+            )
+            return GatewayEngine(gateway, spec, name="openai")
         spec = config.provider_spec()
-        _require_chat_completions(gateway.begin_turn(spec))
-        primary = OpenAICompatEngine(
-            base_url=spec.endpoint,
-            api_key=spec.credential.resolve() or "EMPTY",
-            model=config.model,
+        adapter = _chat_completions_adapter(
             temperature=config.temperature,
             timeout=config.timeout_seconds,
-            **kwargs,
+            kwargs=kwargs,
         )
-        primary.configure_provider_route(spec, gateway)
+        gateway = ProviderGateway(adapters={ApiMode.CHAT_COMPLETIONS: adapter})
+        primary = GatewayEngine(gateway, spec, name="openai")
         fallback = None
         if config.fallback_model:
             fallback_spec = ProviderSpec(
@@ -95,15 +108,11 @@ def get_engine(config=None, **kwargs) -> Engine:
                 api_mode=ApiMode.CHAT_COMPLETIONS,
                 credential=CredentialRef("EDU_AGENT_FALLBACK_API_KEY"),
             )
-            fallback = OpenAICompatEngine(
-                base_url=fallback_spec.endpoint,
-                api_key=os.environ.get("EDU_AGENT_FALLBACK_API_KEY", "EMPTY"),
-                model=config.fallback_model,
-                temperature=config.temperature,
-                timeout=config.timeout_seconds,
+            fallback = GatewayEngine(
+                gateway,
+                fallback_spec,
+                name=f"openai:{config.fallback_model}",
             )
-            fallback.configure_provider_route(fallback_spec, gateway)
-            fallback.name = f"openai:{config.fallback_model}"
         return ResilientEngine(
             primary,
             max_retries=config.max_retries,
@@ -114,6 +123,22 @@ def get_engine(config=None, **kwargs) -> Engine:
     raise ValueError(f"未知引擎类型：{kind}")
 
 
-def _require_chat_completions(route: ResolvedRoute) -> None:
-    if route.api_mode is not ApiMode.CHAT_COMPLETIONS:
-        raise ValueError("当前 Provider adapter 仅支持 chat_completions")
+def _chat_completions_adapter(
+    *,
+    temperature: float,
+    timeout: float,
+    kwargs: dict,
+) -> ChatCompletionsAdapter:
+    client = kwargs.pop("client", None)
+    client_factory = kwargs.pop("client_factory", None)
+    api_key = kwargs.pop("api_key", None)
+    if kwargs:
+        unknown = ", ".join(sorted(kwargs))
+        raise TypeError(f"OpenAI-compatible engine 不支持参数：{unknown}")
+    return ChatCompletionsAdapter(
+        client,
+        client_factory=client_factory,
+        api_key=api_key,
+        temperature=temperature,
+        timeout=timeout,
+    )
