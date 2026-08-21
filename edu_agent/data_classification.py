@@ -32,12 +32,16 @@ SCOPE_KEYS = frozenset({
     "tool_call_id", "plan_id", "step_id", "artifact_id", "event_id",
 })
 METRIC_KEYS = frozenset({
-    "context_tokens", "estimated_tokens", "fencing_token", "input_tokens",
-    "max_tokens", "output_tokens", "token_count", "total_tokens",
-    "tokens",
+    "accepted_prediction_tokens", "audio_tokens", "cached_tokens",
+    "completion_tokens", "completion_tokens_details", "context_tokens",
+    "estimated_tokens", "fencing_token", "input_tokens", "input_tokens_details",
+    "max_tokens", "output_tokens", "output_tokens_details", "prompt_tokens",
+    "prompt_tokens_details", "reasoning_tokens", "rejected_prediction_tokens",
+    "token_count", "total_tokens", "tokens",
     "model_calls", "max_model_calls", "tool_calls", "max_tool_calls",
     "duration_ms", "size_bytes", "attempt", "attempt_count", "sequence",
 })
+_STRICT_METRIC_KEYS = METRIC_KEYS - {"tool_calls"}
 CREDENTIAL_KEYS = frozenset({
     "access_token", "api_key", "apikey", "approval_secret", "auth",
     "authorization", "client_secret", "cookie", "jwt", "key_material",
@@ -90,6 +94,35 @@ def redact_text(value: str, *, include_pii: bool = False, literal_secrets: tuple
     return redacted
 
 
+def _redact_metric(
+    value: Any,
+    *,
+    include_pii: bool,
+    literal_secrets: tuple[str, ...],
+) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_metric(
+                item,
+                include_pii=include_pii,
+                literal_secrets=literal_secrets,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _redact_metric(
+                item,
+                include_pii=include_pii,
+                literal_secrets=literal_secrets,
+            )
+            for item in value
+        ]
+    return REDACTED
+
+
 def redact(value: Any, *, include_pii: bool = False, literal_secrets: tuple[str, ...] = ()) -> Any:
     if isinstance(value, str):
         return redact_text(value, include_pii=include_pii, literal_secrets=literal_secrets)
@@ -100,10 +133,18 @@ def redact(value: Any, *, include_pii: bool = False, literal_secrets: tuple[str,
             if category is DataClass.OWNER_SCOPE:
                 result[str(key)] = item
             elif category is DataClass.METRIC:
-                result[str(key)] = redact(
-                    item,
-                    include_pii=include_pii,
-                    literal_secrets=literal_secrets,
+                result[str(key)] = (
+                    _redact_metric(
+                        item,
+                        include_pii=include_pii,
+                        literal_secrets=literal_secrets,
+                    )
+                    if normalize_key(key) in _STRICT_METRIC_KEYS
+                    else redact(
+                        item,
+                        include_pii=include_pii,
+                        literal_secrets=literal_secrets,
+                    )
                 )
             elif category is DataClass.CREDENTIAL or (include_pii and category is DataClass.STUDENT_PII):
                 result[str(key)] = REDACTED

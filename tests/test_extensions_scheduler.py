@@ -137,7 +137,12 @@ class FlakyEngine(Engine):
 def test_resilient_engine_retries_only_retryable_errors():
     engine = FlakyEngine()
     sleeps = []
-    response = ResilientEngine(engine, max_retries=2, sleeper=sleeps.append).chat([], [])
+    response = ResilientEngine(
+        engine,
+        max_retries=2,
+        sleeper=sleeps.append,
+        random_source=lambda: 1.0,
+    ).chat([], [])
     assert response.content == "ok"
     assert response.usage["runtime_attempts"] == 2
     assert sleeps == [1]
@@ -189,11 +194,14 @@ def test_resilient_engine_opens_circuit_and_skips_primary():
     assert engine.chat([], []).content == "fallback-ok"
     assert primary.calls == 1
     assert [event["event"] for event in events] == [
+        "provider_attempt",
         "provider_failure",
         "circuit_opened",
         "fallback_activated",
+        "provider_attempt",
         "primary_skipped",
         "fallback_activated",
+        "provider_attempt",
     ]
 
 

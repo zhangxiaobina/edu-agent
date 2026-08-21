@@ -2,13 +2,12 @@
 
 ## Current
 
-- last_completed_prompt: R1.3
-- next_prompt: R1.4
+- last_completed_prompt: R1.4
+- next_prompt: R1.5
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0 gate 保持 passed；R1.3 已接入最小同步 Responses adapter，并通过双 mode 离线
-  wire/契约/Trace 脱敏和全量回归，但 Retry-After/jitter、per-route breaker 与 capability fallback 尚待
-  R1.4-R1.5，不能提前把 R1 总门禁标为 passed
+- stage_gate_reason: R0 gate 保持 passed；R1.4 已完成同步 Provider 尝试策略与确定性故障矩阵，但 capability-safe
+  fallback 仍留给 R1.5，不能提前把 R1 总门禁标为 passed
 
 ## Baseline Reproduction
 
@@ -365,3 +364,44 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   per-route breaker 留给 R1.4；跨 mode fallback capability 门禁留给 R1.5。R1 总门禁保持 `in_progress`。
 - next: R1.4，读取本交接、`engine/resilient.py`、Provider 事件与现有故障测试，实现 Retry-After、确定性
   jitter、有界并发和 per-route circuit breaker；不得提前做 capability fallback、凭据池或流式重试。
+
+### R1.4 - 2026-08-22
+
+- commit/evidence: 会话从与 `origin/main` 同步的 R1.3 提交
+  `096a86e8e49c8bf38c215d3efb15ec84cd5e9e44` 开始；R1.4 实现 commit 以包含本交接记录的 Git 提交为准，
+  不在提交内容中自引用无法预先确定的哈希。开始时工作区干净，未覆盖用户改动。
+- failure/retry policy: `FailureKind` 增加 `output_cap`，分类器按异常类型、HTTP status 和结构化 error code
+  区分 connection/timeout/429/5xx、auth/permission/invalid/context overflow/output cap/unknown；只有明确
+  瞬态项可重试，`insufficient_quota` 等终态 429 也快速失败。`ResponsesAPIError` 的 server/context/output
+  code 纳入同一分类。`Retry-After` 同时支持整数秒和 HTTP-date；合法服务端值完全覆盖本地 full-jitter
+  指数退避并受独立上限约束，非法值回落本地策略。monotonic clock、wall clock、sleeper 和 random source
+  均可注入，测试不真实等待。两个默认 OpenAI SDK adapter 显式使用 `max_retries=0`，避免隐式 HTTP 尝试
+  绕过本层次数、等待和审计；显式注入 client/factory 仍由调用方控制。
+- route isolation/lifecycle: 新增实例所有的 `RouteStateRegistry`，按冻结 `ResolvedRoute.identity` 维护
+  `BoundedSemaphore` 和 `CircuitBreaker`；endpoint、model、deployment/API mode 不同的 route 互不污染。
+  breaker 以带 generation 的 permit 原子提交状态，过期并发结果不能关闭新一代 breaker；half-open 同 route
+  只放行一个受控探测。注册表有固定容量和空闲 TTL，活跃 lease 与 TTL 内 degraded/open 状态不可被容量
+  淘汰；全为受保护状态时 fail closed，健康 LRU 或 TTL 到期状态才可回收，因此无进程级无限字典。
+- events/security: 每个实际 primary/fallback Provider attempt 新增一个 `provider_attempt` 事件，统一包含序号、
+  脱敏 route、failure kind、retryable、实际 delay/source、breaker 前后状态和有界纯数值 usage；失败正文、请求
+  messages、key 和 credential 环境变量名从不进入 payload。事件在 sink 前和 SQLite 写入时双重经过共享分类器；
+  标准 prompt/completion/cached/reasoning token 字段加入精确 metric 词表，字符串 usage 元数据在韧性层先丢弃。
+- migrations/config: 无数据库 migration，复用 `provider_events.details_json`，旧库兼容；无依赖、lockfile、环境
+  变量或凭据格式变化。`ModelConfig`/`config.example.toml` 新增带默认值和启动校验的
+  `retry_base_delay_seconds=1`、`retry_max_delay_seconds=8`、`retry_after_max_seconds=60`、
+  `route_max_concurrency=4`、`route_state_capacity=128`、`route_state_ttl_seconds=900`；TTL 必须大于 breaker
+  cooldown。本会话没有增加 fallback 兼容选择、凭据池、流式或上下文压缩重试。
+- verification: R1.4/旧韧性/Chat/Responses/Gateway 专项 `90 passed (1.76s)`，覆盖 429 秒数与上限、HTTP-date、
+  非法 header 的确定性 jitter、401、403、400、context overflow、output cap、Responses 内嵌错误、并发上限、
+  half-open 竞争、endpoint/model 隔离、容量/TTL、SDK 隐式重试关闭以及 SQLite attempt usage/key/正文脱敏。
+  最终显式清空模型及平台凭据、mock/local、`--frozen --offline` 全量在获准回环环境
+  `276 passed (13.56s)`；全仓 offline ruff 0 diagnostics；`uv lock --check` 解析 91 packages，`uv pip check`
+  检查 62 packages/0 conflicts；示例配置可解析，`git diff --check` 通过。所有新增 Provider 测试均离线。
+- not_verified: 没有访问公网、真实 Provider/模型或发送真实凭据，没有验证 Docker/Jobe、semantic provider、
+  GitHub-hosted CI 或外部注入 SDK client 的重试配置；普通切片按协议未运行阶段收口用 `accept_stage8.sh`。
+- residual_risks: 当前同步 semaphore 等待尚未接 R2 cancellation；显式注入 client/factory 若自行开启重试，
+  其内部请求不受本层逐 attempt 审计。最重要的是旧 fallback 触发语义本轮刻意未改变，401/403/普通 400/
+  context overflow 等虽不会 retry，配置 fallback 时仍可能切换；failure-kind 策略与 capability-safe fallback、
+  切换原因和完整 R1 fake-server 门禁必须在 R1.5 收口。R1 总门禁保持 `in_progress`。
+- next: R1.5，基于 R1.1-R1.4 交接实现 failure-kind 与 capability-safe fallback，验证两种 mode 的完整故障矩阵
+  和 attempt 审计并独立收口 R1；不得开始 token streaming、凭据池或 R2 工作。

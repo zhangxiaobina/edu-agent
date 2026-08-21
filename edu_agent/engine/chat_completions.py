@@ -104,6 +104,7 @@ class ChatCompletionsAdapter:
                     base_url=route.endpoint,
                     api_key=(self._api_key or route.credential.resolve() or "EMPTY"),
                     timeout=self.timeout,
+                    max_retries=0,
                 )
             self._clients[key] = client
             return client

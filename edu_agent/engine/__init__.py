@@ -26,7 +26,17 @@ from .gateway import (
 from .mock import MockEngine
 from .openai_compat import OpenAICompatEngine
 from .responses import ResponsesAdapter, ResponsesAPIError
-from .resilient import CircuitBreaker, FailureKind, ResilientEngine, classify_failure
+from .resilient import (
+    CircuitBreaker,
+    CircuitOpenError,
+    FailureKind,
+    ResilientEngine,
+    RouteStateCapacityError,
+    RouteStateRegistry,
+    classify_failure,
+    parse_retry_after,
+    retry_after_from_error,
+)
 
 __all__ = [
     "Engine",
@@ -51,8 +61,13 @@ __all__ = [
     "ResponsesAPIError",
     "ResilientEngine",
     "CircuitBreaker",
+    "CircuitOpenError",
     "FailureKind",
+    "RouteStateCapacityError",
+    "RouteStateRegistry",
     "classify_failure",
+    "parse_retry_after",
+    "retry_after_from_error",
     "get_engine",
 ]
 
@@ -118,6 +133,12 @@ def get_engine(config=None, **kwargs) -> Engine:
             primary,
             max_retries=config.max_retries,
             fallback=fallback,
+            retry_base_delay_seconds=config.retry_base_delay_seconds,
+            retry_max_delay_seconds=config.retry_max_delay_seconds,
+            retry_after_max_seconds=config.retry_after_max_seconds,
+            route_max_concurrency=config.route_max_concurrency,
+            route_state_capacity=config.route_state_capacity,
+            route_state_ttl_seconds=config.route_state_ttl_seconds,
             failure_threshold=config.circuit_failure_threshold,
             cooldown_seconds=config.circuit_cooldown_seconds,
         )

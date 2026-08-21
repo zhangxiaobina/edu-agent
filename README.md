@@ -93,8 +93,9 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   可插拔 `ContextEngine` 将旧历史原地归档为可恢复 checkpoint，system prompt 保持稳定；超大工具
   结果按单结果/整轮预算写入 tenant/actor 隔离的 Artifact，并以 SHA-256 校验完整性。该保证限于
   共享同一 SQLite 文件的本机 Worker，不宣称跨主机或跨区域共识。
-- **模型与后台任务容错**：模型错误按连接/超时/429/5xx/auth/上下文溢出分类，只重试瞬态故障；
-  熔断后跳过故障 Provider 并切 fallback，事件关联 run_id 落库。Scheduler 支持幂等键、自动续租、
+- **模型与后台任务容错**：模型错误区分连接/超时/429/5xx 与 auth/权限/参数/上下文/输出上限，只重试明确
+  瞬态故障；重试遵守有上限的 `Retry-After` 并使用 full jitter，并发和 breaker 按冻结 route 隔离，
+  half-open 只放行一个探测。每次 attempt 脱敏后关联 run_id 落库。Scheduler 支持幂等键、自动续租、
   指数退避、取消和 dead-letter 状态。
 - **事务写工具**：`create_exam`、`assign_homework`、`batch_grade` 与
   `generate_questions(save_to_bank)` 进入持久 `ToolOperation` 状态机；业务写入、`committed` 和

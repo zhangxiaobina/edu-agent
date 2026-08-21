@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -18,6 +19,12 @@ class ModelConfig:
     timeout_seconds: float = 1800.0
     temperature: float = 0.0
     max_retries: int = 2
+    retry_base_delay_seconds: float = 1.0
+    retry_max_delay_seconds: float = 8.0
+    retry_after_max_seconds: float = 60.0
+    route_max_concurrency: int = 4
+    route_state_capacity: int = 128
+    route_state_ttl_seconds: float = 900.0
     circuit_failure_threshold: int = 3
     circuit_cooldown_seconds: float = 30.0
     fallback_model: str | None = None
@@ -29,6 +36,49 @@ class ModelConfig:
     credential_env: str = "EDU_AGENT_API_KEY"
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_retries, bool)
+            or not isinstance(self.max_retries, int)
+            or self.max_retries < 0
+        ):
+            raise ValueError("model.max_retries 必须是非负整数")
+        for name in (
+            "route_max_concurrency",
+            "route_state_capacity",
+            "circuit_failure_threshold",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"model.{name} 必须是正整数")
+        for name in (
+            "retry_base_delay_seconds",
+            "retry_max_delay_seconds",
+            "retry_after_max_seconds",
+            "circuit_cooldown_seconds",
+        ):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"model.{name} 必须是有限非负数")
+        if (
+            isinstance(self.route_state_ttl_seconds, bool)
+            or not isinstance(self.route_state_ttl_seconds, (int, float))
+            or not math.isfinite(float(self.route_state_ttl_seconds))
+            or self.route_state_ttl_seconds <= 0
+        ):
+            raise ValueError("model.route_state_ttl_seconds 必须是有限正数")
+        if self.retry_max_delay_seconds < self.retry_base_delay_seconds:
+            raise ValueError(
+                "model.retry_max_delay_seconds 必须不小于 retry_base_delay_seconds"
+            )
+        if self.route_state_ttl_seconds <= self.circuit_cooldown_seconds:
+            raise ValueError(
+                "model.route_state_ttl_seconds 必须大于 circuit_cooldown_seconds"
+            )
         if self.endpoint is not None and self.base_url is not None:
             raise ValueError("model.endpoint 与兼容字段 model.base_url 不能同时配置")
         effective_endpoint = self.endpoint or self.base_url

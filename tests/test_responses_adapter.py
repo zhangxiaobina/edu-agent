@@ -260,6 +260,38 @@ def test_responses_failed_status_is_a_local_terminal_error():
     assert "fixture generation failed" not in str(caught.value)
 
 
+def test_responses_adapter_disables_hidden_sdk_retries(monkeypatch):
+    constructors: list[dict] = []
+
+    class FakeResponses:
+        @staticmethod
+        def create(**request):
+            return _fixture("unknown_output_item.json")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            constructors.append(kwargs)
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setenv("R14_RESPONSES_CREDENTIAL", "credential-canary-8491")
+    spec = _spec(credential=CredentialRef("R14_RESPONSES_CREDENTIAL"))
+    engine = GatewayEngine(
+        ProviderGateway(adapters={ApiMode.RESPONSES: ResponsesAdapter(timeout=12.5)}),
+        spec,
+    )
+
+    assert engine.chat([{"role": "user", "content": "hello"}], []).content == "Known text"
+    assert constructors == [
+        {
+            "base_url": "https://provider.example/v1",
+            "api_key": "credential-canary-8491",
+            "timeout": 12.5,
+            "max_retries": 0,
+        }
+    ]
+
+
 def test_responses_capabilities_and_unsupported_combinations_fail_before_client():
     calls = 0
 

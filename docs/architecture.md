@@ -53,6 +53,12 @@ usage 已启用，text-format structured output 和 Provider streaming 明确关
 上限为 `None` 时表示未知，不能解释为无限。已声明不支持的 tool/strict schema、非文本输入或已超过明确
 context window 的请求会在 SDK 调用前失败。
 
+`ResilientEngine` 在冻结的 `ResolvedRoute.identity` 粒度共享并发 semaphore 与 circuit breaker。连接、超时、
+429 和 5xx 使用 full-jitter 有界退避；合法 `Retry-After` 秒数或 HTTP-date 覆盖本地退避并受独立上限约束。
+认证、权限、普通 400、context overflow、output cap 和未知错误不重试。half-open 每个 route 只允许一个探测，
+route 状态注册表按容量和空闲 TTL 回收；每个实际 Provider attempt 单独写入脱敏审计事件。
+默认 SDK client 关闭自身重试，由这一层统一拥有尝试次数、等待和审计；显式注入的 client/factory 由调用方控制。
+
 ## 请求数据流
 
 ```mermaid

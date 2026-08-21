@@ -312,6 +312,7 @@ def test_adapter_builds_sdk_client_from_route_credential_and_timeout(
             "base_url": "https://provider.example/v1",
             "api_key": "credential-canary-4821",
             "timeout": 12.5,
+            "max_retries": 0,
         }
     ]
     assert requests[0]["temperature"] == 0.4

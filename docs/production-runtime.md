@@ -337,10 +337,13 @@ pending → running → success
 
 ## 模型容错
 
-`ResilientEngine` 把错误分为连接、超时、限流、服务端、认证、权限、非法请求、上下文溢出和
-未知错误。只有连接/超时/429/5xx 才退避重试；认证、权限和参数问题快速失败。连续瞬态失败达到
-阈值后熔断，冷却期跳过 primary；half-open 成功后恢复。重试、熔断、fallback 和恢复事件都可
-关联 run_id 写入 `provider_events`。
+`ResilientEngine` 把错误分为连接、超时、限流、服务端、认证、权限、非法请求、上下文溢出、输出上限和
+未知错误。只有连接/超时/429/5xx 才退避重试；认证、权限、参数、上下文和输出上限问题快速失败。本地退避
+使用有上限的 full jitter；合法的 `Retry-After` 秒数或 HTTP-date 优先，并受独立配置上限约束。并发限制、
+连续瞬态失败计数和 breaker 都按冻结的 route identity 隔离；冷却后的 half-open 同一路由只允许一个探测。
+route 状态表由 Engine 实例拥有，具有容量和空闲 TTL，避免进程级状态无限增长。每次 Provider attempt 的
+route、failure kind、delay、breaker 状态和数值 usage 都经过中心脱敏后关联 run_id 写入 `provider_events`。
+默认 OpenAI SDK client 的内部重试关闭，避免未审计请求绕过该策略；显式注入 client/factory 时由调用方控制。
 
 `EduAgentService.scheduler()` 用同一个 Service 执行任务，因此计划任务不会绕过记忆、预算、
 工具安全和状态持久化。
