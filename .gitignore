@@ -4,7 +4,7 @@
 *.sqlite
 *.sqlite3
 edu_agent/data/*.db
-data/
+/data/
 # DPO 轨迹 dump（模型原生轨迹 + 偏好对，按需本地生成，不入库）
 dpo_dumps/
 

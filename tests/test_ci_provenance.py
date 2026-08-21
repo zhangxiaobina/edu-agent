@@ -20,6 +20,13 @@ from scripts.benchmark_trace_scaling import benchmark
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+RUNTIME_DATA_SOURCES = (
+    "edu_agent/data/__init__.py",
+    "edu_agent/data/db.py",
+    "edu_agent/data/generate.py",
+    "edu_agent/data/kg.py",
+    "edu_agent/data/schema.sql",
+)
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -274,6 +281,32 @@ def test_audit_cli_fails_without_printing_secret_or_private_path(tmp_path):
     assert '"classification": "credential"' in result.stdout
     assert canary not in result.stdout + result.stderr
     assert str(tmp_path) not in result.stdout + result.stderr
+
+
+def test_runtime_data_sources_are_tracked_and_not_ignored():
+    tracked = set(_git(ROOT, "ls-files", "--", *RUNTIME_DATA_SOURCES).splitlines())
+    assert tracked == set(RUNTIME_DATA_SOURCES)
+
+    for source in RUNTIME_DATA_SOURCES:
+        ignored = subprocess.run(
+            ["git", "-C", str(ROOT), "check-ignore", "--no-index", "-q", source],
+            check=False,
+        )
+        assert ignored.returncode == 1, f"runtime source is ignored: {source}"
+
+    generated_database = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "check-ignore",
+            "--no-index",
+            "-q",
+            "edu_agent/data/edu.db",
+        ],
+        check=False,
+    )
+    assert generated_database.returncode == 0
 
 
 def test_ci_is_single_platform_frozen_secret_free_and_offline():
