@@ -251,6 +251,17 @@ class EduAgentService:
     ) -> ChatResult:
         session_id = context.session_id
         context.check_control("turn.start")
+        routes = self.engine.begin_turn_routes()
+        for index, route in enumerate(routes):
+            details = route.to_event()
+            details["route_role"] = "primary" if index == 0 else "fallback"
+            self.state_store.record_provider_event(
+                run_id=context.run_id,
+                provider=route.provider,
+                event="route_resolved",
+                attempt=0,
+                details=details,
+            )
         history = self.state_store.get_messages(
             session_id,
             limit=None,

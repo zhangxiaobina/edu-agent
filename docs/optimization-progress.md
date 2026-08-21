@@ -2,14 +2,13 @@
 
 ## Current
 
-- last_completed_prompt: R0.4
-- next_prompt: R1.1
-- baseline_commit: 8c645099ce27b9a3f00c5ea755ab3108c8f67dad
-- stage_gate: passed
-- stage_gate_reason: R0 实现已进入可追溯提交 `042e229e1ec5ac998182f0cde1996627acc1f16f`，
-  干净检出修复为 `0561205baad715b1c1742c619ff3c755bac7a076`；后者的 clean clone 无预建 venv/DB，
-  candidate system/Trace provenance 均为 `dirty=false`、gate passed，73 条 lineage 无跨 split 泄漏，
-  唯一公开 `accept_stage8.sh` 完整通过
+- last_completed_prompt: R1.1
+- next_prompt: R1.2
+- baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
+- stage_gate: in_progress
+- stage_gate_reason: R0 gate 保持 passed；R1.1 已建立 Provider route/config 契约并通过离线专项与全量回归，
+  但 Chat Completions adapter 迁移、Responses、恢复策略和 capability fallback 尚待 R1.2-R1.5，不能提前把
+  R1 总门禁标为 passed
 
 ## Baseline Reproduction
 
@@ -260,3 +259,37 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   托管 CI、Docker、真实模型和 semantic provider 保持明确未验证。受跟踪的 development artifact 不替代
   clean candidate 证据。
 - next: R0 gate 已通过；下一提示词为 R1.1。本会话只完成 R0 收口，不开始 R1。
+
+### R1.1 - 2026-08-21
+
+- commit/evidence: 会话从与 `origin/main` 同步的
+  `8d5d2a15bb107c90dcada53018b65728371c6d88` 开始；R1.1 实现 commit 以包含本交接记录的 Git 提交为准，
+  不在提交内容中自引用无法预先确定的哈希。开始前源码与 R0.4 交接均确认 R0 gate=passed。
+- changes: 在 `edu_agent/engine/gateway.py` 增加 frozen `ApiMode`、`CredentialRef`、`ProviderSpec`、
+  `ProviderCapabilities`、`ResolvedRoute`/`RouteIdentity`、注册元数据和窄 `ProviderAdapter` 协议。
+  `ProviderGateway.begin_turn()` 固定执行“显式 mode -> 注册元数据 -> 精确受信任 HTTPS official host ->
+  `chat_completions`”优先级；未知/本地/自定义 endpoint 保持 `custom`，不做模糊厂商推断。endpoint 校验拒绝
+  userinfo、query/fragment、控制字符、编码 host 欺骗和非法 scheme；隔离 identity 只规范 scheme/host/default
+  port 并保留 path 字节语义。`EduAgentService` 在 turn 起点冻结 primary/fallback route 并写入现有脱敏
+  `provider_events`；凭据值和环境变量名均不进入 route repr、identity 或事件。旧 Chat adapter 仅附加 route
+  元数据，`ResilientEngine` 只透传 route 冻结接口，未改重试、breaker、fallback 或流式行为；Responses mode
+  可以解析，但当前工厂会在发请求前明确拒绝，留给 R1.3。
+- migrations/config: 无数据库 migration，复用既有 `provider_events`；`pyproject.toml`、`uv.lock` 和 Python
+  版本未改。`ModelConfig` 新增可选 `api_mode/vendor/deployment/endpoint/credential_env`，其中 `provider`
+  继续作为旧 Engine 选择器，`base_url` 继续兼容但与 `endpoint` 同时出现会启动失败。保留
+  `EDU_AGENT_ENGINE/BASE_URL/API_KEY/MODEL/FALLBACK_API_KEY`，空环境值按未设置处理；新增可选
+  `EDU_AGENT_API_MODE/PROVIDER/DEPLOYMENT`。`config.example.toml` 使用新字段且只保存 credential 环境变量名。
+- verification: `tests/test_provider_gateway.py` 30 passed，覆盖四级 mode 优先级、冲突、未知 mode、精确官方
+  host、自定义/本地 endpoint、路径隔离、非法 URL、不可变 identity、capability 校验、旧 TOML/环境变量、
+  默认值、Responses 防误发、turn 起点事件和多组凭据 canary；与现有韧性专项合跑 41 passed。受限沙箱的
+  首轮受影响回归为 108 passed/4 failed，四项均止于绑定 `127.0.0.1:0` 的 `PermissionError`；同一命令在
+  获准环境为 112 passed。最终显式清空真实凭据、mock/local、`--frozen --offline` 全量在获准环境为
+  226 passed（13.78 s）；全仓 `uv run --frozen --offline ruff check .` 为 0 diagnostics；示例配置可解析，
+  `git diff --check` 通过。
+- not_verified: 本会话没有发真实 Provider/公网请求，没有接入 Responses wire adapter，也没有验证真实模型、
+  Docker、semantic provider 或 GitHub-hosted CI；普通切片按协议未重复运行阶段收口用 Stage 8。
+- residual_risks: 当前 Chat Completions 仍由 `OpenAICompatEngine` 直接调用 SDK，route 尚未成为唯一 adapter
+  调用路径；capability 目前是显式/注册声明，尚未用于 R1.5 fallback 兼容门禁；Retry-After、jitter、并发上限
+  和 per-route breaker 仍按路线留给 R1.4。R1 总门禁保持 `in_progress`。
+- next: R1.2，将现有 OpenAI-compatible Chat Completions 迁到本契约后的 adapter，并保持 Agent/同步返回和
+  旧配置行为不变；不得提前接 Responses 或改变流式协议。

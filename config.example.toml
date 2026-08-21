@@ -1,7 +1,14 @@
 [model]
+# provider 是兼容旧配置的 Engine 选择器；厂商身份单独使用 vendor。
 provider = "openai"
+api_mode = "chat_completions"
+vendor = "dashscope"
+deployment = "dashscope-compatible"
 model = "qwen-plus"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# 旧字段 base_url 仍兼容，但不能与 endpoint 同时配置。
+# 这里只保存环境变量名；凭据值不得写入 TOML。
+credential_env = "EDU_AGENT_API_KEY"
 timeout_seconds = 1800
 temperature = 0.0
 max_retries = 2

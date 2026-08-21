@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 
 from .base import Engine, EngineResponse, ToolCall
+from .gateway import ProviderGateway, ProviderSpec, ResolvedRoute
 
 
 class OpenAICompatEngine(Engine):
@@ -37,6 +38,21 @@ class OpenAICompatEngine(Engine):
             float(os.environ.get("EDU_AGENT_TIMEOUT", "1800"))
         self._client = OpenAI(base_url=self.base_url, api_key=self.api_key,
                               timeout=self.timeout)
+        self._provider_spec: ProviderSpec | None = None
+        self._provider_gateway: ProviderGateway | None = None
+
+    def configure_provider_route(
+        self,
+        spec: ProviderSpec,
+        gateway: ProviderGateway,
+    ) -> None:
+        self._provider_spec = spec
+        self._provider_gateway = gateway
+
+    def begin_turn_routes(self) -> tuple[ResolvedRoute, ...]:
+        if self._provider_spec is None or self._provider_gateway is None:
+            return ()
+        return (self._provider_gateway.begin_turn(self._provider_spec),)
 
     def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
         request = {

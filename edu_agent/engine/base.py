@@ -12,6 +12,10 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .gateway import ResolvedRoute
 
 
 @dataclass
@@ -55,3 +59,7 @@ class Engine(ABC):
     def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
         """给定对话历史与工具 schema，返回下一步（工具调用或最终回答）。"""
         raise NotImplementedError
+
+    def begin_turn_routes(self) -> tuple[ResolvedRoute, ...]:
+        """Freeze provider routes before a turn; engines without providers return none."""
+        return ()

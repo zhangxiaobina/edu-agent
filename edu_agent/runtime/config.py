@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from ..engine.gateway import ApiMode, CredentialRef, ProviderSpec, normalize_endpoint
 
 
 @dataclass(frozen=True)
@@ -19,6 +22,48 @@ class ModelConfig:
     circuit_cooldown_seconds: float = 30.0
     fallback_model: str | None = None
     fallback_base_url: str | None = None
+    api_mode: ApiMode | str | None = None
+    vendor: str | None = None
+    deployment: str | None = None
+    endpoint: str | None = None
+    credential_env: str = "EDU_AGENT_API_KEY"
+
+    def __post_init__(self) -> None:
+        if self.endpoint is not None and self.base_url is not None:
+            raise ValueError("model.endpoint 与兼容字段 model.base_url 不能同时配置")
+        effective_endpoint = self.endpoint or self.base_url
+        spec = ProviderSpec(
+            model=self.model,
+            endpoint=effective_endpoint,
+            api_mode=self.api_mode,
+            provider=self.vendor,
+            deployment=self.deployment,
+            credential=CredentialRef(self.credential_env),
+        )
+        object.__setattr__(self, "api_mode", spec.api_mode)
+        if self.fallback_base_url is not None:
+            normalize_endpoint(self.fallback_base_url)
+        if (
+            not isinstance(self.provider, str)
+            or not self.provider
+            or self.provider != self.provider.strip()
+        ):
+            raise ValueError("model.provider 必须是非空引擎标识")
+
+    @property
+    def configured_endpoint(self) -> str | None:
+        return self.endpoint or self.base_url
+
+    def provider_spec(self, environ: Mapping[str, str] | None = None) -> ProviderSpec:
+        source = os.environ if environ is None else environ
+        return ProviderSpec(
+            model=self.model,
+            endpoint=self.configured_endpoint or source.get("EDU_AGENT_BASE_URL") or None,
+            api_mode=self.api_mode or source.get("EDU_AGENT_API_MODE") or None,
+            provider=self.vendor or source.get("EDU_AGENT_PROVIDER") or None,
+            deployment=self.deployment or source.get("EDU_AGENT_DEPLOYMENT") or None,
+            credential=CredentialRef(self.credential_env),
+        )
 
 
 @dataclass(frozen=True)

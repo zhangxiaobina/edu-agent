@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .base import Engine, EngineResponse
+from .gateway import ResolvedRoute
 
 
 class FailureKind(str, Enum):
@@ -147,6 +148,12 @@ class ResilientEngine(Engine):
             yield
         finally:
             self._run_id.reset(token)
+
+    def begin_turn_routes(self) -> tuple[ResolvedRoute, ...]:
+        routes = self.primary.begin_turn_routes()
+        if self.fallback is not None:
+            routes += self.fallback.begin_turn_routes()
+        return routes
 
     def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
         attempts = 0
