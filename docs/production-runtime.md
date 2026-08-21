@@ -344,6 +344,11 @@ pending → running → success
 route 状态表由 Engine 实例拥有，具有容量和空闲 TTL，避免进程级状态无限增长。每次 Provider attempt 的
 route、failure kind、delay、breaker 状态和数值 usage 都经过中心脱敏后关联 run_id 写入 `provider_events`。
 默认 OpenAI SDK client 的内部重试关闭，避免未审计请求绕过该策略；显式注入 client/factory 时由调用方控制。
+fallback 只接受上述明确瞬态 failure kind 或 circuit-open，并在 Provider I/O 前验证目标 API mode adapter、
+tool calling、strict structured output、请求形态和上下文需求；未知 fallback context window 不视为无限。
+401/403/普通 400/context overflow/output cap/unknown 均拒绝切换并保留 primary 原错。候选 route 在 turn 起点冻结，
+`route_resolved/fallback_rejected/fallback_activated/provider_result_selected` 解释选择与唯一胜出结果；失败 attempt
+usage 只留在审计中，不能覆盖最终响应。每条 route 仍只有一个 `CredentialRef`，不实现凭据轮换池。
 
 `EduAgentService.scheduler()` 用同一个 Service 执行任务，因此计划任务不会绕过记忆、预算、
 工具安全和状态持久化。
@@ -357,6 +362,7 @@ uv run --frozen python -m pytest tests/test_plan_runtime.py -q
 uv run --frozen python -m pytest tests/test_rag_runtime.py -q
 uv run --frozen python -m pytest tests/test_transactional_tools.py -q
 uv run --frozen python -m pytest tests/test_runtime.py tests/test_extensions_scheduler.py -q
+uv run --frozen --offline python scripts/accept_r1_fake_provider.py
 uv run --frozen python -m pytest tests -q
 uv run --frozen python scripts/production_runtime_demo.py
 uv run --frozen python scripts/plan_runtime_demo.py

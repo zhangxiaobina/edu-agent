@@ -8,7 +8,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..engine.gateway import ApiMode, CredentialRef, ProviderSpec, normalize_endpoint
+from ..engine.gateway import (
+    ApiMode,
+    CredentialRef,
+    ProviderCapabilities,
+    ProviderSpec,
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,8 @@ class ModelConfig:
     circuit_cooldown_seconds: float = 30.0
     fallback_model: str | None = None
     fallback_base_url: str | None = None
+    fallback_api_mode: ApiMode | str | None = None
+    fallback_context_window_tokens: int | None = None
     api_mode: ApiMode | str | None = None
     vendor: str | None = None
     deployment: str | None = None
@@ -91,8 +98,29 @@ class ModelConfig:
             credential=CredentialRef(self.credential_env),
         )
         object.__setattr__(self, "api_mode", spec.api_mode)
-        if self.fallback_base_url is not None:
-            normalize_endpoint(self.fallback_base_url)
+        if self.fallback_model is None and (
+            self.fallback_base_url is not None
+            or self.fallback_api_mode is not None
+            or self.fallback_context_window_tokens is not None
+        ):
+            raise ValueError(
+                "model.fallback_* 字段需要 fallback_model"
+            )
+        if self.fallback_model is not None:
+            if self.fallback_context_window_tokens is None:
+                raise ValueError(
+                    "model.fallback_context_window_tokens 必须为 fallback 声明已知上下文上限"
+                )
+            fallback_spec = ProviderSpec(
+                model=self.fallback_model,
+                endpoint=self.fallback_base_url or effective_endpoint,
+                api_mode=self.fallback_api_mode,
+                credential=CredentialRef("EDU_AGENT_FALLBACK_API_KEY"),
+                capabilities=ProviderCapabilities(
+                    context_window_tokens=self.fallback_context_window_tokens,
+                ),
+            )
+            object.__setattr__(self, "fallback_api_mode", fallback_spec.api_mode)
         if (
             not isinstance(self.provider, str)
             or not self.provider

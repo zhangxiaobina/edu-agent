@@ -12,7 +12,13 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .base import EngineResponse, ToolCall
-from .gateway import ApiMode, ProviderCapabilities, ResolvedRoute
+from .gateway import (
+    ApiMode,
+    ProviderCapabilities,
+    ProviderCapabilityError,
+    ResolvedRoute,
+    estimate_request_tokens,
+)
 
 _MISSING = object()
 
@@ -124,6 +130,22 @@ class ChatCompletionsAdapter:
             not self.capabilities.tool_calling or not route.capabilities.tool_calling
         ):
             raise ValueError("当前 Chat Completions route 不支持 tool calling")
+        if any(
+            isinstance(tool, Mapping)
+            and isinstance(tool.get("function"), Mapping)
+            and tool["function"].get("strict") is True
+            for tool in tools
+        ) and (
+            not self.capabilities.structured_output
+            or not route.capabilities.structured_output
+        ):
+            raise ProviderCapabilityError(("structured_output",))
+        context_limit = route.capabilities.context_window_tokens
+        if (
+            context_limit is not None
+            and estimate_request_tokens(messages, tools) > context_limit
+        ):
+            raise ProviderCapabilityError(("context_window",))
         request: dict[str, Any] = {
             "model": route.model,
             "messages": messages,
@@ -133,6 +155,14 @@ class ChatCompletionsAdapter:
             request["tools"] = tools
             request["tool_choice"] = "auto"
         return request
+
+    def validate_request(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> None:
+        self.build_request(route, messages, tools)
 
     def chat(
         self,

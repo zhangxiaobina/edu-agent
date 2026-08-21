@@ -193,7 +193,12 @@ def test_resilient_engine_opens_circuit_and_skips_primary():
     assert engine.chat([], []).content == "fallback-ok"
     assert engine.chat([], []).content == "fallback-ok"
     assert primary.calls == 1
-    assert [event["event"] for event in events] == [
+    provider_flow = [
+        event["event"]
+        for event in events
+        if event["event"] not in {"route_selected", "provider_result_selected"}
+    ]
+    assert provider_flow == [
         "provider_attempt",
         "provider_failure",
         "circuit_opened",
@@ -202,6 +207,11 @@ def test_resilient_engine_opens_circuit_and_skips_primary():
         "primary_skipped",
         "fallback_activated",
         "provider_attempt",
+    ]
+    selected = [event for event in events if event["event"] == "provider_result_selected"]
+    assert [event["details"]["route_role"] for event in selected] == [
+        "fallback",
+        "fallback",
     ]
 
 

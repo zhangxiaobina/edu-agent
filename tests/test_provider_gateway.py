@@ -10,12 +10,14 @@ from edu_agent.engine import (
     CredentialRef,
     Engine,
     EngineResponse,
+    GatewayEngine,
     ModeSource,
     ProviderAdapter,
     ProviderCapabilities,
     ProviderGateway,
     ProviderMetadata,
     ProviderSpec,
+    ResilientEngine,
     ResolvedRoute,
     ResponsesAdapter,
     get_engine,
@@ -396,3 +398,101 @@ def test_service_freezes_and_audits_route_at_turn_start_without_credential(tmp_p
     assert record["attempt"] == 0
     assert json.loads(record["details_json"])["route_role"] == "primary"
     assert canary not in record["details_json"]
+
+
+def test_trace_records_frozen_candidates_switch_reason_and_selected_result(
+    tmp_path,
+    monkeypatch,
+):
+    primary_key = "primary-trace-canary-4921"
+    fallback_key = "fallback-trace-canary-7358"
+    monkeypatch.setenv("R15_PRIMARY_CREDENTIAL", primary_key)
+    monkeypatch.setenv("R15_FALLBACK_CREDENTIAL", fallback_key)
+
+    class APIConnectionError(Exception):
+        pass
+
+    class Adapter:
+        api_mode = ApiMode.CHAT_COMPLETIONS
+        capabilities = ProviderCapabilities()
+
+        def chat(self, route, messages, tools):
+            if route.model == "primary-model":
+                raise APIConnectionError("offline")
+            return EngineResponse(content="fallback answer", usage={"total_tokens": 3})
+
+    gateway = ProviderGateway(adapters={ApiMode.CHAT_COMPLETIONS: Adapter()})
+    primary = GatewayEngine(
+        gateway,
+        ProviderSpec(
+            model="primary-model",
+            endpoint="https://primary.example/v1",
+            api_mode=ApiMode.CHAT_COMPLETIONS,
+            credential=CredentialRef("R15_PRIMARY_CREDENTIAL"),
+            capabilities=ProviderCapabilities(context_window_tokens=16_384),
+        ),
+    )
+    fallback = GatewayEngine(
+        gateway,
+        ProviderSpec(
+            model="fallback-model",
+            endpoint="https://fallback.example/v1",
+            api_mode=ApiMode.CHAT_COMPLETIONS,
+            credential=CredentialRef("R15_FALLBACK_CREDENTIAL"),
+            capabilities=ProviderCapabilities(context_window_tokens=16_384),
+        ),
+    )
+    config = AppConfig(
+        planning=PlanningConfig(enabled=False),
+        storage=StorageConfig(state_path=str(tmp_path / "state.db")),
+    )
+    service = EduAgentService(
+        ResilientEngine(primary, fallback=fallback, max_retries=0),
+        config=config,
+    )
+
+    result = service.chat("你好", actor_id="teacher-1")
+    trace = service.trace_repository.list_events(
+        actor_id="teacher-1",
+        run_id=result.run_id,
+        limit=100,
+    ).to_dict()
+    provider_events = [
+        event
+        for event in trace["events"]
+        if event["component"] == "provider"
+    ]
+    route_events = [
+        event
+        for event in provider_events
+        if event["attributes"]["event"] == "route_resolved"
+    ]
+
+    assert result.final_answer == "fallback answer"
+    assert [
+        event["attributes"]["details"]["selection_reason"]
+        for event in route_events
+    ] == ["configured_primary", "configured_fallback_candidate"]
+    activated = next(
+        event
+        for event in provider_events
+        if event["attributes"]["event"] == "fallback_activated"
+    )
+    assert activated["attributes"]["details"]["selection_reason"] == (
+        "failure_policy_and_capabilities_allowed"
+    )
+    selected = [
+        event
+        for event in provider_events
+        if event["attributes"]["event"] == "provider_result_selected"
+    ]
+    assert len(selected) == 1
+    assert selected[0]["attributes"]["details"]["route_role"] == "fallback"
+    rendered = json.dumps(trace, ensure_ascii=False)
+    for secret in (
+        primary_key,
+        fallback_key,
+        "R15_PRIMARY_CREDENTIAL",
+        "R15_FALLBACK_CREDENTIAL",
+    ):
+        assert secret not in rendered

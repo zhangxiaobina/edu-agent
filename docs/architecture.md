@@ -58,6 +58,11 @@ context window 的请求会在 SDK 调用前失败。
 认证、权限、普通 400、context overflow、output cap 和未知错误不重试。half-open 每个 route 只允许一个探测，
 route 状态注册表按容量和空闲 TTL 回收；每个实际 Provider attempt 单独写入脱敏审计事件。
 默认 SDK client 关闭自身重试，由这一层统一拥有尝试次数、等待和审计；显式注入的 client/factory 由调用方控制。
+primary/fallback route plan 在 turn 起点冻结；fallback 只允许连接、超时、可恢复 429、5xx 或已打开 circuit，且
+目标 adapter 必须能无网络表示当前请求。tool calling、strict schema、API mode 请求形态和已声明 context window
+逐项检查；Provider fallback 的 context window 未知时拒绝，不能按无限处理。Trace 记录候选选择、拒绝/切换原因和
+唯一胜出 attempt；返回新的 `EngineResponse` 副本，只结算胜出 route usage。配置仍是每条 route 单一
+`CredentialRef`，没有 key pool 或运行时凭据轮换。
 
 ## 请求数据流
 

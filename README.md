@@ -95,8 +95,10 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   共享同一 SQLite 文件的本机 Worker，不宣称跨主机或跨区域共识。
 - **模型与后台任务容错**：模型错误区分连接/超时/429/5xx 与 auth/权限/参数/上下文/输出上限，只重试明确
   瞬态故障；重试遵守有上限的 `Retry-After` 并使用 full jitter，并发和 breaker 按冻结 route 隔离，
-  half-open 只放行一个探测。每次 attempt 脱敏后关联 run_id 落库。Scheduler 支持幂等键、自动续租、
-  指数退避、取消和 dead-letter 状态。
+  half-open 只放行一个探测。fallback 只接管策略允许的瞬态故障，并在发送前复验目标 API mode、tool calling、
+  strict structured output 和已知上下文上限；401/403/普通 400/context overflow/output cap 保留原错，不盲切模型。
+  turn 起点冻结候选 route，切换原因、胜出 attempt 和数值 usage 脱敏后关联 run_id 落库。Scheduler 支持幂等键、
+  自动续租、指数退避、取消和 dead-letter 状态。
 - **事务写工具**：`create_exam`、`assign_homework`、`batch_grade` 与
   `generate_questions(save_to_bank)` 进入持久 `ToolOperation` 状态机；业务写入、`committed` 和
   outbox 在同一教学库事务中提交。Scheduler 重试复用稳定写入键，outbox 为至少一次投递并由消费者

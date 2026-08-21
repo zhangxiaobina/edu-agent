@@ -24,6 +24,8 @@ circuit_failure_threshold = 3
 circuit_cooldown_seconds = 30.0
 # fallback_model = "Qwen/Qwen3-14B"
 # fallback_base_url = "http://127.0.0.1:8001/v1"
+# fallback_api_mode = "chat_completions" # 默认继承 primary 的冻结 mode
+# fallback_context_window_tokens = 32768 # 配置 fallback 时必填，未知不视为无限
 # fallback key 使用 EDU_AGENT_FALLBACK_API_KEY，不写入 TOML。
 
 [runtime]

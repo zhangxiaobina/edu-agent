@@ -209,12 +209,18 @@ class EduAgentService:
         resume: bool = False,
     ) -> ChatResult:
         try:
-            return self._chat_turn_impl(
-                message,
-                context=context,
-                db_conn=db_conn,
-                resume=resume,
+            runtime_context = (
+                self.engine.runtime_context(context.run_id)
+                if hasattr(self.engine, "runtime_context")
+                else contextlib.nullcontext()
             )
+            with runtime_context:
+                return self._chat_turn_impl(
+                    message,
+                    context=context,
+                    db_conn=db_conn,
+                    resume=resume,
+                )
         except RunCancelled as error:
             self.state_store.finish_run(
                 context.run_id,
@@ -255,6 +261,11 @@ class EduAgentService:
         for index, route in enumerate(routes):
             details = route.to_event()
             details["route_role"] = "primary" if index == 0 else "fallback"
+            details["selection_reason"] = (
+                "configured_primary"
+                if index == 0
+                else "configured_fallback_candidate"
+            )
             self.state_store.record_provider_event(
                 run_id=context.run_id,
                 provider=route.provider,
@@ -365,30 +376,24 @@ class EduAgentService:
             result_budget=self.result_budget,
         )
         try:
-            runtime_context = (
-                self.engine.runtime_context(context.run_id)
-                if hasattr(self.engine, "runtime_context")
-                else contextlib.nullcontext()
+            result = run_agent(
+                message,
+                self.engine,
+                db_conn=db_conn,
+                recursion_limit=max(30, self.config.runtime.max_model_calls * 2 + 2),
+                tools_provider=self.tools_provider,
+                initial_messages=snapshot.messages,
+                run_context=context,
+                tool_executor=executor,
+                planning=PlanningOptions(
+                    enabled=self.config.planning.enabled,
+                    max_steps=self.config.planning.max_steps,
+                    max_step_retries=self.config.planning.max_step_retries,
+                    max_iterations=self.config.planning.max_iterations,
+                ),
+                plan_generator=self.plan_generator,
+                state_store=self.state_store,
             )
-            with runtime_context:
-                result = run_agent(
-                    message,
-                    self.engine,
-                    db_conn=db_conn,
-                    recursion_limit=max(30, self.config.runtime.max_model_calls * 2 + 2),
-                    tools_provider=self.tools_provider,
-                    initial_messages=snapshot.messages,
-                    run_context=context,
-                    tool_executor=executor,
-                    planning=PlanningOptions(
-                        enabled=self.config.planning.enabled,
-                        max_steps=self.config.planning.max_steps,
-                        max_step_retries=self.config.planning.max_step_retries,
-                        max_iterations=self.config.planning.max_iterations,
-                    ),
-                    plan_generator=self.plan_generator,
-                    state_store=self.state_store,
-                )
             context.check_control("messages.before_final_commit")
             generated = result["messages"][len(snapshot.messages) :]
             self.state_store.append_messages(

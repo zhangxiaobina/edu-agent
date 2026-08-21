@@ -2,12 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R1.4
-- next_prompt: R1.5
+- last_completed_prompt: R1.5
+- next_prompt: R2.1
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
-- stage_gate: in_progress
-- stage_gate_reason: R0 gate 保持 passed；R1.4 已完成同步 Provider 尝试策略与确定性故障矩阵，但 capability-safe
-  fallback 仍留给 R1.5，不能提前把 R1 总门禁标为 passed
+- stage_gate: passed
+- stage_gate_reason: R0 与 R1 门禁均已通过；下一阶段为 R2.1。R2-R5 仍未实现，不得在 README 中写成已完成
 
 ## Baseline Reproduction
 
@@ -405,3 +404,51 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   切换原因和完整 R1 fake-server 门禁必须在 R1.5 收口。R1 总门禁保持 `in_progress`。
 - next: R1.5，基于 R1.1-R1.4 交接实现 failure-kind 与 capability-safe fallback，验证两种 mode 的完整故障矩阵
   和 attempt 审计并独立收口 R1；不得开始 token streaming、凭据池或 R2 工作。
+
+### R1.5 - 2026-08-22
+
+- commit/evidence: 会话从 R1.4 提交 `4f94fd1ca35f55e345707f3ad25d02553c7747d8` 开始；本次工作区开始时
+  `main...origin/main` 同步且无改动。实现未创建本地提交，后续提交哈希不在本交接中预填。
+- changes: `ProviderGateway` 新增结构化 `ProviderRequestRequirements`、effective capability 合并、无网络
+  adapter 预检和稳定 capability gap；请求需求由当前同步 `messages/tools` 推导 tool calling、strict structured
+  output、API mode、非流式和保守 context token 估算。`ChatCompletionsAdapter`/`ResponsesAdapter` 在 SDK client
+  创建和 HTTP 前拒绝不支持的 tool、strict schema、已知 context overflow 或坏 mode 请求。未知 context 不当作
+  无限，Provider fallback 必须在配置中声明 `fallback_context_window_tokens`。
+- fallback/route: `ResilientEngine` 在 turn 起点冻结 primary/fallback `ResolvedRoute`，运行时通过 context
+  使用冻结 route，即使 engine 后续重配置也不改变该 turn。fallback 仅允许 connection/timeout/可恢复 429/5xx
+  或 circuit-open；auth/permission/普通 400/context overflow/output cap/unknown 和不兼容 capability 均记录
+  `fallback_rejected` 后保留 primary 原错。`route_selected`、`route_resolved`、`fallback_activated`、
+  `fallback_rejected`、`provider_result_selected` 与逐 attempt 事件包含选择/拒绝原因、route、failure kind、
+  compatibility、attempt 序号和脱敏数值 usage。胜出 response 使用深拷贝副本追加 runtime/fallback metadata，
+  旧 attempt 不能覆盖最终 usage 或终态。
+- credentials/config: 每条 route 继续只有单一 `CredentialRef`；未实现 key pool、轮换、quarantine 或运行中
+  静默降级。fallback URL/mode/context 字段孤立、未知 mode、缺少已知 context 上限、相同 route identity 或
+  primary/fallback route metadata 不完整时在构造/启动阶段失败。`config.example.toml` 仅记录环境变量名和示例
+  context 上限，不保存 key。
+- fake-provider evidence: 新增 `scripts/accept_r1_fake_provider.py` 与 `tests/test_r1_fake_provider_acceptance.py`。
+  fake server 只绑定 `127.0.0.1`，通过锁定 OpenAI SDK 的真实 `/chat/completions` 与 `/responses` wire，显式
+  `trust_env=False`，不访问公网或机器代理；覆盖双 mode 等价双 tool call、Retry-After=7、共享 registry 的
+  per-route breaker 隔离、Responses compatible fallback、tool/strict/context/mode 不兼容拒绝、401/403/400/
+  context terminal 拒绝、output cap 不切换、attempt/胜出审计和 key/credential ref/body 脱敏。
+- documentation: README、`docs/architecture.md`、`docs/production-runtime.md` 更新为已验证的 R1 capability-safe
+  fallback 口径；继续明确当前不是 token streaming，R2 RunEvent/Journal/TurnFinalizer、R3 ToolManifest、R4
+  context/budget/drain、R5 真实模型候选版仍在路线中。
+- migrations/config: 无 migration、无依赖或 lockfile 变化；新增配置字段只有 `fallback_api_mode` 与必填的
+  `fallback_context_window_tokens`，旧 primary/fallback 环境变量兼容且仍不记录凭据值。
+- verification: `uv run --frozen --offline ruff check .` 0 diagnostics；R1 Gateway/adapter/Resilient/Trace/旧
+  runtime 专项 `125 passed (3.92s)`；最终显式清空模型与平台凭据的 Stage 8 离线全量
+  `299 passed (14.91s)`；独立 `scripts/accept_r1_fake_provider.py` 输出 `gate=passed`、两种 mode、
+  `equivalent_tool_calls=2`、`retry_after_seconds=7`、`attempt_events=12`、breaker isolation、compatible
+  fallback 和四类 incompatibility gaps；`zsh scripts/accept_stage8.sh` 通过，lineage 通过、data boundary
+  findings=0、10k Trace 三项断言通过、Stage 7 regression 通过。`git diff --check` 通过，Stage 8 生成的
+  development artifacts 已恢复为会话开始版本。
+- not_verified: 没有访问公网、真实 Provider/model 或发送真实凭据；Docker/Jobe 由 Stage 8 按既有契约记录
+  `sandbox=not_verified`，真实模型评测为 `not_run`；未验证 GitHub-hosted CI 或外部注入 SDK client 自带重试。
+- residual_risks: 当前仍是同步 `Engine.chat`，没有 token streaming、R2 journal/finalizer、取消贯穿 Provider、
+  多 key 轮换、真实厂商 model-specific limit 自动发现或 R4 context overflow recovery。配置 fallback 要求已知
+  context 上限，部署方必须提供真实且不低估的声明；Provider adapter/route capability 仍是部署声明，不是远端
+  自动探测。
+- gate: `R1 gate=passed`。证据覆盖两种 API mode、Retry-After、per-route breaker、兼容/不兼容 fallback、
+  attempt 审计、usage/终态 ownership 和 key 脱敏；本阶段没有开始 token streaming。
+- next: R2.1，先定义 typed `RunEvent v2`、单调 sequence、单 writer 发布协议；不得回头把 R2-R5 能力写成当前
+  已实现，也不得引入凭据池或跳过 R2 前置门禁。

@@ -17,7 +17,9 @@ from edu_agent.engine import (
     Engine,
     EngineResponse,
     FailureKind,
+    GatewayEngine,
     ProviderGateway,
+    ProviderCapabilities,
     ResponsesAPIError,
     ProviderSpec,
     ResilientEngine,
@@ -94,15 +96,20 @@ class RoutedEngine(Engine):
         provider: str = "custom",
         deployment: str | None = "prod-a",
         credential_env: str = "EDU_AGENT_API_KEY",
+        api_mode: ApiMode = ApiMode.CHAT_COMPLETIONS,
+        capabilities: ProviderCapabilities | None = ProviderCapabilities(
+            context_window_tokens=16_384
+        ),
     ):
         self.route = ProviderGateway().begin_turn(
             ProviderSpec(
                 model=model,
                 endpoint=endpoint,
-                api_mode=ApiMode.CHAT_COMPLETIONS,
+                api_mode=api_mode,
                 provider=provider,
                 deployment=deployment,
                 credential=CredentialRef(credential_env),
+                capabilities=capabilities,
             )
         )
         self.name = f"{provider}:{model}"
@@ -301,6 +308,273 @@ def test_terminal_request_failures_never_retry_or_sleep(error):
     assert engine.calls == 1
     assert sleeps == []
     assert resilient.breaker.state == "closed"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        HTTPError(401, "bad key"),
+        HTTPError(403, "forbidden"),
+        HTTPError(400, "invalid request"),
+        HTTPError(400, "context window exceeded"),
+        LengthFinishReasonError("output capped"),
+        HTTPError(429, "quota", code="insufficient_quota"),
+        RuntimeError("opaque failure"),
+    ],
+)
+def test_fallback_policy_rejects_terminal_and_unknown_failure_kinds(error):
+    events = []
+    primary = RoutedEngine(lambda *_: _raise(error))
+    fallback = RoutedEngine(
+        lambda *_: EngineResponse(content="must-not-run"),
+        model="fallback-model",
+    )
+    resilient = ResilientEngine(
+        primary,
+        fallback=fallback,
+        max_retries=0,
+        event_sink=events.append,
+    )
+
+    with pytest.raises(type(error)) as caught:
+        resilient.chat([], [])
+
+    assert caught.value is error
+    assert fallback.calls == 0
+    rejected = next(event for event in events if event["event"] == "fallback_rejected")
+    assert rejected["details"]["reason"] == "failure_policy_denied"
+    assert rejected["details"]["fallback_attempted"] is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        APIConnectionError("offline"),
+        APITimeoutError("timed out"),
+        HTTPError(429, "limited"),
+        HTTPError(503, "unavailable"),
+    ],
+)
+def test_fallback_policy_allows_only_explicit_transient_failure_kinds(error):
+    primary = RoutedEngine(lambda *_: _raise(error))
+    fallback = RoutedEngine(
+        lambda *_: EngineResponse(content="fallback-ok"),
+        model="fallback-model",
+    )
+
+    response = ResilientEngine(
+        primary,
+        fallback=fallback,
+        max_retries=0,
+    ).chat([], [])
+
+    assert response.content == "fallback-ok"
+    assert fallback.calls == 1
+    assert response.usage["primary_failure"] == classify_failure(error).kind.value
+
+
+@pytest.mark.parametrize(
+    ("fallback_mode", "fallback_capabilities", "tools", "expected_gap"),
+    [
+        (
+            ApiMode.CHAT_COMPLETIONS,
+            ProviderCapabilities(tool_calling=False),
+            [{"type": "function", "function": {"name": "query"}}],
+            "tool_calling",
+        ),
+        (
+            ApiMode.CHAT_COMPLETIONS,
+            ProviderCapabilities(structured_output=False),
+            [
+                {
+                    "type": "function",
+                    "function": {"name": "query", "strict": True},
+                }
+            ],
+            "structured_output",
+        ),
+        (
+            ApiMode.CHAT_COMPLETIONS,
+            ProviderCapabilities(context_window_tokens=1),
+            [],
+            "context_window",
+        ),
+        (
+            ApiMode.RESPONSES,
+            ProviderCapabilities(),
+            [],
+            "api_mode_validation",
+        ),
+    ],
+)
+def test_incompatible_fallback_is_rejected_before_provider_call(
+    fallback_mode,
+    fallback_capabilities,
+    tools,
+    expected_gap,
+):
+    events = []
+    primary = RoutedEngine(lambda *_: _raise(APIConnectionError("offline")))
+    fallback = RoutedEngine(
+        lambda *_: EngineResponse(content="must-not-run"),
+        model="fallback-model",
+        api_mode=fallback_mode,
+        capabilities=fallback_capabilities,
+    )
+    resilient = ResilientEngine(
+        primary,
+        fallback=fallback,
+        max_retries=0,
+        event_sink=events.append,
+    )
+
+    with pytest.raises(APIConnectionError):
+        resilient.chat([{"role": "user", "content": "request"}], tools)
+
+    assert fallback.calls == 0
+    rejected = next(event for event in events if event["event"] == "fallback_rejected")
+    assert rejected["details"]["reason"] == "capability_mismatch"
+    assert expected_gap in rejected["details"]["compatibility"]["gaps"]
+
+
+def test_fallback_rejects_unknown_context_after_known_primary_limit():
+    events = []
+    primary = RoutedEngine(
+        lambda *_: _raise(APIConnectionError("offline")),
+        capabilities=ProviderCapabilities(context_window_tokens=4096),
+    )
+    fallback = RoutedEngine(
+        lambda *_: EngineResponse(content="must-not-run"),
+        model="fallback-model",
+        capabilities=ProviderCapabilities(),
+    )
+    resilient = ResilientEngine(
+        primary,
+        fallback=fallback,
+        max_retries=0,
+        event_sink=events.append,
+    )
+
+    with pytest.raises(APIConnectionError):
+        resilient.chat([{"role": "user", "content": "small"}], [])
+
+    rejected = next(event for event in events if event["event"] == "fallback_rejected")
+    compatibility = rejected["details"]["compatibility"]
+    assert compatibility["context_check"] == "unknown_unverified"
+    assert "context_window_unknown" in compatibility["gaps"]
+    assert fallback.calls == 0
+
+
+def test_fallback_tool_capability_includes_historical_tool_envelopes():
+    events = []
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-history",
+                    "type": "function",
+                    "function": {"name": "query", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-history",
+            "content": "{}",
+        },
+    ]
+    primary = RoutedEngine(lambda *_: _raise(APIConnectionError("offline")))
+    fallback = RoutedEngine(
+        lambda *_: EngineResponse(content="must-not-run"),
+        model="fallback-model",
+        capabilities=ProviderCapabilities(
+            tool_calling=False,
+            context_window_tokens=16_384,
+        ),
+    )
+    resilient = ResilientEngine(
+        primary,
+        fallback=fallback,
+        max_retries=0,
+        event_sink=events.append,
+    )
+
+    with pytest.raises(APIConnectionError):
+        resilient.chat(messages, [])
+
+    rejected = next(event for event in events if event["event"] == "fallback_rejected")
+    compatibility = rejected["details"]["compatibility"]
+    assert compatibility["requirements"]["tool_calling"] is True
+    assert "tool_calling" in compatibility["gaps"]
+    assert fallback.calls == 0
+
+
+def test_fallback_winner_owns_terminal_usage_without_mutating_attempt_response():
+    events = []
+    primary_error = APIConnectionError("offline")
+    primary_error.usage = {"prompt_tokens": 99}
+    fallback_response = EngineResponse(
+        content="fallback-ok",
+        usage={"prompt_tokens": 2, "completion_tokens": 1},
+    )
+    primary = RoutedEngine(lambda *_: _raise(primary_error))
+    fallback = RoutedEngine(lambda *_: fallback_response, model="fallback-model")
+
+    response = ResilientEngine(
+        primary,
+        fallback=fallback,
+        max_retries=0,
+        event_sink=events.append,
+    ).chat([], [])
+
+    assert response is not fallback_response
+    assert fallback_response.usage == {"prompt_tokens": 2, "completion_tokens": 1}
+    assert response.usage["prompt_tokens"] == 2
+    assert 99 not in response.usage.values()
+    selected = [event for event in events if event["event"] == "provider_result_selected"]
+    assert len(selected) == 1
+    assert selected[0]["details"]["route_role"] == "fallback"
+    assert selected[0]["details"]["superseded_attempts"] == 1
+
+
+def test_turn_uses_frozen_gateway_route_even_if_engine_is_reconfigured():
+    calls = []
+
+    class Adapter:
+        api_mode = ApiMode.CHAT_COMPLETIONS
+        capabilities = ProviderCapabilities()
+
+        def chat(self, route, messages, tools):
+            calls.append(route.identity)
+            return EngineResponse(content=route.model)
+
+    gateway = ProviderGateway(adapters={ApiMode.CHAT_COMPLETIONS: Adapter()})
+    engine = GatewayEngine(
+        gateway,
+        ProviderSpec(
+            model="frozen-model",
+            endpoint="https://frozen.example/v1",
+            api_mode=ApiMode.CHAT_COMPLETIONS,
+        ),
+    )
+    resilient = ResilientEngine(engine, max_retries=0)
+
+    with resilient.runtime_context("run-frozen"):
+        frozen = resilient.begin_turn_routes()[0]
+        engine._configure_route(
+            gateway,
+            ProviderSpec(
+                model="changed-model",
+                endpoint="https://changed.example/v1",
+                api_mode=ApiMode.CHAT_COMPLETIONS,
+            ),
+        )
+        response = resilient.chat([], [])
+
+    assert response.content == "frozen-model"
+    assert calls == [frozen.identity]
 
 
 def test_route_concurrency_is_bounded_without_real_sleep():
@@ -586,6 +860,28 @@ def test_output_cap_response_is_audited_without_retry():
     assert attempt["details"]["retryable"] is False
 
 
+def test_output_cap_response_never_activates_configured_fallback():
+    events = []
+    primary = RoutedEngine(
+        lambda *_: EngineResponse(content="partial", finish_reason="length")
+    )
+    fallback = RoutedEngine(
+        lambda *_: EngineResponse(content="must-not-run"),
+        model="fallback-model",
+    )
+
+    response = ResilientEngine(
+        primary,
+        fallback=fallback,
+        max_retries=0,
+        event_sink=events.append,
+    ).chat([], [])
+
+    assert response.content == "partial"
+    assert fallback.calls == 0
+    assert not any(event["event"] == "fallback_activated" for event in events)
+
+
 def test_model_resilience_config_defaults_validation_and_factory_wiring():
     defaults = ModelConfig(max_retries=0)
     assert defaults.retry_base_delay_seconds == 1.0
@@ -603,6 +899,16 @@ def test_model_resilience_config_defaults_validation_and_factory_wiring():
         ModelConfig(retry_after_max_seconds=float("inf"))
     with pytest.raises(ValueError, match="route_state_ttl_seconds"):
         ModelConfig(route_state_ttl_seconds=30, circuit_cooldown_seconds=30)
+    with pytest.raises(ValueError, match="需要 fallback_model"):
+        ModelConfig(fallback_base_url="https://fallback.example/v1")
+    with pytest.raises(ValueError, match="fallback_context_window_tokens"):
+        ModelConfig(fallback_model="fallback")
+    with pytest.raises(ValueError, match="api_mode"):
+        ModelConfig(
+            fallback_model="fallback",
+            fallback_api_mode="unknown",
+            fallback_context_window_tokens=16_384,
+        )
 
     config = ModelConfig(
         max_retries=0,
@@ -625,3 +931,52 @@ def test_model_resilience_config_defaults_validation_and_factory_wiring():
     assert resilient.route_registry.idle_ttl_seconds == 31
     assert resilient.route_registry.failure_threshold == 5
     assert resilient.route_registry.cooldown_seconds == 13
+
+
+def test_factory_fallback_mode_is_explicit_or_inherits_primary_at_startup():
+    inherited = get_engine(
+        ModelConfig(
+            model="primary",
+            endpoint="https://primary.example/v1",
+            api_mode=ApiMode.RESPONSES,
+            fallback_model="fallback",
+            fallback_base_url="https://fallback.example/v1",
+            fallback_context_window_tokens=16_384,
+            max_retries=0,
+        ),
+        client=SimpleNamespace(),
+    )
+    assert [route.api_mode for route in inherited.begin_turn_routes()] == [
+        ApiMode.RESPONSES,
+        ApiMode.RESPONSES,
+    ]
+
+    explicit = get_engine(
+        ModelConfig(
+            model="primary",
+            endpoint="https://primary.example/v1",
+            api_mode=ApiMode.RESPONSES,
+            fallback_model="fallback",
+            fallback_base_url="https://fallback.example/v1",
+            fallback_api_mode=ApiMode.CHAT_COMPLETIONS,
+            fallback_context_window_tokens=16_384,
+            max_retries=0,
+        ),
+        client=SimpleNamespace(),
+    )
+    assert [route.api_mode for route in explicit.begin_turn_routes()] == [
+        ApiMode.RESPONSES,
+        ApiMode.CHAT_COMPLETIONS,
+    ]
+
+    with pytest.raises(ValueError, match="identity 不能相同"):
+        get_engine(
+            ModelConfig(
+                model="same-model",
+                endpoint="https://same.example/v1",
+                fallback_model="same-model",
+                fallback_context_window_tokens=16_384,
+                max_retries=0,
+            ),
+            client=SimpleNamespace(),
+        )

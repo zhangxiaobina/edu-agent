@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import math
 import random as random_module
 import re
@@ -9,14 +10,23 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from enum import Enum
 from typing import Any
 
 from .base import Engine, EngineResponse
-from .gateway import ResolvedRoute, RouteIdentity
+from .gateway import (
+    ApiMode,
+    ProviderCapabilities,
+    ProviderCapabilityError,
+    ProviderRequestRequirements,
+    ResolvedRoute,
+    RouteIdentity,
+    capability_gaps,
+    infer_request_requirements,
+)
 
 
 class FailureKind(str, Enum):
@@ -29,6 +39,7 @@ class FailureKind(str, Enum):
     INVALID_REQUEST = "invalid_request"
     CONTEXT_OVERFLOW = "context_overflow"
     OUTPUT_CAP = "output_cap"
+    CIRCUIT_OPEN = "circuit_open"
     UNKNOWN = "unknown"
 
 
@@ -37,6 +48,19 @@ class FailureDecision:
     kind: FailureKind
     retryable: bool
     status_code: int | None = None
+
+    @property
+    def fallback_allowed(self) -> bool:
+        return self.kind is FailureKind.CIRCUIT_OPEN or (
+            self.retryable
+            and self.kind
+            in {
+                FailureKind.CONNECTION,
+                FailureKind.TIMEOUT,
+                FailureKind.RATE_LIMIT,
+                FailureKind.SERVER,
+            }
+        )
 
 
 _CONTEXT_CODES = frozenset(
@@ -106,6 +130,13 @@ def classify_failure(error: Exception) -> FailureDecision:
     markers = _error_markers(error)
     text = str(error).lower()[:4096]
 
+    if name == "CircuitOpenError":
+        return FailureDecision(FailureKind.CIRCUIT_OPEN, False, status)
+    error_gaps = getattr(error, "gaps", ())
+    if isinstance(error, ProviderCapabilityError) and "context_window" in error_gaps:
+        return FailureDecision(FailureKind.CONTEXT_OVERFLOW, False, status)
+    if isinstance(error, ProviderCapabilityError) and "max_output_tokens" in error_gaps:
+        return FailureDecision(FailureKind.OUTPUT_CAP, False, status)
     if name in {"LengthFinishReasonError", "OutputCapError"} or markers & _OUTPUT_CAP_CODES:
         return FailureDecision(FailureKind.OUTPUT_CAP, False, status)
     context_limit_text = (
@@ -460,6 +491,9 @@ class _RouteSnapshot:
     identity: RouteIdentity
     provider: str
     audit: dict[str, Any]
+    route: ResolvedRoute | None
+    api_mode: ApiMode | None
+    capabilities: ProviderCapabilities | None
 
 
 @dataclass(frozen=True)
@@ -469,6 +503,32 @@ class _RouteExecution:
     attempts: int
     skipped: bool
     breaker_state: str
+
+
+@dataclass(frozen=True)
+class _TurnRoutePlan:
+    primary: _RouteSnapshot
+    fallback: _RouteSnapshot | None
+
+
+@dataclass(frozen=True)
+class _FallbackCompatibility:
+    compatible: bool
+    gaps: tuple[str, ...]
+    requirements: ProviderRequestRequirements
+    api_mode: str
+    context_check: str
+    capabilities: dict[str, bool | int | None]
+
+    def to_event(self) -> dict[str, Any]:
+        return {
+            "compatible": self.compatible,
+            "gaps": list(self.gaps),
+            "requirements": self.requirements.to_event(),
+            "api_mode": self.api_mode,
+            "context_check": self.context_check,
+            "capabilities": self.capabilities,
+        }
 
 
 _USAGE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
@@ -514,7 +574,18 @@ def _route_snapshot(engine: Engine) -> _RouteSnapshot:
         route = routes[0]
         if not isinstance(route, ResolvedRoute):
             raise ValueError("engine returned an invalid provider route")
-        return _RouteSnapshot(route.identity, route.provider, route.to_event())
+        resolver = getattr(engine, "effective_capabilities", None)
+        capabilities = resolver() if callable(resolver) else route.capabilities
+        if not isinstance(capabilities, ProviderCapabilities):
+            raise ValueError("engine returned invalid effective provider capabilities")
+        return _RouteSnapshot(
+            route.identity,
+            route.provider,
+            route.to_event(),
+            route,
+            route.api_mode,
+            capabilities,
+        )
     name = getattr(engine, "name", type(engine).__name__)
     provider = name if isinstance(name, str) and name else type(engine).__name__
     identity: RouteIdentity = ("legacy", "", "engine", "", provider)
@@ -529,6 +600,21 @@ def _route_snapshot(engine: Engine) -> _RouteSnapshot:
             "endpoint": None,
             "model": None,
         },
+        None,
+        None,
+        None,
+    )
+
+
+def _response_with_usage(
+    response: EngineResponse,
+    additions: Mapping[str, Any],
+) -> EngineResponse:
+    current = copy.deepcopy(dict(response.usage)) if isinstance(response.usage, Mapping) else {}
+    return replace(
+        response,
+        tool_calls=copy.deepcopy(response.tool_calls),
+        usage={**current, **copy.deepcopy(dict(additions))},
     )
 
 
@@ -590,27 +676,68 @@ class ResilientEngine(Engine):
             "edu_agent_provider_run_id",
             default=None,
         )
+        self._turn_route_plan: contextvars.ContextVar[_TurnRoutePlan | None] = (
+            contextvars.ContextVar("edu_agent_provider_turn_routes", default=None)
+        )
+        self._validate_route_configuration()
+
+    def _build_route_plan(self) -> _TurnRoutePlan:
+        return _TurnRoutePlan(
+            primary=_route_snapshot(self.primary),
+            fallback=_route_snapshot(self.fallback) if self.fallback is not None else None,
+        )
+
+    def _validate_route_configuration(self) -> None:
+        plan = self._build_route_plan()
+        if plan.fallback is None:
+            return
+        if (plan.primary.route is None) != (plan.fallback.route is None):
+            raise ValueError(
+                "primary/fallback 必须同时提供可审计 Provider route metadata"
+            )
+        if plan.primary.identity == plan.fallback.identity:
+            raise ValueError("primary/fallback route identity 不能相同")
 
     @property
     def breaker(self) -> CircuitBreaker:
         """Compatibility view of the current primary route breaker."""
-        route = _route_snapshot(self.primary)
+        plan = self._turn_route_plan.get() or self._build_route_plan()
+        route = plan.primary
         with self.route_registry.lease(route.identity) as state:
             return state.breaker
 
     @contextlib.contextmanager
     def runtime_context(self, run_id: str) -> Iterator[None]:
-        token = self._run_id.set(run_id)
+        plan = self._build_route_plan()
+        run_token = self._run_id.set(run_id)
+        route_token = self._turn_route_plan.set(plan)
         try:
             yield
         finally:
-            self._run_id.reset(token)
+            self._turn_route_plan.reset(route_token)
+            self._run_id.reset(run_token)
 
     def begin_turn_routes(self) -> tuple[ResolvedRoute, ...]:
-        routes = self.primary.begin_turn_routes()
-        if self.fallback is not None:
-            routes += self.fallback.begin_turn_routes()
-        return routes
+        plan = self._turn_route_plan.get() or self._build_route_plan()
+        snapshots = (plan.primary, plan.fallback)
+        return tuple(
+            snapshot.route
+            for snapshot in snapshots
+            if snapshot is not None and snapshot.route is not None
+        )
+
+    @contextlib.contextmanager
+    def _chat_route_plan(self) -> Iterator[_TurnRoutePlan]:
+        active = self._turn_route_plan.get()
+        if active is not None:
+            yield active
+            return
+        plan = self._build_route_plan()
+        token = self._turn_route_plan.set(plan)
+        try:
+            yield plan
+        finally:
+            self._turn_route_plan.reset(token)
 
     def _local_backoff(self, retry_index: int) -> float:
         if self.retry_base_delay_seconds == 0 or self.retry_max_delay_seconds == 0:
@@ -641,6 +768,90 @@ class ResilientEngine(Engine):
         if server_delay is not None:
             return server_delay, "retry_after"
         return self._local_backoff(retry_index), "exponential_full_jitter"
+
+    @staticmethod
+    def _chat_frozen_route(
+        engine: Engine,
+        route: _RouteSnapshot,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> EngineResponse:
+        if route.route is not None:
+            routed_chat = getattr(engine, "chat_on_route", None)
+            if callable(routed_chat):
+                return routed_chat(route.route, messages, tools)
+            current = _route_snapshot(engine)
+            if current.identity != route.identity:
+                raise RuntimeError("provider route changed after turn start")
+        return engine.chat(messages, tools)
+
+    @staticmethod
+    def _fallback_compatibility(
+        primary: _RouteSnapshot,
+        fallback_engine: Engine,
+        fallback: _RouteSnapshot,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> _FallbackCompatibility:
+        requirements = infer_request_requirements(messages, tools)
+        if fallback.route is None or fallback.capabilities is None:
+            gaps = (
+                ("capability_metadata",)
+                if requirements.tool_calling or requirements.structured_output
+                else ()
+            )
+            return _FallbackCompatibility(
+                compatible=not gaps,
+                gaps=gaps,
+                requirements=requirements,
+                api_mode="engine",
+                context_check="engine_contract",
+                capabilities={},
+            )
+
+        gaps = list(
+            capability_gaps(
+                requirements,
+                fallback.capabilities,
+                api_mode=fallback.route.api_mode,
+                require_known_context=True,
+            )
+        )
+        validator = getattr(fallback_engine, "validate_request_on_route", None)
+        validates_frozen_route = callable(validator)
+        if not validates_frozen_route:
+            validator = getattr(fallback_engine, "validate_request", None)
+        if (
+            primary.api_mode is not None
+            and primary.api_mode is not fallback.api_mode
+            and not callable(validator)
+        ):
+            gaps.append("api_mode_validation")
+        if not gaps and callable(validator):
+            try:
+                if validates_frozen_route:
+                    validator(fallback.route, messages, tools)
+                else:
+                    validator(messages, tools)
+            except ProviderCapabilityError as error:
+                gaps.extend(error.gaps)
+            except ValueError:
+                gaps.append("api_mode_request_shape")
+
+        fallback_context = fallback.capabilities.context_window_tokens
+        if fallback_context is not None:
+            context_check = "sufficient" if requirements.context_tokens <= fallback_context else "insufficient"
+        else:
+            context_check = "unknown_unverified"
+        normalized_gaps = tuple(dict.fromkeys(gaps))
+        return _FallbackCompatibility(
+            compatible=not normalized_gaps,
+            gaps=normalized_gaps,
+            requirements=requirements,
+            api_mode=fallback.route.api_mode.value,
+            context_check=context_check,
+            capabilities=fallback.capabilities.to_event(),
+        )
 
     def _attempt_event(
         self,
@@ -676,6 +887,9 @@ class ResilientEngine(Engine):
                 "route": route.audit,
                 "failure_kind": failure_kind.value if failure_kind is not None else None,
                 "retryable": decision.retryable if decision is not None else False,
+                "fallback_allowed": (
+                    decision.fallback_allowed if decision is not None else False
+                ),
                 "delay_seconds": delay,
                 "delay_source": delay_source,
                 "breaker_state_before": breaker_before,
@@ -725,7 +939,12 @@ class ResilientEngine(Engine):
                         )
                     attempts += 1
                     try:
-                        response = engine.chat(messages, tools)
+                        response = self._chat_frozen_route(
+                            engine,
+                            route,
+                            messages,
+                            tools,
+                        )
                     except Exception as caught:
                         error = caught
                         decision = classify_failure(caught)
@@ -838,45 +1057,120 @@ class ResilientEngine(Engine):
         raise AssertionError("provider attempt loop exited unexpectedly")
 
     def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
-        primary_route = _route_snapshot(self.primary)
-        primary = self._execute_route(
-            self.primary,
-            primary_route,
-            messages,
-            tools,
-            route_role="primary",
-            start_attempt=0,
-            max_retries=self.max_retries,
-        )
-        attempts = primary.attempts
-        if primary.response is not None:
-            primary.response.usage = {
-                **primary.response.usage,
-                "runtime_attempts": attempts,
-            }
-            return primary.response
-
-        last_error = primary.error
-        assert last_error is not None
-        if primary.skipped:
+        with self._chat_route_plan() as route_plan:
+            primary_route = route_plan.primary
+            requirements = infer_request_requirements(messages, tools)
             self._event(
-                "primary_skipped",
+                "route_selected",
                 route=primary_route,
-                attempt=attempts,
-                error=last_error,
-                details={"breaker_state": primary.breaker_state},
+                attempt=0,
+                details={
+                    "route_role": "primary",
+                    "selection_reason": "configured_primary",
+                    "route": primary_route.audit,
+                    "request_requirements": requirements.to_event(),
+                    "fallback_configured": route_plan.fallback is not None,
+                },
             )
+            primary = self._execute_route(
+                self.primary,
+                primary_route,
+                messages,
+                tools,
+                route_role="primary",
+                start_attempt=0,
+                max_retries=self.max_retries,
+            )
+            attempts = primary.attempts
+            if primary.response is not None:
+                response = _response_with_usage(
+                    primary.response,
+                    {"runtime_attempts": attempts},
+                )
+                self._event(
+                    "provider_result_selected",
+                    route=primary_route,
+                    attempt=attempts,
+                    details={
+                        "status": "selected",
+                        "route_role": "primary",
+                        "selection_reason": "primary_completed",
+                        "selected_attempt": attempts,
+                        "usage": _audit_usage(response.usage),
+                    },
+                )
+                return response
 
-        if self.fallback is not None:
-            fallback_route = _route_snapshot(self.fallback)
+            last_error = primary.error
+            assert last_error is not None
+            decision = classify_failure(last_error)
+            if primary.skipped:
+                self._event(
+                    "primary_skipped",
+                    route=primary_route,
+                    attempt=attempts,
+                    error=last_error,
+                    details={
+                        "breaker_state": primary.breaker_state,
+                        "failure_kind": decision.kind.value,
+                    },
+                )
+
+            if self.fallback is None or route_plan.fallback is None:
+                raise last_error
+            fallback_route = route_plan.fallback
+            if not decision.fallback_allowed:
+                self._event(
+                    "fallback_rejected",
+                    route=fallback_route,
+                    attempt=attempts + 1,
+                    error=last_error,
+                    details={
+                        "reason": "failure_policy_denied",
+                        "primary_failure": decision.kind.value,
+                        "primary_retryable": decision.retryable,
+                        "fallback_attempted": False,
+                        "primary_route": primary_route.audit,
+                        "fallback_route": fallback_route.audit,
+                    },
+                )
+                raise last_error
+
+            compatibility = self._fallback_compatibility(
+                primary_route,
+                self.fallback,
+                fallback_route,
+                messages,
+                tools,
+            )
+            if not compatibility.compatible:
+                self._event(
+                    "fallback_rejected",
+                    route=fallback_route,
+                    attempt=attempts + 1,
+                    error=last_error,
+                    details={
+                        "reason": "capability_mismatch",
+                        "primary_failure": decision.kind.value,
+                        "fallback_attempted": False,
+                        "primary_route": primary_route.audit,
+                        "fallback_route": fallback_route.audit,
+                        "compatibility": compatibility.to_event(),
+                    },
+                )
+                raise last_error
+
             self._event(
                 "fallback_activated",
                 route=fallback_route,
                 attempt=attempts + 1,
                 error=last_error,
                 details={
-                    "primary_failure": classify_failure(last_error).kind.value,
+                    "selection_reason": "failure_policy_and_capabilities_allowed",
+                    "primary_failure": decision.kind.value,
                     "primary_route": primary_route.audit,
+                    "fallback_route": fallback_route.audit,
+                    "compatibility": compatibility.to_event(),
                 },
             )
             fallback = self._execute_route(
@@ -890,14 +1184,29 @@ class ResilientEngine(Engine):
             )
             attempts += fallback.attempts
             if fallback.response is not None:
-                fallback.response.usage = {
-                    **fallback.response.usage,
-                    "runtime_attempts": attempts,
-                    "fallback_used": True,
-                    "primary_failure": classify_failure(last_error).kind.value,
-                    "circuit_state": primary.breaker_state,
-                }
-                return fallback.response
+                response = _response_with_usage(
+                    fallback.response,
+                    {
+                        "runtime_attempts": attempts,
+                        "fallback_used": True,
+                        "primary_failure": decision.kind.value,
+                        "circuit_state": primary.breaker_state,
+                    },
+                )
+                self._event(
+                    "provider_result_selected",
+                    route=fallback_route,
+                    attempt=attempts,
+                    details={
+                        "status": "selected",
+                        "route_role": "fallback",
+                        "selection_reason": "fallback_completed",
+                        "selected_attempt": attempts,
+                        "superseded_attempts": primary.attempts,
+                        "usage": _audit_usage(response.usage),
+                    },
+                )
+                return response
             fallback_error = fallback.error
             assert fallback_error is not None
             if fallback.skipped:
@@ -909,7 +1218,6 @@ class ResilientEngine(Engine):
                     details={"breaker_state": fallback.breaker_state},
                 )
             raise fallback_error
-        raise last_error
 
     def _event(
         self,

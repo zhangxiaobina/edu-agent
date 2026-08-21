@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from ipaddress import ip_address
@@ -68,6 +69,161 @@ class ProviderCapabilities:
             "context_window_tokens": self.context_window_tokens,
             "max_output_tokens": self.max_output_tokens,
         }
+
+
+@dataclass(frozen=True)
+class ProviderRequestRequirements:
+    """Capabilities needed to preserve one normalized ``Engine.chat`` request."""
+
+    api_modes: frozenset[ApiMode]
+    tool_calling: bool
+    structured_output: bool
+    usage: bool
+    streaming: bool
+    context_tokens: int
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.api_modes, frozenset) or not self.api_modes:
+            raise ValueError("provider request api_modes 必须是非空 frozenset")
+        parsed_modes = frozenset(ApiMode.parse(mode) for mode in self.api_modes)
+        object.__setattr__(self, "api_modes", parsed_modes)
+        for name in ("tool_calling", "structured_output", "usage", "streaming"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"provider request requirement {name} 必须是 bool")
+        if (
+            isinstance(self.context_tokens, bool)
+            or not isinstance(self.context_tokens, int)
+            or self.context_tokens <= 0
+        ):
+            raise ValueError("provider request context_tokens 必须大于 0")
+        if self.max_output_tokens is not None and (
+            isinstance(self.max_output_tokens, bool)
+            or not isinstance(self.max_output_tokens, int)
+            or self.max_output_tokens <= 0
+        ):
+            raise ValueError("provider request max_output_tokens 必须大于 0")
+
+    def to_event(self) -> dict[str, bool | int | None | list[str]]:
+        return {
+            "api_modes": sorted(mode.value for mode in self.api_modes),
+            "tool_calling": self.tool_calling,
+            "structured_output": self.structured_output,
+            "usage": self.usage,
+            "streaming": self.streaming,
+            "context_tokens": self.context_tokens,
+            "max_output_tokens": self.max_output_tokens,
+        }
+
+
+class ProviderCapabilityError(ValueError):
+    """A request cannot be represented by a route without losing capabilities."""
+
+    def __init__(self, gaps: tuple[str, ...]):
+        if not gaps:
+            raise ValueError("provider capability gaps 不能为空")
+        self.gaps = gaps
+        labels = {
+            "context_window": "context window",
+            "context_window_unknown": "context window unknown",
+            "structured_output": "structured output",
+            "tool_calling": "不支持 tool calling",
+        }
+        rendered = ", ".join(labels.get(gap, gap) for gap in gaps)
+        super().__init__("provider route capability 不兼容: " + rendered)
+
+
+def estimate_request_tokens(messages: list[dict], tools: list[dict]) -> int:
+    """Return the shared conservative byte-based estimate used for route checks."""
+    payload = json.dumps(
+        {"messages": messages, "tools": tools},
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return max(1, (len(payload) + 3) // 4)
+
+
+def infer_request_requirements(
+    messages: list[dict],
+    tools: list[dict],
+) -> ProviderRequestRequirements:
+    tool_history = any(
+        isinstance(message, Mapping)
+        and (
+            message.get("role") == "tool"
+            or bool(message.get("tool_calls"))
+        )
+        for message in messages
+    )
+    structured_output = any(
+        isinstance(tool, Mapping)
+        and isinstance(tool.get("function"), Mapping)
+        and tool["function"].get("strict") is True
+        for tool in tools
+    )
+    return ProviderRequestRequirements(
+        api_modes=frozenset(ApiMode),
+        tool_calling=bool(tools) or tool_history,
+        structured_output=structured_output,
+        # Usage is normalized when present, but the current Agent contract accepts
+        # providers that omit it. Streaming and output token requests are not in R1.
+        usage=False,
+        streaming=False,
+        context_tokens=estimate_request_tokens(messages, tools),
+        max_output_tokens=None,
+    )
+
+
+def effective_capabilities(
+    route: ProviderCapabilities,
+    adapter: ProviderCapabilities,
+) -> ProviderCapabilities:
+    def limit(left: int | None, right: int | None) -> int | None:
+        known = [value for value in (left, right) if value is not None]
+        return min(known) if known else None
+
+    return ProviderCapabilities(
+        tool_calling=route.tool_calling and adapter.tool_calling,
+        structured_output=route.structured_output and adapter.structured_output,
+        usage=route.usage and adapter.usage,
+        streaming=route.streaming and adapter.streaming,
+        context_window_tokens=limit(
+            route.context_window_tokens,
+            adapter.context_window_tokens,
+        ),
+        max_output_tokens=limit(
+            route.max_output_tokens,
+            adapter.max_output_tokens,
+        ),
+    )
+
+
+def capability_gaps(
+    requirements: ProviderRequestRequirements,
+    capabilities: ProviderCapabilities,
+    *,
+    api_mode: ApiMode,
+    require_known_context: bool = False,
+) -> tuple[str, ...]:
+    gaps: list[str] = []
+    if api_mode not in requirements.api_modes:
+        gaps.append("api_mode")
+    for name in ("tool_calling", "structured_output", "usage", "streaming"):
+        if getattr(requirements, name) and not getattr(capabilities, name):
+            gaps.append(name)
+    context_limit = capabilities.context_window_tokens
+    if context_limit is not None and requirements.context_tokens > context_limit:
+        gaps.append("context_window")
+    if require_known_context and context_limit is None:
+        gaps.append("context_window_unknown")
+    requested_output = requirements.max_output_tokens
+    output_limit = capabilities.max_output_tokens
+    if requested_output is not None and (
+        output_limit is None or requested_output > output_limit
+    ):
+        gaps.append("max_output_tokens")
+    return tuple(dict.fromkeys(gaps))
 
 
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -416,6 +572,31 @@ class ProviderGateway:
             )
         raise ValueError(f"当前 Provider Gateway 未注册 {route.api_mode.value} adapter")
 
+    def capabilities_for(self, route: ResolvedRoute) -> ProviderCapabilities:
+        adapter = self.adapter_for(route)
+        return effective_capabilities(route.capabilities, adapter.capabilities)
+
+    def validate_request(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> ProviderRequestRequirements:
+        """Validate one route without creating a client or issuing provider I/O."""
+        requirements = infer_request_requirements(messages, tools)
+        gaps = capability_gaps(
+            requirements,
+            self.capabilities_for(route),
+            api_mode=route.api_mode,
+        )
+        if gaps:
+            raise ProviderCapabilityError(gaps)
+        adapter = self.adapter_for(route)
+        validator = getattr(adapter, "validate_request", None)
+        if callable(validator):
+            validator(route, messages, tools)
+        return requirements
+
     def chat(
         self,
         route: ResolvedRoute,
@@ -423,6 +604,7 @@ class ProviderGateway:
         tools: list[dict],
     ) -> EngineResponse:
         """Dispatch one normalized synchronous request without changing Engine.chat."""
+        self.validate_request(route, messages, tools)
         return self.adapter_for(route).chat(route, messages, tools)
 
     def begin_turn(self, spec: ProviderSpec) -> ResolvedRoute:
@@ -532,22 +714,54 @@ class GatewayEngine(Engine):
     def begin_turn_routes(self) -> tuple[ResolvedRoute, ...]:
         return (self.route,)
 
+    def effective_capabilities(self) -> ProviderCapabilities:
+        return self.gateway.capabilities_for(self.route)
+
+    def validate_request(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> ProviderRequestRequirements:
+        return self.gateway.validate_request(self.route, messages, tools)
+
+    def validate_request_on_route(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> ProviderRequestRequirements:
+        return self.gateway.validate_request(route, messages, tools)
+
+    def chat_on_route(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> EngineResponse:
+        return self.gateway.chat(route, messages, tools)
+
     def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
         return self.gateway.chat(self.route, messages, tools)
 
 
 __all__ = [
     "ApiMode",
+    "ProviderCapabilityError",
     "CredentialRef",
     "DEFAULT_PROVIDER_REGISTRY",
     "GatewayEngine",
     "ModeSource",
     "ProviderAdapter",
     "ProviderCapabilities",
+    "ProviderRequestRequirements",
     "ProviderGateway",
     "ProviderMetadata",
     "ProviderSpec",
     "ResolvedRoute",
     "RouteIdentity",
+    "capability_gaps",
+    "effective_capabilities",
+    "estimate_request_tokens",
+    "infer_request_requirements",
     "normalize_endpoint",
 ]

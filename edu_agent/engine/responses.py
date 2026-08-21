@@ -13,7 +13,12 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .base import EngineResponse, ToolCall
-from .gateway import ApiMode, ProviderCapabilities, ResolvedRoute
+from .gateway import (
+    ApiMode,
+    ProviderCapabilities,
+    ProviderCapabilityError,
+    ResolvedRoute,
+)
 
 _MISSING = object()
 
@@ -304,10 +309,7 @@ class ResponsesAdapter:
         estimated_tokens = _estimate_context_tokens(input_items, response_tools)
         context_limit = route.capabilities.context_window_tokens
         if context_limit is not None and estimated_tokens > context_limit:
-            raise ValueError(
-                "Responses 输入在发请求前已超过 route context window "
-                f"({estimated_tokens}/{context_limit})"
-            )
+            raise ProviderCapabilityError(("context_window",))
         request: dict[str, Any] = {
             "model": route.model,
             "input": input_items,
@@ -317,6 +319,14 @@ class ResponsesAdapter:
             request["tools"] = response_tools
             request["tool_choice"] = "auto"
         return request
+
+    def validate_request(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> None:
+        self.build_request(route, messages, tools)
 
     def chat(
         self,

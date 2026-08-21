@@ -171,8 +171,9 @@ private-contract/
   从最后一个 tool result 后无损继续。
 - **当前 system prompt 稳定，但整个请求前缀不总是稳定。** Plan 模式会按 ready step 裁剪工具并改写
   tool description；如果将来依赖 Provider prompt cache，需要冻结 session tool manifest，或先量化接受缓存失效的成本。
-- **当前 Provider 容错是单 primary + 单 fallback。** 没有 API mode 协商、`Retry-After`、凭据池和
-  以 `(provider, model, endpoint)` 为粒度的隔离。
+- **当前 Provider 容错仍是单 primary + 单 fallback。** 已有 Chat Completions/Responses 两种显式 API mode、
+  `Retry-After`、按冻结 route identity 的 breaker/并发隔离和 capability-safe fallback；仍没有凭据池、
+  OAuth、多厂商完整矩阵或 token streaming。
 - **父子共享预算不能写成 Hermes 优势。** 当前 Hermes `IterationBudget` 明确给每个子 Agent 新预算；
   EduAgent 的 child 预留与 root 聚合更严格。不过现有 root ledger 主要统计委派树，父级主 Loop 的调用仍需纳入
   才能成为真正的全树总预算。
@@ -614,8 +615,8 @@ context overflow 不盲重试；fallback 不选择 capability 不兼容模型；
 R0-R5 拆成 33 个可独立验收和交接的提示词；前一编号未满足停止条件时，不进入下一编号。
 
 1. 完成 R0：建立可追溯 Git/CI 基线，保持 Stage 8 单一公开验收入口，并修正 `commit="unavailable"`。
-2. 完成 R1：抽出 Provider Gateway，先跑通 Chat Completions/Responses mode、Retry-After 和兼容 fallback。
-3. 完成 R2：引入 RunEvent/RunJournal/TurnFinalizer，把现有 keepalive SSE 变成真流式并通过五个崩溃窗。
+2. R1 已完成：Provider Gateway 已跑通 Chat Completions/Responses mode、Retry-After 和兼容 fallback。
+3. 下一阶段 R2：引入 RunEvent/RunJournal/TurnFinalizer，把现有 keepalive SSE 变成真流式并通过五个崩溃窗。
 4. 完成 R3：冻结 ToolManifest，落地参数规范化和只读工具 segment 并发，再把 SQLite 工具收口为 SyntheticProvider。
 5. 完成 R4：补实际 token/overflow recovery、全树预算、drain 与 backup/restore。
 6. 完成 R5：跑一次固定真实模型独立 Test，更新演示、部署和运行手册，冻结秋招候选版。
