@@ -2,13 +2,14 @@
 
 ## Current
 
-- last_completed_prompt: R0.3
-- next_prompt: R0.4
+- last_completed_prompt: R0.4
+- next_prompt: R1.1
 - baseline_commit: 8c645099ce27b9a3f00c5ea755ab3108c8f67dad
-- stage_gate: not_passed
-- stage_gate_reason: R0.4 的 73 条 stable lineage、split 泄漏门禁、CI 接线和唯一 Stage 8 入口已在本地
-  通过；但 R0.1-R0.4 实现仍未提交，development artifact 的 commit 指向不包含这些改动的旧 HEAD 且
-  `git.dirty=true`，不满足“本次实现 commit 可追溯”，故不得标记 R0 passed 或进入 R1
+- stage_gate: passed
+- stage_gate_reason: R0 实现已进入可追溯提交 `042e229e1ec5ac998182f0cde1996627acc1f16f`，
+  干净检出修复为 `0561205baad715b1c1742c619ff3c755bac7a076`；后者的 clean clone 无预建 venv/DB，
+  candidate system/Trace provenance 均为 `dirty=false`、gate passed，73 条 lineage 无跨 split 泄漏，
+  唯一公开 `accept_stage8.sh` 完整通过
 
 ## Baseline Reproduction
 
@@ -150,15 +151,15 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 
 | R0 门禁/交付 | 状态 | 已有证据 | 缺口 | 建议修改文件（后续会话） | 风险 |
 |---|---|---|---|---|---|
-| 真实 Git 根与评测 commit provenance | not_met_for_r0_close | 共享 provenance 只读真实 Git；candidate/release 拒绝无 Git、dirty 或状态不可判定；伪造环境变量测试通过；R0.3 clean snapshot 曾证明 gate 可通过 | 本次 R0.1-R0.4 改动未提交；当前 system/Trace artifact 只能记录旧 HEAD `8c64509`、`dirty=true`、development，旧 commit 不包含本次实现 | 获得提交授权后提交相关改动，在 clean commit 上重跑 candidate/CI 证据 | dirty development artifact 不能证明当前实现属于所记录 commit |
-| 干净 clone 到验收一条命令 | met_locally | Stage 8 自动准备；R0.3 以无 `.venv`/数据库/缓存的临时 Git snapshot frozen 安装 62 包并跑完 candidate eval/audit；R0.4 当前工作区唯一入口再次退出 0 | 当前 R0.4 改动尚无 clean commit 可供 clone；GitHub 托管 runner 尚未实际执行 | 提交后由同一 workflow/Stage 8 在 clean commit 复核 | 首次依赖准备仍需要包源网络；缓存不是正确性前提 |
-| 单一公开完整验收入口 | met_locally | README、architecture、demo-script 只公开 Stage 8；动态测试证明它调用 Stage 7 一次、失败上抛、全量 pytest 只跑一次；R0.4 完整 `zsh scripts/accept_stage8.sh` 退出 0 | 后续阶段仍需持续保留文档/调用图契约 | 继续运行 `tests/test_acceptance_scripts.py` | 新增阶段若绕过契约测试可能再次分叉 |
-| 固定 Python、lockfile 与依赖兼容 | met_locally_ci_contract | 单一 Ubuntu 24.04/Python 3.12；uv 固定 0.11.16；`uv lock --check` 解析 91 包，frozen sync 安装 62 包，`uv pip check` 0 冲突；三个 action 固定到远端解析的 40 位 SHA | GitHub 托管执行尚未观察 | R0.4 继续以同一 workflow 为 CI 真相源 | 包源/Actions 服务可用性是外部条件，cache miss 不改变命令语义 |
-| Secret-free CI 与供应链门禁 | met_by_contract | `.github/workflows/ci.yml` 清空模型/平台凭据，checkout 不持久化 token；offline ruff/pytest/lineage/system eval/Trace/audit 顺序成立；CI 静态契约测试和本地同序 clean snapshot 通过 | GitHub 托管 job 尚未实际运行 | 提交后观察首次远程 run，不扩 Python/OS 矩阵 | 本地 macOS 验证不能代替 Ubuntu runner 实测，故托管 CI 保持 not_verified |
-| CI 不依赖 `.venv`、本机 DB、API key 或预生成 `edu.db` | met_locally | workflow 在 sync 前拒绝 `.venv` 和任意预存数据库；临时 snapshot 不含这些输入；全量命令显式 mock/local、空凭据、无 Docker，并在 sync 后 uv offline 运行 | GitHub 托管 clean-room 尚未实测 | R0.4 复核首次远程运行 | 未来测试若新增外部网络路径，CI 契约测试和空凭据仍需同步扩展 |
-| 评测报告 hash 与未运行口径 | met_locally | system v4/Trace v2 共用 provenance；config hash 绑定 seed/model/mode、lock、实现源 hash和 lineage manifest hash；三份 artifact 审计 0 findings；oracle=`harness_only`、real model=`not_run`、sandbox=`not_verified` | 当前仓库 artifact 是 dirty development snapshot，不是候选证据 | clean commit 后生成 candidate artifact | 未经 candidate gate 的本地 JSON 只能作为开发证据 |
-| Train/Dev/Test 按模板族隔离的 lineage | met_locally | 73 条现有合成样本在族定义时分为 Train 55/Dev 12/Test 6；历史 DPO/原题等价族同归 Train；Test 用 seed 314 和人工复核的新意图；两次生成 hash 相同，跨 split sample/query、模板族、语义组、缺 provenance、敏感字段和非确定生成反例均会失败 | 语义等价组依赖受审计的显式标注，自动化不能发现所有自然语言改写；当前实现尚未提交 | 保持 lineage 审计为 CI/Stage 8 强制门禁，任何模板新增先归族再入 split | 后续若错误标注新模板的 semantic group，精确 hash 检查不能代替人工语义复核 |
-| R0 总门禁 | not_passed | CI 配置契约成立；唯一 Stage 8 本地退出 0；lineage manifest `163e5d2…` 无跨 split 泄漏；全量 195 tests 与 ruff/审计通过 | 本次实现未进入可追溯 commit，当前 artifact 的旧 HEAD 与 dirty 状态不能证明源码版本；托管 CI、Docker 和真实模型仍未运行，其中后三者按 R0 口径是诚实未验证项，不混入离线失败 | 停在 R0.4；提交后在 clean commit 上重跑 candidate/CI 门禁，满足后才改为 passed 和 R1.1 | 现在进入 R1 会让 R0 证据无法对应源码 commit |
+| 真实 Git 根与评测 commit provenance | met | 共享 provenance 只读真实 Git；candidate/release 拒绝无 Git、dirty 或状态不可判定；`0561205` clean clone 的 system/Trace 都记录同一真实 commit、`dirty=false`、gate passed | 无 R0 离线缺口 | 保持 provenance 回归与 candidate/release 门禁 | development artifact 仍不能替代 candidate 证据 |
+| 干净 clone 到验收一条命令 | met_locally | `0561205` 的新 clone 无 `.venv`、DB、缓存；frozen sync 安装 62 包，运行时 data 源码和 `schema.sql` 可导入；完整 Stage 8 退出 0 | GitHub 托管 runner 尚未实际执行 | 推送后观察首次远程 run | 首次 cache miss 仍依赖包源可用，缓存不是正确性前提 |
+| 单一公开完整验收入口 | met_locally | README、architecture、demo-script 只公开 Stage 8；动态测试证明它调用 Stage 7 一次、失败上抛、全量 pytest 只跑一次；clean clone 完整入口退出 0 | 无 R0 离线缺口 | 继续运行 `tests/test_acceptance_scripts.py` | 新增阶段若绕过契约测试可能再次分叉 |
+| 固定 Python、lockfile 与依赖兼容 | met_locally_ci_contract | 单一 Ubuntu 24.04/Python 3.12；uv 固定 0.11.16；`uv lock --check` 解析 91 包，frozen sync 安装 62 包，`uv pip check` 0 冲突；三个 action 固定到 40 位 SHA | GitHub 托管执行尚未观察 | 保持 workflow 为 CI 真相源 | 包源/Actions 服务可用性是外部条件 |
+| Secret-free CI 与供应链门禁 | met_by_contract | workflow 清空模型/平台凭据，checkout 不持久化 token；offline ruff/pytest/lineage/system eval/Trace/audit 顺序成立；静态契约和本地 clean clone 同序命令通过 | GitHub 托管 job 尚未实际运行 | 推送后观察首次远程 run，不扩 Python/OS 矩阵 | 本地 macOS 不能替代 Ubuntu runner 实测，托管 CI 保持 `not_verified` |
+| CI 不依赖 `.venv`、本机 DB、API key 或预生成 `edu.db` | met_locally | workflow 在 sync 前拒绝预建环境和数据库；clean clone 无这些输入；5 个 `edu_agent/data` 运行时源已跟踪并有防忽略回归，生成 DB/缓存仍被排除 | GitHub 托管 clean-room 尚未实测 | 持续运行 clean-checkout 契约 | 未来若新增外部路径，空凭据与离线契约需同步扩展 |
+| 评测报告 hash 与未运行口径 | met_locally | clean candidate system v4/Trace v2 config hash 为 `494294e8…`/`1f5ccacf…`；三份 artifact 审计 0 findings；oracle=`harness_only`、real model=`not_run`、sandbox=`not_verified` | 真实模型、Docker 按口径未验证，不是离线 gate 失败 | 真实运行以后独立保存，不回填 oracle 指标 | 未经 candidate gate 的 development JSON 只能作为开发证据 |
+| Train/Dev/Test 按模板族隔离的 lineage | met | 73 条样本在族定义时分为 Train 55/Dev 12/Test 6；manifest `163e5d23…`；两次生成 hash `40a0a59d…` 一致；重复、族/语义组重叠、缺 provenance、敏感字段和非确定生成反例均失败 | 自动化不能发现所有未标注的自然语言改写 | 新模板必须先人工归语义组再进入 corpus | 错误 semantic group 标注仍需代码审查发现 |
+| R0 总门禁 | passed | 实现提交 `042e229` 与 clean-checkout 修复 `0561205` 可追溯；clean candidate provenance、无泄漏 lineage、CI 契约、ruff、数据审计和唯一 Stage 8 全部通过；全量 196 passed | 托管 CI、Docker、真实模型和 semantic provider 明确未验证，不混入离线失败 | 下一提示词为 R1.1；开始 R1 前先确认远端同步 | 外部环境能力仍须在具备条件时单列验证 |
 
 ## Session Log
 
@@ -228,10 +229,10 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 
 ### R0.4 - 2026-08-21
 
-- commit/worktree: `main` 与 `origin/main` 仍共同指向
-  `8c645099ce27b9a3f00c5ea755ab3108c8f67dad`；R0.1-R0.4 相关源码、CI、文档和 artifacts 均在未提交
-  dirty 工作区中。本会话未收到“为我提交”指令，故没有创建 commit 或 push，也没有把旧 HEAD 冒充为
-  包含当前实现的 provenance。
+- commit/evidence: R0.1-R0.4 实现提交为 `042e229e1ec5ac998182f0cde1996627acc1f16f`；提交后
+  clean clone 暴露 `.gitignore` 的宽泛 `data/` 误排除了 `edu_agent/data` 运行时源码，修复提交
+  `0561205baad715b1c1742c619ff3c755bac7a076` 将 5 个源码/SQL 文件纳入 Git，并增加防回归契约；
+  `edu.db` 与缓存继续忽略。所有 candidate 和最终 Stage 8 证据均来自后一个提交的真实 clean clone。
 - changes: 新增 `edu-agent.eval-lineage.v1`、完整 corpus builder 和 seed-314 Test builder；每条样本保存 stable
   sample id、source/version/seed/generator、split、intent template family、semantic group、content/query hash
   和 deterministic 声明。历史六个 DPO 派生族与对应原题保守同归 Train；历史实验题只归 Dev；Test 的六个
@@ -242,22 +243,20 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - migrations/config: 无数据库 migration，无 Provider Gateway、真实模型请求、Agent Loop、工具业务语义或
   运行时配置改动；`pyproject.toml`、`uv.lock`、`.python-version` 未改。只使用现有合成生成器的 seed 42
   与 314，没有下载外部数据集。CI 继续固定 Ubuntu 24.04/Python 3.12/uv 0.11.16，并增加 lineage artifact。
-- verification: 最终 lineage/eval 专项 17 passed；acceptance 契约专项 9 passed；全仓 ruff 0 diagnostics；
-  显式空凭据、mock/local、offline 全量中间复核 194 passed，最终版由 Stage 8 内再次全量运行 195 passed；
-  `uv lock --check` 解析 91 包，已装 62 包 `uv pip check` 无冲突。lineage 两次生成均为 73 条（Train
-  55/Dev 12/Test 6），生成 hash 均为
-  `40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b`，manifest hash 为
-  `163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43`，全部检查通过。完整
-  `zsh scripts/accept_stage8.sh` 最终退出 0：Stage 8 专项 30 passed、Stage 7 observability 11 passed、最终
-  全量 195 passed，10k Trace 3/3 assertions true，三份 artifact 数据边界审计 3 files/0 findings。
-  system v4、lineage、Trace artifact SHA-256 分别为 `0085801b…`、`bc21f4ec…`、`ff685e47…`；Dev 的
-  candidate/release 请求在模型执行和文件写入前以退出码 2 拒绝。
-- not_verified: `docker ps` 因 Docker socket 不存在而失败，system report 保持 `sandbox=not_verified`；未发
-  真实模型请求，`real_model=not_run`；semantic provider 未启用；GitHub-hosted Ubuntu CI 尚未因改动未
-  commit/push 而运行。这些外部/在线项没有计入离线失败或伪装成通过。
-- residual_risks: 当前 development artifacts 诚实记录旧 HEAD、`git.dirty=true`、provenance gate
-  `not_enforced`，不能作为当前实现的 candidate/release 证据；自然语言等价语义仍需维护者正确归组，hash
-  只能自动发现精确内容/声明重叠。R0 总门禁唯一直接未满足项是本次实现尚无可追溯 commit；托管 CI、
-  Docker 和真实模型继续作为明确未验证项记录。
-- next: 保持 R0.4，不进入 R1。获得明确提交授权后提交并推送本次相关改动，在 clean commit/CI 上重跑
-  candidate provenance 与唯一 Stage 8 门禁；只有这些证据成立才将 `R0 gate=passed`，下一提示词改为 R1.1。
+- verification: 修复后 lineage/eval/CI provenance 专项 18 passed；全仓 ruff 0 diagnostics；主工作区显式
+  空凭据、mock/local、offline 全量在允许回环绑定的环境为 196 passed；受限环境的 4 项失败均止于
+  `127.0.0.1:0` 的 `PermissionError`，没有混入离线代码失败。clean clone 从无 `.venv`/DB 状态完成 frozen
+  安装 62 包且 `uv pip check` 0 冲突；lineage 两次生成均为 73 条（Train 55/Dev 12/Test 6），生成 hash
+  均为 `40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b`，manifest hash 为
+  `163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43`。clean candidate system/Trace
+  均记录 commit `0561205`、`dirty=false`、provenance gate passed，config hash 分别为 `494294e8…` 和
+  `1f5ccacf…`；lineage/system/Trace SHA-256 分别为 `bc21f4ec…`、`90bc660d…`、`7aeabd38…`，数据边界
+  审计 3 files/0 findings。完整 `zsh scripts/accept_stage8.sh` 退出 0：Stage 8 专项 30 passed、Stage 7
+  observability 11 passed、最终全量 196 passed，10k Trace 3/3 assertions true。
+- not_verified: Docker daemon/backend 仍不可用，system report 保持 `sandbox=not_verified`；未发真实模型
+  请求，`real_model=not_run`；semantic provider 未启用；GitHub-hosted Ubuntu CI 尚未实际观察。这些
+  外部/在线项没有计入离线失败或伪装成通过。
+- residual_risks: 自然语言等价语义仍需维护者正确归组，hash 只能自动发现精确内容或已声明分组的重叠；
+  托管 CI、Docker、真实模型和 semantic provider 保持明确未验证。受跟踪的 development artifact 不替代
+  clean candidate 证据。
+- next: R0 gate 已通过；下一提示词为 R1.1。本会话只完成 R0 收口，不开始 R1。
