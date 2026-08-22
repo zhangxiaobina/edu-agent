@@ -36,7 +36,10 @@ PRIMARY_ENV = "R1_FAKE_PRIMARY_CREDENTIAL"
 FALLBACK_ENV = "R1_FAKE_FALLBACK_CREDENTIAL"
 PRIMARY_KEY = "primary-fake-canary-492175"
 FALLBACK_KEY = "fallback-fake-canary-735804"
-CAPABILITIES = ProviderCapabilities(context_window_tokens=16_384)
+CAPABILITIES = ProviderCapabilities(
+    streaming=True,
+    context_window_tokens=16_384,
+)
 
 
 class _FakeProviderState:
@@ -505,6 +508,7 @@ def run_acceptance() -> dict:
                 primary_capabilities = (
                     ProviderCapabilities(
                         structured_output=True,
+                        streaming=True,
                         context_window_tokens=16_384,
                     )
                     if name == "structured"

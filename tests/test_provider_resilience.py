@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from email.utils import format_datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from edu_agent.engine import (
@@ -142,6 +143,12 @@ def _fail_once(error: Exception, *, usage: dict | None = None):
     [
         (APIConnectionError("offline"), FailureKind.CONNECTION, True),
         (APITimeoutError("timed out"), FailureKind.TIMEOUT, True),
+        (
+            httpx.ReadError("stream disconnected"),
+            FailureKind.CONNECTION,
+            True,
+        ),
+        (httpx.ReadTimeout("stream timed out"), FailureKind.TIMEOUT, True),
         (HTTPError(429, "limited"), FailureKind.RATE_LIMIT, True),
         (
             HTTPError(429, "quota", code="insufficient_quota"),

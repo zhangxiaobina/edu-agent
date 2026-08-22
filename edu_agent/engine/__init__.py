@@ -15,6 +15,7 @@ from .gateway import (
     GatewayEngine,
     ModeSource,
     ProviderAdapter,
+    ProviderStreamAdapter,
     ProviderCapabilityError,
     ProviderCapabilities,
     ProviderGateway,
@@ -32,6 +33,13 @@ from .gateway import (
 from .mock import MockEngine
 from .openai_compat import OpenAICompatEngine
 from .responses import ResponsesAdapter, ResponsesAPIError
+from .streaming import (
+    ProviderStreamAggregator,
+    ProviderStreamEvent,
+    ProviderStreamEventType,
+    ProviderStreamProtocolError,
+    aggregate_provider_stream,
+)
 from .resilient import (
     CircuitBreaker,
     CircuitOpenError,
@@ -54,6 +62,7 @@ __all__ = [
     "GatewayEngine",
     "ModeSource",
     "ProviderAdapter",
+    "ProviderStreamAdapter",
     "ProviderCapabilityError",
     "ProviderCapabilities",
     "ProviderGateway",
@@ -71,6 +80,11 @@ __all__ = [
     "OpenAICompatEngine",
     "ResponsesAdapter",
     "ResponsesAPIError",
+    "ProviderStreamAggregator",
+    "ProviderStreamEvent",
+    "ProviderStreamEventType",
+    "ProviderStreamProtocolError",
+    "aggregate_provider_stream",
     "ResilientEngine",
     "CircuitBreaker",
     "CircuitOpenError",
@@ -136,6 +150,7 @@ def get_engine(config=None, **kwargs) -> Engine:
                 api_mode=config.fallback_api_mode or primary.route.api_mode,
                 credential=CredentialRef("EDU_AGENT_FALLBACK_API_KEY"),
                 capabilities=ProviderCapabilities(
+                    streaming=True,
                     context_window_tokens=config.fallback_context_window_tokens,
                 ),
             )

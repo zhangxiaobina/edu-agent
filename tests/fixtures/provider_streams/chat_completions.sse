@@ -1,0 +1,19 @@
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[{"index":0,"delta":{"content":"你"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[{"index":0,"delta":{"content":"好"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-a","type":"function","function":{"name":"list_exams","arguments":"{\"course"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call-b","type":"function","function":{"name":"query_student_scores","arguments":"{\"exam"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"_id\":7}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"_id\":17}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"stream-model","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}
+
+data: [DONE]

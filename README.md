@@ -119,8 +119,10 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   `RunJournal` 已提供幂等 migration、严格 CAS 和恢复 snapshot；Agent Loop 会在执行工具前原子提交唯一
   assistant tool-call envelope，并在每个工具返回、超时、取消或结构化拒绝后立即提交配对 result。持久
   `TurnFinalizer` 统一关闭未配对 call、复验 Plan/Evidence、提交唯一最终 assistant、结算 usage/budget、标记
-  terminal 并执行有界后处理。Provider token stream 与 HTTP SSE 仍未实现；当前 SSE 仍为
-  `accepted/keepalive/completed`。OTLP 默认关闭；只有安装
+  terminal 并执行有界后处理。Provider Gateway 已将 Chat Completions 与 Responses 的真实 SDK 流归一为
+  text/tool/usage/completed/error 事件；同步 `chat()` 聚合相同事件流，首个 delta 后的失败不会重试或拼接
+  fallback 输出。HTTP SSE 尚未消费 Provider delta，当前仍为 `accepted/keepalive/completed`；完整取消传播与
+  writer fence 接线留给 R2.6。OTLP 默认关闭；只有安装
   `otel` extra 并显式配置 endpoint 后才尝试导出，失败不击穿主路径。
 
 ## 目录结构

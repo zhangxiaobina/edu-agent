@@ -8,10 +8,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
 
 from .base import Engine, EngineResponse
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from .streaming import ProviderStreamEvent
 
 
 class ApiMode(str, Enum):
@@ -167,7 +172,7 @@ def infer_request_requirements(
         tool_calling=bool(tools) or tool_history,
         structured_output=structured_output,
         # Usage is normalized when present, but the current Agent contract accepts
-        # providers that omit it. Streaming and output token requests are not in R1.
+        # providers that omit it. Stream entry points elevate the streaming bit.
         usage=False,
         streaming=False,
         context_tokens=estimate_request_tokens(messages, tools),
@@ -374,6 +379,19 @@ class ProviderAdapter(Protocol):
         ...
 
 
+@runtime_checkable
+class ProviderStreamAdapter(ProviderAdapter, Protocol):
+    def stream_events(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        attempt: int = 1,
+    ) -> Iterator[ProviderStreamEvent]:
+        ...
+
+
 @dataclass(frozen=True)
 class _OfficialHostRule:
     provider: str
@@ -381,7 +399,8 @@ class _OfficialHostRule:
     capabilities: ProviderCapabilities = field(default_factory=ProviderCapabilities)
 
 
-_CHAT_CAPABILITIES = ProviderCapabilities()
+_STREAM_CAPABILITIES = ProviderCapabilities(streaming=True)
+_CHAT_CAPABILITIES = _STREAM_CAPABILITIES
 _DEFAULT_ENDPOINT = "https://api.openai.com/v1"
 
 
@@ -491,23 +510,32 @@ DEFAULT_PROVIDER_REGISTRY: Mapping[str, ProviderMetadata] = MappingProxyType(
     {
         "dashscope": ProviderMetadata(
             api_mode=ApiMode.CHAT_COMPLETIONS,
+            capabilities=_STREAM_CAPABILITIES,
             default_endpoint="https://dashscope.aliyuncs.com/compatible-mode/v1",
         ),
         "openai": ProviderMetadata(
             api_mode=ApiMode.CHAT_COMPLETIONS,
+            capabilities=_STREAM_CAPABILITIES,
             default_endpoint=_DEFAULT_ENDPOINT,
         ),
-        "vllm": ProviderMetadata(api_mode=ApiMode.CHAT_COMPLETIONS),
+        "vllm": ProviderMetadata(
+            api_mode=ApiMode.CHAT_COMPLETIONS,
+            capabilities=_STREAM_CAPABILITIES,
+        ),
     }
 )
 _OFFICIAL_HOST_RULES: Mapping[str, _OfficialHostRule] = MappingProxyType(
     {
-        "api.openai.com": _OfficialHostRule("openai", ApiMode.CHAT_COMPLETIONS),
+        "api.openai.com": _OfficialHostRule(
+            "openai",
+            ApiMode.CHAT_COMPLETIONS,
+            _STREAM_CAPABILITIES,
+        ),
         "dashscope.aliyuncs.com": _OfficialHostRule(
-            "dashscope", ApiMode.CHAT_COMPLETIONS
+            "dashscope", ApiMode.CHAT_COMPLETIONS, _STREAM_CAPABILITIES
         ),
         "dashscope-intl.aliyuncs.com": _OfficialHostRule(
-            "dashscope", ApiMode.CHAT_COMPLETIONS
+            "dashscope", ApiMode.CHAT_COMPLETIONS, _STREAM_CAPABILITIES
         ),
     }
 )
@@ -607,6 +635,28 @@ class ProviderGateway:
         self.validate_request(route, messages, tools)
         return self.adapter_for(route).chat(route, messages, tools)
 
+    def stream_events(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        attempt: int = 1,
+    ) -> Iterator[ProviderStreamEvent]:
+        """Dispatch one validated provider event stream."""
+        self.validate_request(route, messages, tools)
+        if not self.capabilities_for(route).streaming:
+            raise ProviderCapabilityError(("streaming",))
+        stream_events = getattr(self.adapter_for(route), "stream_events", None)
+        if not callable(stream_events):
+            raise ValueError("provider adapter 缺少 stream_events")
+        return stream_events(
+            route,
+            messages,
+            tools,
+            attempt=attempt,
+        )
+
     def begin_turn(self, spec: ProviderSpec) -> ResolvedRoute:
         _reject_credential_in_route_fields(spec)
         configured_endpoint = _parse_endpoint(spec.endpoint) if spec.endpoint is not None else None
@@ -676,7 +726,7 @@ class ProviderGateway:
 
 
 class GatewayEngine(Engine):
-    """Synchronous Engine facade over one route selected by ProviderGateway."""
+    """Engine facade over one immutable route selected by ProviderGateway."""
 
     def __init__(
         self,
@@ -740,6 +790,37 @@ class GatewayEngine(Engine):
     ) -> EngineResponse:
         return self.gateway.chat(route, messages, tools)
 
+    def stream_chat_on_route(
+        self,
+        route: ResolvedRoute,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        attempt: int = 1,
+    ) -> Iterator[ProviderStreamEvent]:
+        return self.gateway.stream_events(
+            route,
+            messages,
+            tools,
+            attempt=attempt,
+        )
+
+    def stream_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        attempt: int = 1,
+    ) -> Iterator[ProviderStreamEvent]:
+        return self.gateway.stream_events(
+            self.route,
+            messages,
+            tools,
+            attempt=attempt,
+        )
+
+    stream_events = stream_chat
+
     def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
         return self.gateway.chat(self.route, messages, tools)
 
@@ -752,6 +833,7 @@ __all__ = [
     "GatewayEngine",
     "ModeSource",
     "ProviderAdapter",
+    "ProviderStreamAdapter",
     "ProviderCapabilities",
     "ProviderRequestRequirements",
     "ProviderGateway",

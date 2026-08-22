@@ -321,8 +321,11 @@ tool result 接入 Agent Loop：消息、call 配对和 journal cursor 在同一
 重复 call id 与跨 run 配对会被拒绝。工具仍严格顺序执行；R2.4 的 `011_turn_finalizer` 将 SQLite schema
 version 提升到 11，并由唯一 `TurnFinalizer` 按固定 cursor 完成未配对 call 关闭、Plan/Evidence 复验、唯一
 最终 assistant、usage/budget、terminal、后处理和有界 cleanup。失败路径会合并已选 Provider 事件与异常携带的
-usage；terminal 后恢复继续未完成的 hooks/cleanup，再重建兼容 `ChatResult`。当前 Provider 仍同步，SSE 仍为
-`accepted/keepalive/completed`。
+usage；terminal 后恢复继续未完成的 hooks/cleanup，再重建兼容 `ChatResult`。R2.5 已让 Chat Completions 与
+Responses adapter 产生带 route/attempt/provider event id 的真实 text/tool/usage/completed/error 流；同步
+`chat()` 聚合同一流为兼容 `EngineResponse`。首个可见 delta 前的瞬态错误可按既有策略 retry/fallback，之后的
+失败直接结束该 Provider 流且不拼接新输出。HTTP SSE 仍为 `accepted/keepalive/completed`，完整取消传播留给
+R2.6。
 
 ## 可插拔扩展
 

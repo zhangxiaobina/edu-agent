@@ -160,20 +160,21 @@ private-contract/
 
 ### 3.1 必须如实描述的现状
 
-- **当前不是 token streaming。** `edu_agent/api.py::_stream_chat` 在线程中等待同步 `service.chat()`，
-  期间只发送 keepalive，最后一次性发送完整结果。它已经支持断流触发协作取消，但不能写成“模型实时流式”。
+- **当前 HTTP 仍不是 token streaming。** Provider Gateway 已能迭代真实 text/tool/usage 事件，但
+  `edu_agent/api.py::_stream_chat` 仍在线程中等待同步 `service.chat()`，期间只发送 keepalive，最后一次性发送
+  完整结果。它已经支持断流触发协作取消，但客户端侧不能写成“模型实时流式”。
 - **当前没有自动修复坏 JSON。** `parse_tool_arguments()` 对 malformed JSON 返回 `INVALID_JSON`；
   `_validate_value()` 会拒绝类型、范围和未知字段错误。模型下一轮可以自行修正，这是“校验 + 回灌”，不是修复器。
 - **当前工具批次是顺序执行。** `agent/graph.py::tools_node` 逐个执行 tool call。委派层的并发不能当作
   单回合工具并发，因为两者的事务、取消和结果配对边界不同。
-- **当前恢复不是精确续跑每个 loop step。** user 消息、Plan、tool event、operation 会及时持久化，但
-  assistant/tool 消息在 `run_agent()` 返回后才批量追加。崩溃恢复依赖持久计划和幂等键安全重放，不能声称
-  从最后一个 tool result 后无损继续。
+- **当前恢复已有稳定 cursor，但尚未完成五窗口总门禁。** assistant tool-call envelope、每个 tool result、
+  TurnFinalizer cursor 与 terminal 都已增量持久化；进程重开后的完整 continue/replay/manual-review 决策和
+  五个崩溃窗统一验收仍属于 R2.7，不能提前声称任意位置无损续跑。
 - **当前 system prompt 稳定，但整个请求前缀不总是稳定。** Plan 模式会按 ready step 裁剪工具并改写
   tool description；如果将来依赖 Provider prompt cache，需要冻结 session tool manifest，或先量化接受缓存失效的成本。
 - **当前 Provider 容错仍是单 primary + 单 fallback。** 已有 Chat Completions/Responses 两种显式 API mode、
-  `Retry-After`、按冻结 route identity 的 breaker/并发隔离和 capability-safe fallback；仍没有凭据池、
-  OAuth、多厂商完整矩阵或 token streaming。
+  Provider 事件流、同步聚合兼容、`Retry-After`、按冻结 route identity 的 breaker/并发隔离和 capability-safe
+  fallback；仍没有凭据池、OAuth、多厂商完整矩阵或 HTTP token streaming。
 - **父子共享预算不能写成 Hermes 优势。** 当前 Hermes `IterationBudget` 明确给每个子 Agent 新预算；
   EduAgent 的 child 预留与 root 聚合更严格。不过现有 root ledger 主要统计委派树，父级主 Loop 的调用仍需纳入
   才能成为真正的全树总预算。
@@ -605,7 +606,7 @@ context overflow 不盲重试；fallback 不选择 capability 不兼容模型；
 |---|---|---|
 | 已实现 | 源码 + 专项测试 + 一键验收 | Plan/Evidence、事务工具、lease/fencing、Trace、受控委派 |
 | 已接入但未线上验证 | 协议/故障测试通过，真实环境报告明确 `not_run/not_verified` | 新 Provider adapter、外部数据 Adapter |
-| 计划中 | 只出现在本文，不写入 README “技术亮点” | 真 token streaming、loop cursor、ToolManifest、统一预算总账、Background Review |
+| 计划中 | 只出现在本文，不写入 README “技术亮点” | HTTP SSE 真流、统一取消、ToolManifest、统一预算总账、Background Review |
 
 ## 9. 当前下一步
 
@@ -616,7 +617,8 @@ R0-R5 拆成 33 个可独立验收和交接的提示词；前一编号未满足�
 
 1. 完成 R0：建立可追溯 Git/CI 基线，保持 Stage 8 单一公开验收入口，并修正 `commit="unavailable"`。
 2. R1 已完成：Provider Gateway 已跑通 Chat Completions/Responses mode、Retry-After 和兼容 fallback。
-3. 下一阶段 R2：引入 RunEvent/RunJournal/TurnFinalizer，把现有 keepalive SSE 变成真流式并通过五个崩溃窗。
+3. R2.1-R2.5 已完成 RunEvent、RunJournal、增量工具消息、TurnFinalizer 和 Provider 真流；下一步 R2.6 将
+   Provider/Agent 事件接入 HTTP SSE，并贯穿统一取消与 writer fence。
 4. 完成 R3：冻结 ToolManifest，落地参数规范化和只读工具 segment 并发，再把 SQLite 工具收口为 SyntheticProvider。
 5. 完成 R4：补实际 token/overflow recovery、全树预算、drain 与 backup/restore。
 6. 完成 R5：跑一次固定真实模型独立 Test，更新演示、部署和运行手册，冻结秋招候选版。

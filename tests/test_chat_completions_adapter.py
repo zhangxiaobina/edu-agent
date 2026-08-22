@@ -140,12 +140,16 @@ def test_gateway_chat_completions_preserves_wire_and_response_shape():
     assert requests[0]["body"] == {
         "messages": messages,
         "model": "route-model",
+        "stream": True,
+        "stream_options": {"include_usage": True},
         "temperature": 0.25,
     }
     assert set(requests[0]["timeout"].values()) == {9.5}
     assert requests[1]["body"] == {
         "messages": messages,
         "model": "route-model",
+        "stream": True,
+        "stream_options": {"include_usage": True},
         "temperature": 0.25,
         "tools": tools,
         "tool_choice": "auto",

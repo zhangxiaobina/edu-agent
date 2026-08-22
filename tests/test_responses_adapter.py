@@ -134,6 +134,7 @@ def test_gateway_responses_preserves_real_sdk_wire_and_normalizes_response():
     assert set(requests[0]["timeout"].values()) == {9.5}
     assert requests[0]["body"] == {
         "model": "route-model",
+        "stream": True,
         "input": [
             {"role": "system", "content": "System"},
             {"role": "user", "content": "First"},
@@ -306,7 +307,7 @@ def test_responses_capabilities_and_unsupported_combinations_fail_before_client(
         tool_calling=True,
         structured_output=False,
         usage=True,
-        streaming=False,
+        streaming=True,
         context_window_tokens=None,
         max_output_tokens=None,
     )

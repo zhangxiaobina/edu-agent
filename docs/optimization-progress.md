@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R2.4
-- next_prompt: R2.5
+- last_completed_prompt: R2.5
+- next_prompt: R2.6
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent、R2.2 RunJournal、R2.3 工具消息增量提交与 R2.4 幂等 TurnFinalizer 已完成；Provider 真流式、统一取消与完整恢复门禁仍待 R2.5-R2.7
+- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent、R2.2 RunJournal、R2.3 工具消息增量提交、R2.4 幂等 TurnFinalizer 与 R2.5 Provider 真流/同步聚合已完成；HTTP SSE、统一取消与完整恢复门禁仍待 R2.6-R2.7
 
 ## Baseline Reproduction
 
@@ -616,3 +616,43 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R2.4 passed`；R2 总门禁保持 `in_progress`。
 - next: R2.5，在 Provider Gateway 增加真实流事件迭代器，并让同步 `chat()` 聚合该流保持兼容；不得修改 HTTP
   SSE 或提前实现完整 CancellationToken 传播。
+
+### R2.5 - 2026-08-22
+
+- commit/evidence: 会话从 `46d2b82e48a0b407ed1875a6a98f796d8c148150`（`feat: add durable turn finalizer`，
+  `main` 与 `origin/main` 同步）开始；本次未创建本地提交或推送。工作区中的改动均属于 R2.5，未覆盖用户已有
+  文件；`HEAD...@{upstream}` 仍为 ahead `0`、behind `0`。
+- provider event contract: 新增内部 `ProviderStreamEvent` 与 `ProviderStreamAggregator`。事件包含冻结
+  `ResolvedRoute`、attempt、provider event id/type，覆盖 text delta、tool call id/name/arguments delta、
+  usage、completed、error 和可审计 ignored。聚合器支持多个交错 tool call、空块和仅终块 usage；只有对应
+  completed 后才物化 `ToolCall`，半段 JSON 不进入 JSON/Schema 校验或工具执行。
+- adapters/wire: `ChatCompletionsAdapter` 使用锁定 OpenAI SDK `2.43.0` 的 `ChatCompletionChunk` 字段和
+  `stream_options.include_usage=true`；`ResponsesAdapter` 使用真实 `response.output_text.delta`、
+  `response.output_item.added/done`、`response.function_call_arguments.delta/done`、`response.completed`/
+  `incomplete`/`failed`/`error` 事件，并以 `output_index + item_id` 关联交错 calls。UTF-8 字节碎片、旧兼容
+  endpoint 返回普通 JSON、unknown event ignore/error 两种策略均有 fixture/test；普通 JSON 兼容路径复用同一次
+  `stream=true` 请求，不发第二次请求。
+- gateway/resilience: 新增 `ProviderStreamAdapter`、Gateway/GatewayEngine stream entry points；已知
+  OpenAI、DashScope、vLLM 与显式 custom route 可声明 streaming。`ResilientEngine` 复用 R1 breaker、semaphore、
+  Retry-After、jitter、fallback capability 和 attempt audit。首个可见 delta 前的瞬态错误可 retry/fallback；
+  已发送 delta 后的错误为终态，不拼接另一模型输出；旧 attempt/route 迟到事件变为审计 ignored。真实
+  `httpx` timeout/transport stream error 已纳入 R1 failure classification，错误正文按 credential/PII 脱敏。
+- compatibility: adapter 与 ResilientEngine 的同步 `chat()` 都聚合同一事件迭代器为原有 `EngineResponse`；
+  legacy、Mock、eval 和 Agent 调用方不需要迁移，也没有第二套同步核心解析。HTTP SSE、Agent-to-RunEvent 映射、
+  完整 CancellationToken 传播和 writer fence 接线未在本阶段实现，留给 R2.6。
+- fixtures/tests: 新增 `tests/fixtures/provider_streams/`（Chat/Responses SSE 与 fake attempts）及
+  `tests/test_provider_streaming.py`，覆盖碎片化 arguments、交错 calls、usage、流中断、旧 attempt 迟到、
+  retry/fallback 边界、同步聚合等价性、unknown policy、未预读普通 JSON 和真实 SDK transport error。
+- verification: `uv lock --check`、`uv pip check`、全仓 `uv run --frozen --offline ruff check .` 与
+  `git diff --check` 均通过；provider/engine/event 专项与 fake-provider 组合为 `130 passed`，loopback
+  `tests/test_r1_fake_provider_acceptance.py` 在获准本机环境 `1 passed`，独立 `scripts/accept_r1_fake_provider.py`
+  输出 `gate=passed`；显式清空模型/平台凭据、禁用外部 pytest plugin 的全量离线回归为 `393 passed`。
+- not_verified: 未访问公网、真实 Provider/model、Docker/Jobe、GitHub-hosted CI 或真实生产 HTTP SSE；只使用
+  本地锁定 SDK 类型、wire fixture、fake provider 和 loopback transport。未运行 R2 阶段收口入口
+  `zsh scripts/accept_stage8.sh`。
+- residual_risks: Provider stream 已可迭代但 Service/Agent 仍同步消费聚合结果；Responses structured text output、
+  完整 CancellationToken、HTTP SSE terminal 语义、RunEvent writer fence、跨进程恢复和五崩溃窗仍未完成。Provider
+  capabilities 依赖部署声明，不是远端自动探测；SDK/端点若违反已知 wire 契约会按 unknown/error 策略审计或 fail closed。
+- gate: `R2.5 passed`；R2 总门禁保持 `in_progress`，不能把 Provider 真流误写成 HTTP SSE 已流式化。
+- next: R2.6，将 R2.5 Provider 事件接入 HTTP SSE，映射 RunEvent v2，贯穿统一取消与 writer fence；不重复实现
+  Provider 核心解析，也不把 SSE terminal 行为提前扩展到本阶段。

@@ -36,22 +36,27 @@ flowchart LR
 
 ## Provider Gateway 与同步兼容面
 
-当前真实模型调用路径是 `Engine.chat -> GatewayEngine -> ProviderGateway -> API-mode adapter ->
-OpenAI SDK`。`ProviderSpec` 先解析为不可变 `ResolvedRoute`，Gateway 再按 `ApiMode` 选择
-`ChatCompletionsAdapter` 或 `ResponsesAdapter`。每个 adapter 独占自己的 wire 映射和
-`EngineResponse/ToolCall` 规范化；Responses adapter 会把 Chat 形态的历史 function call/result 分别转成
-`function_call`/`function_call_output` item，并把 token 名称和 completion status 归一到现有 Chat 语义。
-通义兼容端点与本地 vLLM 仍走 Chat Completions，`MockEngine`、Agent 图和 eval 继续只依赖同步
-`Engine.chat(messages, tools)`。
+当前真实模型调用路径是 `GatewayEngine -> ProviderGateway -> API-mode adapter -> OpenAI SDK stream`。
+`ProviderSpec` 先解析为不可变 `ResolvedRoute`，Gateway 再按 `ApiMode` 选择 `ChatCompletionsAdapter` 或
+`ResponsesAdapter`。两者将真实 wire/SDK 事件归一为内部 `ProviderStreamEvent`：text delta、按 index 交错的
+tool call id/name/arguments delta、usage、completed、error 和可审计 ignored。每个事件绑定冻结 route、全局
+attempt 和 provider event id；只有 completed 后聚合器才物化 `ToolCall`，因此半段 arguments JSON 不会进入
+Agent 的 JSON/Schema 校验或工具执行。同步 `Engine.chat(messages, tools)` 聚合同一事件迭代器为原有
+`EngineResponse`，`MockEngine`、Agent 图和 eval 无需同时迁移，也没有第二套同步核心解析。
+
+Responses adapter 会把 Chat 形态的历史 function call/result 分别转成 `function_call`/
+`function_call_output` item，并把 token 名称和 completion status 归一到现有 Chat 语义。通义兼容端点与本地
+vLLM 仍走 Chat Completions；Chat 请求使用 `stream_options.include_usage` 等待仅终块 usage，Responses 按
+`output_index + item_id` 关联交错 calls。未知事件按配置可审计忽略或 fail closed。
 
 新代码通过 `edu_agent.engine.get_engine()` 获取 Gateway-backed Engine（配置启用韧性层时外包一层
 `ResilientEngine`）。直接构造
 `OpenAICompatEngine(base_url, api_key, model, ...)` 的旧调用仍兼容，但该类只是把旧参数翻译成
 `ProviderSpec + ChatCompletionsAdapter` 的薄层，不再维护第二套请求逻辑。Gateway 工厂注册
-`chat_completions` 与 `responses` 两种 mode；两者当前均为同步调用。Responses mode 的 tool calling 与
-usage 已启用，text-format structured output 和 Provider streaming 明确关闭；model-specific context/output
-上限为 `None` 时表示未知，不能解释为无限。已声明不支持的 tool/strict schema、非文本输入或已超过明确
-context window 的请求会在 SDK 调用前失败。
+`chat_completions` 与 `responses` 两种 mode；已知 OpenAI、通义兼容、vLLM 和显式 custom route 均可声明
+streaming。Responses mode 的 tool calling 与 usage 已启用，text-format structured output 仍关闭；
+model-specific context/output 上限为 `None` 时表示未知，不能解释为无限。已声明不支持的 tool/strict schema、
+非文本输入或已超过明确 context window 的请求会在 SDK 调用前失败。
 
 `ResilientEngine` 在冻结的 `ResolvedRoute.identity` 粒度共享并发 semaphore 与 circuit breaker。连接、超时、
 429 和 5xx 使用 full-jitter 有界退避；合法 `Retry-After` 秒数或 HTTP-date 覆盖本地退避并受独立上限约束。
@@ -63,6 +68,10 @@ primary/fallback route plan 在 turn 起点冻结；fallback 只允许连接、�
 逐项检查；Provider fallback 的 context window 未知时拒绝，不能按无限处理。Trace 记录候选选择、拒绝/切换原因和
 唯一胜出 attempt；返回新的 `EngineResponse` 副本，只结算胜出 route usage。配置仍是每条 route 单一
 `CredentialRef`，没有 key pool 或运行时凭据轮换。
+
+流式重试复用同一 breaker、semaphore、Retry-After、fallback capability 和审计策略。只有首个 text/tool delta
+前的瞬态失败能继续 retry/fallback；一旦已有可见 delta，error 即为该流终态，不会无提示拼接另一 attempt。
+旧 attempt 或旧 route 迟到的事件转成可审计 ignored，不进入聚合结果。HTTP terminal 映射尚未接入这一层。
 
 ## 请求数据流
 
@@ -94,8 +103,8 @@ sequenceDiagram
     A-->>C: JSON or SSE completed
 ```
 
-SSE 只流式传输状态，不伪装 token streaming。连接断开后 API 请求协作取消；若外部模型/工具调用不可中断，
-它返回后仍需通过取消和 fencing 检查，结果才可能提交。
+HTTP SSE 目前只流式传输状态，不伪装 token streaming，也尚未消费上述 Provider 事件。连接断开后 API 请求
+协作取消；若外部模型/工具调用不可中断，它返回后仍需通过取消和 fencing 检查，结果才可能提交。
 
 `api_requests` 在 actor/tenant 内将 request id 永久绑定 payload hash，并在启动 Agent 前原子绑定预分配
 run id、owner lease 与 attempt。首次响应先规范化并脱敏、落库并计算 response hash，再返回；重放读取
@@ -236,9 +245,9 @@ fail closed；buffer 满时只取消该慢消费者、清空不完整队列并�
 以内存回收为由重新接受 late delta。总线不缓存订阅前事件，重连方必须在后续阶段依赖持久 cursor/状态，
 而不能向 EventBus 请求 replay。
 
-R2.1 只用 fake producer 验证事件协议；R2.3 已把 assistant tool-call envelope 和逐个 tool result 移到 Agent
-Loop 的稳定提交点。当前 Provider 仍为同步 `chat()`，HTTP SSE 仍只有 `accepted/keepalive/completed`；真
-Provider delta 和 SSE 映射分别留给 R2.5、R2.6。
+R2.1 只用 fake producer 验证 RunEvent 协议；R2.3 已把 assistant tool-call envelope 和逐个 tool result 移到
+Agent Loop 的稳定提交点。R2.5 已在 Provider Gateway 提供真实 delta 迭代器，并让同步 `chat()` 聚合同一流；
+HTTP SSE 仍只有 `accepted/keepalive/completed`，Provider-to-RunEvent/SSE 映射和统一取消留给 R2.6。
 
 ### RunJournal 持久恢复边界（R2.2）
 
@@ -265,8 +274,8 @@ envelope 的消息行、全部 call 行和 `model -> tools` journal 更新在同
 不会再次进入 handler。service 不重复批量追加 tool 协议消息；`011_turn_finalizer` 将 SQLite schema version
 提升到 11。R2.4 `TurnFinalizer` 以持久 cursor、CAS 和 `final-assistant:<run_id>` 唯一键统一最终消息、
 Plan/Evidence 复验、usage/budget、run terminal、后处理与有界 cleanup。API request completion 和 lease
-release 都位于可证明的 terminal 之后；terminal 后恢复仍会完成未结束的 hooks/cleanup。Provider streaming、
-HTTP SSE 和并发工具仍未实现。
+release 都位于可证明的 terminal 之后；terminal 后恢复仍会完成未结束的 hooks/cleanup。Provider streaming 已
+由 R2.5 完成；HTTP SSE 事件映射、完整取消传播和并发工具仍未实现。
 
 ## 安全边界
 

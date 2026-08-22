@@ -9,12 +9,14 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from enum import Enum
 from typing import Any
+
+import httpx
 
 from .base import Engine, EngineResponse
 from .gateway import (
@@ -26,6 +28,14 @@ from .gateway import (
     RouteIdentity,
     capability_gaps,
     infer_request_requirements,
+)
+from .streaming import (
+    ProviderStreamAggregator,
+    ProviderStreamEvent,
+    ProviderStreamEventType,
+    ProviderStreamProtocolError,
+    aggregate_provider_stream,
+    provider_stream_error_event,
 )
 
 
@@ -149,10 +159,15 @@ def classify_failure(error: Exception) -> FailureDecision:
     )
     if markers & _CONTEXT_CODES or context_limit_text:
         return FailureDecision(FailureKind.CONTEXT_OVERFLOW, False, status)
-    if name == "APITimeoutError" or isinstance(error, TimeoutError) or status == 408:
+    if (
+        name == "APITimeoutError"
+        or isinstance(error, (TimeoutError, httpx.TimeoutException))
+        or status == 408
+    ):
         return FailureDecision(FailureKind.TIMEOUT, True, status)
     if name in {"APIConnectionError", "ConnectError", "NetworkError"} or isinstance(
-        error, ConnectionError
+        error,
+        (ConnectionError, httpx.TransportError),
     ):
         return FailureDecision(FailureKind.CONNECTION, True, status)
     if markers & _TERMINAL_RATE_LIMIT_CODES:
@@ -506,6 +521,18 @@ class _RouteExecution:
 
 
 @dataclass(frozen=True)
+class _StreamRouteExecution:
+    response: EngineResponse | None
+    error: Exception | None
+    error_event: ProviderStreamEvent | None
+    completed_event: ProviderStreamEvent | None
+    attempts: int
+    skipped: bool
+    breaker_state: str
+    visible: bool
+
+
+@dataclass(frozen=True)
 class _TurnRoutePlan:
     primary: _RouteSnapshot
     fallback: _RouteSnapshot | None
@@ -786,14 +813,68 @@ class ResilientEngine(Engine):
         return engine.chat(messages, tools)
 
     @staticmethod
+    def _stream_frozen_route(
+        engine: Engine,
+        route: _RouteSnapshot,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        attempt: int,
+    ) -> Iterator[ProviderStreamEvent]:
+        if route.route is None:
+            raise ProviderStreamProtocolError(
+                "provider stream 需要可审计 ResolvedRoute",
+                code="provider_stream_route_missing",
+            )
+        routed_stream = getattr(engine, "stream_chat_on_route", None)
+        if callable(routed_stream):
+            return iter(
+                routed_stream(
+                    route.route,
+                    messages,
+                    tools,
+                    attempt=attempt,
+                )
+            )
+        current = _route_snapshot(engine)
+        if current.identity != route.identity:
+            raise RuntimeError("provider route changed after turn start")
+        stream = getattr(engine, "stream_chat", None)
+        if not callable(stream):
+            stream = getattr(engine, "stream_events", None)
+        if not callable(stream):
+            raise ProviderStreamProtocolError(
+                "provider engine 缺少 stream_chat",
+                code="provider_stream_unsupported",
+            )
+        return iter(stream(messages, tools, attempt=attempt))
+
+    @staticmethod
+    def _supports_provider_stream(engine: Engine, route: _RouteSnapshot) -> bool:
+        return (
+            route.route is not None
+            and route.capabilities is not None
+            and route.capabilities.streaming
+            and (
+                callable(getattr(engine, "stream_chat_on_route", None))
+                or callable(getattr(engine, "stream_chat", None))
+                or callable(getattr(engine, "stream_events", None))
+            )
+        )
+
+    @staticmethod
     def _fallback_compatibility(
         primary: _RouteSnapshot,
         fallback_engine: Engine,
         fallback: _RouteSnapshot,
         messages: list[dict],
         tools: list[dict],
+        *,
+        streaming: bool = False,
     ) -> _FallbackCompatibility:
         requirements = infer_request_requirements(messages, tools)
+        if streaming:
+            requirements = replace(requirements, streaming=True)
         if fallback.route is None or fallback.capabilities is None:
             gaps = (
                 ("capability_metadata",)
@@ -1056,7 +1137,611 @@ class ResilientEngine(Engine):
 
         raise AssertionError("provider attempt loop exited unexpectedly")
 
+    def _execute_route_stream(
+        self,
+        engine: Engine,
+        route: _RouteSnapshot,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        route_role: str,
+        start_attempt: int,
+        max_retries: int,
+    ) -> Generator[ProviderStreamEvent, None, _StreamRouteExecution]:
+        attempts = 0
+        with self.route_registry.lease(route.identity) as state:
+            for retry_index in range(max_retries + 1):
+                state.semaphore.acquire()
+                permit: _CircuitPermit | None = None
+                response: EngineResponse | None = None
+                completed_event: ProviderStreamEvent | None = None
+                error: Exception | None = None
+                error_event: ProviderStreamEvent | None = None
+                decision: FailureDecision | None = None
+                opened = False
+                recovered = False
+                breaker_after = "closed"
+                visible = False
+                iterator: Iterator[ProviderStreamEvent] | None = None
+                try:
+                    permit = state.breaker.try_acquire()
+                    if permit is None:
+                        circuit_error = CircuitOpenError(
+                            f"{route_role} provider route circuit is open"
+                        )
+                        stream_attempt = max(1, start_attempt + attempts + 1)
+                        assert route.route is not None
+                        return _StreamRouteExecution(
+                            None,
+                            circuit_error,
+                            provider_stream_error_event(
+                                route=route.route,
+                                attempt=stream_attempt,
+                                error=circuit_error,
+                                code=FailureKind.CIRCUIT_OPEN.value,
+                            ),
+                            None,
+                            attempts,
+                            True,
+                            state.breaker.state,
+                            False,
+                        )
+                    attempts += 1
+                    attempt_number = start_attempt + attempts
+                    aggregator = ProviderStreamAggregator()
+                    try:
+                        iterator = self._stream_frozen_route(
+                            engine,
+                            route,
+                            messages,
+                            tools,
+                            attempt=attempt_number,
+                        )
+                        for event in iterator:
+                            if not isinstance(event, ProviderStreamEvent):
+                                raise ProviderStreamProtocolError(
+                                    "provider engine 产生了非 ProviderStreamEvent",
+                                    code="provider_stream_invalid_event",
+                                )
+                            if (
+                                event.attempt != attempt_number
+                                or event.route.identity != route.identity
+                            ):
+                                self._event(
+                                    "provider_stream_stale_event_ignored",
+                                    route=route,
+                                    attempt=attempt_number,
+                                    details={
+                                        "expected_attempt": attempt_number,
+                                        "event_attempt": event.attempt,
+                                        "provider_event_id": event.provider_event_id,
+                                        "provider_event_type": event.provider_event_type,
+                                        "event_route": event.route.to_event(),
+                                    },
+                                )
+                                yield ProviderStreamEvent(
+                                    ProviderStreamEventType.IGNORED,
+                                    route=event.route,
+                                    attempt=event.attempt,
+                                    provider_event_id=event.provider_event_id,
+                                    provider_event_type=event.provider_event_type,
+                                    metadata={"reason": "stale_attempt"},
+                                )
+                                continue
+                            if event.event_type is ProviderStreamEventType.ERROR:
+                                error_event = event
+                                error = event.error or ProviderStreamProtocolError(
+                                    event.error_message or "provider stream failed",
+                                    code=event.error_code or "provider_stream_error",
+                                )
+                                break
+                            if (
+                                event.event_type is ProviderStreamEventType.IGNORED
+                                and event.metadata.get("reason")
+                                == "unknown_event_ignored"
+                            ):
+                                self._event(
+                                    "provider_stream_event_ignored",
+                                    route=route,
+                                    attempt=attempt_number,
+                                    details={
+                                        "reason": "unknown_event",
+                                        "provider_event_id": event.provider_event_id,
+                                        "provider_event_type": event.provider_event_type,
+                                    },
+                                )
+                            if event.event_type is ProviderStreamEventType.COMPLETED:
+                                response = aggregator.feed(event)
+                                completed_event = event
+                                break
+                            aggregator.feed(event)
+                            visible = visible or event.is_delta
+                            yield event
+                        if response is None and error is None:
+                            error = ProviderStreamProtocolError(
+                                "provider stream 在 completed 前结束",
+                                code="provider_stream_interrupted",
+                            )
+                            assert route.route is not None
+                            error_event = provider_stream_error_event(
+                                route=route.route,
+                                attempt=attempt_number,
+                                error=error,
+                                retryable=not visible,
+                            )
+                    except Exception as caught:
+                        error = caught
+                        assert route.route is not None
+                        error_event = provider_stream_error_event(
+                            route=route.route,
+                            attempt=attempt_number,
+                            error=caught,
+                            retryable=not visible,
+                        )
+                    except BaseException:
+                        state.breaker.record_non_retryable(permit)
+                        raise
+                    finally:
+                        close = getattr(iterator, "close", None)
+                        if callable(close):
+                            close()
+
+                    if error is not None:
+                        decision = classify_failure(error)
+                        if decision.retryable:
+                            opened, breaker_after = state.breaker._record_failure(permit)
+                        else:
+                            _, breaker_after = state.breaker._record_success(permit)
+                    else:
+                        recovered, breaker_after = state.breaker._record_success(permit)
+                finally:
+                    state.semaphore.release()
+
+                assert permit is not None
+                attempt_number = start_attempt + attempts
+                if error is None:
+                    assert response is not None and completed_event is not None
+                    self._attempt_event(
+                        route=route,
+                        route_role=route_role,
+                        attempt=attempt_number,
+                        breaker_before=permit.state_before,
+                        breaker_after=breaker_after,
+                        response=response,
+                    )
+                    if recovered:
+                        self._event(
+                            f"{route_role}_recovered",
+                            route=route,
+                            attempt=attempt_number,
+                            details={"breaker_state": breaker_after},
+                        )
+                    return _StreamRouteExecution(
+                        response,
+                        None,
+                        None,
+                        completed_event,
+                        attempts,
+                        False,
+                        breaker_after,
+                        visible,
+                    )
+
+                assert decision is not None and error_event is not None
+                can_retry = (
+                    not visible
+                    and decision.retryable
+                    and retry_index < max_retries
+                    and breaker_after != "open"
+                    and not permit.half_open_probe
+                )
+                delay = 0.0
+                delay_source = None
+                delay_error: Exception | None = None
+                if can_retry:
+                    try:
+                        delay, delay_source = self._retry_delay(error, retry_index)
+                    except Exception as caught:
+                        delay_error = caught
+                        can_retry = False
+                self._attempt_event(
+                    route=route,
+                    route_role=route_role,
+                    attempt=attempt_number,
+                    breaker_before=permit.state_before,
+                    breaker_after=breaker_after,
+                    error=error,
+                    decision=decision,
+                    delay=delay,
+                    delay_source=delay_source,
+                )
+                self._event(
+                    "provider_failure",
+                    route=route,
+                    attempt=attempt_number,
+                    error=error,
+                    details={
+                        "kind": decision.kind.value,
+                        "retryable": decision.retryable,
+                        "stream_visible": visible,
+                        "breaker_state": breaker_after,
+                    },
+                )
+                if opened:
+                    self._event(
+                        "circuit_opened",
+                        route=route,
+                        attempt=attempt_number,
+                        error=error,
+                        details={"breaker_state": breaker_after},
+                    )
+                if delay_error is not None:
+                    error = delay_error
+                    assert route.route is not None
+                    error_event = provider_stream_error_event(
+                        route=route.route,
+                        attempt=attempt_number,
+                        error=delay_error,
+                    )
+                if not can_retry:
+                    return _StreamRouteExecution(
+                        None,
+                        error,
+                        error_event,
+                        None,
+                        attempts,
+                        False,
+                        breaker_after,
+                        visible,
+                    )
+                self._event(
+                    "retry_scheduled",
+                    route=route,
+                    attempt=attempt_number,
+                    details={
+                        "delay_seconds": delay,
+                        "delay_source": delay_source,
+                        "breaker_state": breaker_after,
+                        "stream_visible": False,
+                    },
+                )
+                yield replace(
+                    error_event,
+                    retryable=True,
+                    continuation="retry",
+                    metadata={
+                        **error_event.metadata,
+                        "failure_kind": decision.kind.value,
+                        "delay_seconds": delay,
+                        "delay_source": delay_source,
+                    },
+                )
+                self.sleeper(delay)
+
+        raise AssertionError("provider stream attempt loop exited unexpectedly")
+
     def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
+        with self._chat_route_plan() as route_plan:
+            streamable = self._supports_provider_stream(
+                self.primary,
+                route_plan.primary,
+            ) and (
+                self.fallback is None
+                or route_plan.fallback is not None
+                and self._supports_provider_stream(self.fallback, route_plan.fallback)
+            )
+            if streamable:
+                return aggregate_provider_stream(self.stream_chat(messages, tools))
+            return self._chat_sync(messages, tools)
+
+    def stream_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        attempt: int = 1,
+    ) -> Iterator[ProviderStreamEvent]:
+        if attempt != 1:
+            raise ValueError("ResilientEngine stream attempt 必须从 1 开始")
+        with self._chat_route_plan() as route_plan:
+            primary_route = route_plan.primary
+            if not self._supports_provider_stream(self.primary, primary_route):
+                raise ProviderStreamProtocolError(
+                    "primary engine 不支持 provider stream",
+                    code="provider_stream_unsupported",
+                )
+            requirements = replace(
+                infer_request_requirements(messages, tools),
+                streaming=True,
+            )
+            self._event(
+                "route_selected",
+                route=primary_route,
+                attempt=0,
+                details={
+                    "route_role": "primary",
+                    "selection_reason": "configured_primary",
+                    "route": primary_route.audit,
+                    "request_requirements": requirements.to_event(),
+                    "fallback_configured": route_plan.fallback is not None,
+                    "provider_stream": True,
+                },
+            )
+            primary = yield from self._execute_route_stream(
+                self.primary,
+                primary_route,
+                messages,
+                tools,
+                route_role="primary",
+                start_attempt=0,
+                max_retries=self.max_retries,
+            )
+            attempts = primary.attempts
+            if primary.response is not None:
+                additions = {"runtime_attempts": attempts}
+                response = _response_with_usage(primary.response, additions)
+                self._event(
+                    "provider_result_selected",
+                    route=primary_route,
+                    attempt=attempts,
+                    details={
+                        "status": "selected",
+                        "route_role": "primary",
+                        "selection_reason": "primary_completed",
+                        "selected_attempt": attempts,
+                        "usage": _audit_usage(response.usage),
+                        "provider_stream": True,
+                    },
+                )
+                assert primary_route.route is not None
+                yield ProviderStreamEvent(
+                    ProviderStreamEventType.USAGE,
+                    route=primary_route.route,
+                    attempt=attempts,
+                    provider_event_id=(
+                        primary.completed_event.provider_event_id
+                        if primary.completed_event is not None
+                        else None
+                    ),
+                    provider_event_type="edu_agent.runtime_usage",
+                    usage=additions,
+                )
+                assert primary.completed_event is not None
+                yield primary.completed_event
+                return
+
+            last_error = primary.error
+            error_event = primary.error_event
+            assert last_error is not None and error_event is not None
+            decision = classify_failure(last_error)
+            if primary.skipped:
+                self._event(
+                    "primary_skipped",
+                    route=primary_route,
+                    attempt=attempts,
+                    error=last_error,
+                    details={
+                        "breaker_state": primary.breaker_state,
+                        "failure_kind": decision.kind.value,
+                        "provider_stream": True,
+                    },
+                )
+
+            if primary.visible:
+                if self.fallback is not None and route_plan.fallback is not None:
+                    self._event(
+                        "fallback_rejected",
+                        route=route_plan.fallback,
+                        attempt=max(1, attempts),
+                        error=last_error,
+                        details={
+                            "reason": "stream_already_visible",
+                            "primary_failure": decision.kind.value,
+                            "fallback_attempted": False,
+                            "primary_route": primary_route.audit,
+                            "fallback_route": route_plan.fallback.audit,
+                        },
+                    )
+                yield replace(
+                    error_event,
+                    retryable=False,
+                    continuation=None,
+                    metadata={
+                        **error_event.metadata,
+                        "failure_kind": decision.kind.value,
+                        "stream_visible": True,
+                    },
+                )
+                return
+
+            if self.fallback is None or route_plan.fallback is None:
+                yield replace(
+                    error_event,
+                    retryable=decision.retryable,
+                    continuation=None,
+                    metadata={
+                        **error_event.metadata,
+                        "failure_kind": decision.kind.value,
+                        "stream_visible": False,
+                    },
+                )
+                return
+            fallback_route = route_plan.fallback
+            if not decision.fallback_allowed:
+                self._event(
+                    "fallback_rejected",
+                    route=fallback_route,
+                    attempt=attempts + 1,
+                    error=last_error,
+                    details={
+                        "reason": "failure_policy_denied",
+                        "primary_failure": decision.kind.value,
+                        "primary_retryable": decision.retryable,
+                        "fallback_attempted": False,
+                        "primary_route": primary_route.audit,
+                        "fallback_route": fallback_route.audit,
+                        "provider_stream": True,
+                    },
+                )
+                yield replace(
+                    error_event,
+                    retryable=decision.retryable,
+                    continuation=None,
+                    metadata={
+                        **error_event.metadata,
+                        "failure_kind": decision.kind.value,
+                    },
+                )
+                return
+
+            compatibility = self._fallback_compatibility(
+                primary_route,
+                self.fallback,
+                fallback_route,
+                messages,
+                tools,
+                streaming=True,
+            )
+            if not compatibility.compatible:
+                self._event(
+                    "fallback_rejected",
+                    route=fallback_route,
+                    attempt=attempts + 1,
+                    error=last_error,
+                    details={
+                        "reason": "capability_mismatch",
+                        "primary_failure": decision.kind.value,
+                        "fallback_attempted": False,
+                        "primary_route": primary_route.audit,
+                        "fallback_route": fallback_route.audit,
+                        "compatibility": compatibility.to_event(),
+                        "provider_stream": True,
+                    },
+                )
+                yield replace(
+                    error_event,
+                    retryable=decision.retryable,
+                    continuation=None,
+                    metadata={
+                        **error_event.metadata,
+                        "failure_kind": decision.kind.value,
+                    },
+                )
+                return
+
+            if not self._supports_provider_stream(self.fallback, fallback_route):
+                unsupported = ProviderStreamProtocolError(
+                    "fallback engine 不支持 provider stream",
+                    code="provider_stream_unsupported",
+                )
+                assert fallback_route.route is not None
+                yield provider_stream_error_event(
+                    route=fallback_route.route,
+                    attempt=attempts + 1,
+                    error=unsupported,
+                )
+                return
+
+            self._event(
+                "fallback_activated",
+                route=fallback_route,
+                attempt=attempts + 1,
+                error=last_error,
+                details={
+                    "selection_reason": "failure_policy_and_capabilities_allowed",
+                    "primary_failure": decision.kind.value,
+                    "primary_route": primary_route.audit,
+                    "fallback_route": fallback_route.audit,
+                    "compatibility": compatibility.to_event(),
+                    "provider_stream": True,
+                },
+            )
+            yield replace(
+                error_event,
+                retryable=True,
+                continuation="fallback",
+                metadata={
+                    **error_event.metadata,
+                    "failure_kind": decision.kind.value,
+                    "fallback_route": fallback_route.audit,
+                },
+            )
+            fallback = yield from self._execute_route_stream(
+                self.fallback,
+                fallback_route,
+                messages,
+                tools,
+                route_role="fallback",
+                start_attempt=attempts,
+                max_retries=0,
+            )
+            attempts += fallback.attempts
+            if fallback.response is not None:
+                additions = {
+                    "runtime_attempts": attempts,
+                    "fallback_used": True,
+                    "primary_failure": decision.kind.value,
+                    "circuit_state": primary.breaker_state,
+                }
+                response = _response_with_usage(fallback.response, additions)
+                self._event(
+                    "provider_result_selected",
+                    route=fallback_route,
+                    attempt=attempts,
+                    details={
+                        "status": "selected",
+                        "route_role": "fallback",
+                        "selection_reason": "fallback_completed",
+                        "selected_attempt": attempts,
+                        "superseded_attempts": primary.attempts,
+                        "usage": _audit_usage(response.usage),
+                        "provider_stream": True,
+                    },
+                )
+                assert fallback_route.route is not None
+                yield ProviderStreamEvent(
+                    ProviderStreamEventType.USAGE,
+                    route=fallback_route.route,
+                    attempt=attempts,
+                    provider_event_id=(
+                        fallback.completed_event.provider_event_id
+                        if fallback.completed_event is not None
+                        else None
+                    ),
+                    provider_event_type="edu_agent.runtime_usage",
+                    usage=additions,
+                )
+                assert fallback.completed_event is not None
+                yield fallback.completed_event
+                return
+            fallback_error = fallback.error
+            fallback_error_event = fallback.error_event
+            assert fallback_error is not None and fallback_error_event is not None
+            if fallback.skipped:
+                self._event(
+                    "fallback_skipped",
+                    route=fallback_route,
+                    attempt=attempts,
+                    error=fallback_error,
+                    details={
+                        "breaker_state": fallback.breaker_state,
+                        "provider_stream": True,
+                    },
+                )
+            yield replace(
+                fallback_error_event,
+                retryable=False,
+                continuation=None,
+                metadata={
+                    **fallback_error_event.metadata,
+                    "failure_kind": classify_failure(fallback_error).kind.value,
+                    "stream_visible": fallback.visible,
+                },
+            )
+
+    stream_events = stream_chat
+
+    def _chat_sync(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
         with self._chat_route_plan() as route_plan:
             primary_route = route_plan.primary
             requirements = infer_request_requirements(messages, tools)

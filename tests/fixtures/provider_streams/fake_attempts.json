@@ -1,0 +1,12 @@
+{
+  "retry_before_delta": [
+    {"attempt": 1, "type": "error", "error": "connection"},
+    {"attempt": 1, "type": "text.delta", "delta": "late"},
+    {"attempt": 2, "type": "text.delta", "delta": "selected"},
+    {"attempt": 2, "type": "completed", "finish_reason": "stop"}
+  ],
+  "failure_after_delta": [
+    {"attempt": 1, "type": "text.delta", "delta": "partial"},
+    {"attempt": 1, "type": "error", "error": "connection"}
+  ]
+}

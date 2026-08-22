@@ -117,6 +117,7 @@ class ModelConfig:
                 api_mode=self.fallback_api_mode,
                 credential=CredentialRef("EDU_AGENT_FALLBACK_API_KEY"),
                 capabilities=ProviderCapabilities(
+                    streaming=True,
                     context_window_tokens=self.fallback_context_window_tokens,
                 ),
             )
