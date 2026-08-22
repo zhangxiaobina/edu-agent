@@ -227,7 +227,7 @@ timestamp 规范化为 UTC，payload 在进入总线前经过中心脱敏并验�
 |---|---|---|
 | `RunEventBus` | 当前进程内 future-only 发布/订阅、sequence、writer fence、有界 fan-out | 落库、历史回放、断线恢复、跨进程传输 |
 | `TraceRepository` | 从现有业务/审计表只读投影并导出 `RuntimeEvent v1`；索引可重建 | 消费 EventBus 作为新真相源、保存 token delta |
-| `RunJournal`（R2.2） | 后续保存恢复所需 sequence/loop cursor 和提交状态 | 替代 Plan/Evidence/ToolOperation/Artifact/Trace 真相 |
+| `RunJournal`（R2.2） | 持久保存 phase、sequence/loop cursor、attempt、冻结 route、预算和最后稳定边界；CAS 校验 scope/fence | 替代 Plan/Evidence/ToolOperation/Artifact/Trace 真相 |
 
 每个订阅 buffer、进程内 stream state 数和活跃订阅总数都有固定上限。达到 stream/subscription 上限时
 fail closed；buffer 满时只取消该慢消费者、清空不完整队列并显式返回 `SlowConsumerError`，生产者和其他
@@ -238,6 +238,19 @@ fail closed；buffer 满时只取消该慢消费者、清空不完整队列并�
 R2.1 只用 fake producer 验证该协议。当前 Provider 仍为同步 `chat()`，HTTP SSE 仍只有
 `accepted/keepalive/completed`，assistant/tool 消息提交时机也未改变；真 Provider delta 和 SSE 映射分别留给
 R2.5、R2.6。
+
+### RunJournal 持久恢复边界（R2.2）
+
+`RunJournal` 位于 [docs/run-journal.md](run-journal.md) 定义的单行 `run_journals` 表。持久 phase 的主链为
+`accepted -> planning -> model -> tools -> verifying -> finalizing -> terminal`，并允许从任一执行 phase
+明确进入不可逆的 `cancelled`/`failed` 分支；`verifying -> model` 只用于推进下一 loop cursor。journal 只保存
+Plan、Evidence、ToolOperation、Artifact、context checkpoint 和 tool event 的 ID 引用，不复制正文或 Trace。
+
+每次 CAS 在一个 SQLite `BEGIN IMMEDIATE` 中复验 run/session/actor/tenant、期望 revision/phase/cursor、当前
+lease fencing token 与 writer；旧 worker、重复/跳跃 phase、游标回退和终态重入返回结构化 `RunJournal*` 错误。
+`009_run_journal` migration 可重复执行，SQLite `user_version` 高于当前代码时拒绝启动，未知 phase/损坏 JSON
+在只读 snapshot 中直接失败，不用默认值猜恢复位置。该切片没有接入 Agent Loop 的消息提交点，Provider/SSE
+仍保持同步/keepalive 语义。
 
 ## 安全边界
 

@@ -288,6 +288,7 @@ tenant/actor/session 分目录，读取必须匹配 owner 并通过路径与 has
 
 - sessions / messages
 - runs（状态、owner/token、heartbeat、取消、恢复原因和建议）
+- run_journals（phase、loop cursor、model attempt、event sequence、冻结 route/预算、稳定边界和真相表引用）
 - session_leases（当前 owner、单调 fencing token、active run、heartbeat 和 expiry）
 - tool_events（tool call / operation 关联、参数、结果、耗时）
 - tool_operation_refs（operation owner、调用关联和当前状态）
@@ -309,8 +310,9 @@ R2.1 另定义了进程内 `RunEvent v2` 传输 envelope 和 `RunEventBus`。事
 SQLite、不保留历史，也不提供恢复游标。
 
 持久边界保持不变：`TraceRepository` 继续只从上述业务/审计表投影 `RuntimeEvent v1`，EventBus 不是第二套
-Trace 真相；恢复 sequence/loop cursor 由 R2.2 的 `RunJournal` 承担。当前 Provider 和 Agent Loop 仍同步，SSE
-仍为 `accepted/keepalive/completed`，本阶段没有改变 assistant/tool 消息的提交时机。
+Trace 真相；恢复 sequence/loop cursor 由 R2.2 的 `RunJournal` 承担。RunJournal 的 migration/CAS/snapshot
+边界已实现，但尚未接入 Agent Loop 的实际消息提交点。当前 Provider 和 Agent Loop 仍同步，SSE 仍为
+`accepted/keepalive/completed`。
 
 ## 可插拔扩展
 

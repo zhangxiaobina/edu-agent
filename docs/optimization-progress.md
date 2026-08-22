@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R2.1
-- next_prompt: R2.2
+- last_completed_prompt: R2.2
+- next_prompt: R2.3
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent 协议已完成；R2 Journal、真流式、统一取消与恢复门禁仍未完成
+- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent 与 R2.2 RunJournal 已完成；R2.3 增量消息提交、真流式、统一取消与完整恢复门禁仍未完成
 
 ## Baseline Reproduction
 
@@ -495,3 +495,33 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R2.1 passed`；R2 总门禁保持 `in_progress`，不得把本协议写成 Provider/SSE 已流式化。
 - next: R2.2，实现 RunJournal 持久 schema、migration、原子 cursor API 和旧库兼容；不改变 Agent Loop 的实际
   提交点，也不得提前进入 assistant/tool 增量提交。
+
+### R2.2 - 2026-08-22
+
+- commit/evidence: 会话从 R2.1 交接的 `e0be594cbffeaa3563e6a12adad486063ac13172` 开始；期间 R2.1
+  变更已由当前 HEAD `aec84a5e722b9adc34f0daf75901eddaa4a4b251`（`feat: define typed RunEvent v2 protocol`）
+  固化。工作区仍有本会话及用户既有文档改动，本会话未回退或覆盖，未创建 R2.2 本地提交。
+- changes: 新增 `edu_agent/state/journal.py` 的持久 `RunPhase`（主链加明确 `cancelled/failed` 终态分支）、
+  合法转换、结构化错误、只读 `RunJournalSnapshot` 和薄 `RunJournal` facade。`StateStore` 增加严格
+  `create/initialize`、compare-and-set 和只读 snapshot API；CAS 在同一 `BEGIN IMMEDIATE` 中校验
+  run/session/actor/tenant、revision/phase、loop cursor、model attempt、event sequence、writer/fence 和
+  真相表引用。terminal/cancelled/failed 不可回到执行态，旧 owner、重复/跳跃写和游标回退不会静默成功。
+- schema/migration: 新增幂等 `009_run_journal` migration 与 `run_journals` 单行表；只保存 Plan、Evidence、
+  ToolOperation、Artifact、context checkpoint/tool event 的 ID 引用，以及冻结 route、manifest hash、预算
+  快照和最后稳定边界，不复制正文或 Trace。SQLite `PRAGMA user_version=9` 与未来版本拒绝逻辑防止 schema
+  倒退；列/表创建和 marker 可在进程中断后重开补齐。无依赖、lockfile、环境变量或 Agent Loop 提交点变化。
+- documentation: 新增 [`docs/run-journal.md`](run-journal.md) 恢复状态表与不变量；同步 architecture、production
+  runtime 和 README，明确 RunJournal 已持久化但尚未接入 Agent Loop/Provider/SSE。
+- verification: 新增 `tests/test_run_journal.py` 16 项，覆盖新库、旧库迁移、重复 migration、显式 scope、跨
+  run 引用、合法/跳跃/重复/终态转换、单调 cursor、并发 CAS、旧/过期 fence、future schema、损坏 JSON/phase
+  与循环 JSON 拒绝。`uv run --frozen --offline ruff check .` 通过；journal 专项为 `16 passed (0.28s)`；
+  state/event/plan/RAG/distributed 回归 `56 passed`；recovery/Trace/真实 HTTP 专项在受限沙箱中仅 4 个
+  loopback bind 权限失败，获准环境同命令 `24 passed (3.58s)`；显式清空凭据并禁用外部 plugin 的全量离线
+  pytest 为 `327 passed (15.41s)`；`git diff --check` 通过。
+- not_verified: 未运行阶段收口 `zsh scripts/accept_stage8.sh`、真实 Provider/model、Docker/Jobe、GitHub-hosted
+  CI、跨进程 EventBus 或 R2.3 之后的真实 delta/SSE/取消/五崩溃窗；本会话没有改变这些能力的状态口径。
+- residual_risks: `RunJournal` 目前是可独立调用的持久 API，消息 envelope、tool result 增量提交和 finalizer 仍由
+  后续 R2.3/R2.4 接入；旧数据库若包含未知更高 schema marker 会按设计拒绝启动，需要对应新代码迁移。
+- gate: `R2.2 passed`；R2 总门禁保持 `in_progress`。
+- next: R2.3，在 Agent Loop 工具执行前接入 assistant envelope 和每个 tool result 的原子增量提交；不得在本阶段
+  回头实现 Provider streaming、HTTP SSE 或最终消息 finalizer。

@@ -9,9 +9,22 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+
+from .journal import (
+    _UNSET as _JOURNAL_UNSET,
+    RunJournalFencingError,
+    RunJournalIdentityError,
+    RunJournalSnapshot,
+    compare_and_set_run_journal,
+    get_run_journal_snapshot,
+    initialize_run_journal,
+    initialize_run_journal_schema,
+)
 
 
 _UNSET = object()
+STATE_SCHEMA_VERSION = 9
 
 
 class SessionLeaseUnavailable(RuntimeError):
@@ -23,6 +36,12 @@ class FencingTokenRejected(RuntimeError):
 
 
 class RunCancelled(RuntimeError):
+    pass
+
+
+class StateSchemaVersionError(RuntimeError):
+    """The database was written by a newer state schema than this code knows."""
+
     pass
 
 
@@ -39,6 +58,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
 class StateStore:
     def __init__(
         self,
@@ -53,6 +82,8 @@ class StateStore:
         if read_only:
             if not self.path.is_file():
                 raise FileNotFoundError(self.path)
+            with self.connect() as connection:
+                self._assert_supported_schema_version(connection)
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._initialize()
@@ -84,6 +115,7 @@ class StateStore:
 
     def _initialize(self) -> None:
         with self.connect() as connection:
+            self._assert_supported_schema_version(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -602,6 +634,30 @@ class StateStore:
             from .trace_index import initialize_trace_index
 
             initialize_trace_index(connection)
+            initialize_run_journal_schema(connection, now=self.now_iso())
+            connection.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION}")
+
+    @staticmethod
+    def _assert_supported_schema_version(connection: sqlite3.Connection) -> None:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version > STATE_SCHEMA_VERSION:
+            raise StateSchemaVersionError(
+                f"state database schema version {version} is newer than supported "
+                f"version {STATE_SCHEMA_VERSION}"
+            )
+        if not _table_exists(connection, "state_schema_migrations"):
+            return
+        rows = connection.execute(
+            "SELECT version FROM state_schema_migrations"
+        ).fetchall()
+        for row in rows:
+            value = str(row["version"])
+            match = re.match(r"(\d+)", value)
+            if match and int(match.group(1)) > STATE_SCHEMA_VERSION:
+                raise StateSchemaVersionError(
+                    f"state migration {value!r} is newer than supported version "
+                    f"{STATE_SCHEMA_VERSION}"
+                )
 
     @staticmethod
     def _initialize_fts(connection: sqlite3.Connection) -> None:
@@ -785,6 +841,196 @@ class StateStore:
                     now,
                 ),
             )
+
+    # RunJournal is deliberately exposed through StateStore so callers cannot
+    # accidentally create a second persistence/connection boundary.
+    def create_run_journal(
+        self,
+        context=None,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        actor_id: str | None = None,
+        tenant_id: str | None = None,
+        tool_manifest_hash: str,
+        frozen_provider_route: dict | None = None,
+        provider_route: dict | None = None,
+        budget_snapshot: dict,
+        context_checkpoint_id: str | None = None,
+        context_checkpoint: str | None = None,
+        writer_id: str | None = None,
+        fencing_token: int | None = None,
+    ) -> RunJournalSnapshot:
+        context = self._journal_context(
+            context,
+            run_id=run_id,
+            session_id=session_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+            writer_id=writer_id,
+            fencing_token=fencing_token,
+        )
+        if frozen_provider_route is None:
+            frozen_provider_route = provider_route
+        elif provider_route is not None:
+            if frozen_provider_route != provider_route:
+                raise ValueError("provider_route and frozen_provider_route disagree")
+        if frozen_provider_route is None:
+            raise ValueError("frozen_provider_route is required")
+        if context_checkpoint is not None:
+            if context_checkpoint_id is not None and context_checkpoint_id != context_checkpoint:
+                raise ValueError("context checkpoint aliases disagree")
+            context_checkpoint_id = context_checkpoint
+        return initialize_run_journal(
+            self,
+            context,
+            tool_manifest_hash=tool_manifest_hash,
+            frozen_provider_route=frozen_provider_route,
+            budget_snapshot=budget_snapshot,
+            context_checkpoint_id=context_checkpoint_id,
+            writer_id=writer_id,
+            fencing_token=fencing_token,
+        )
+
+    initialize_run_journal = create_run_journal
+
+    @staticmethod
+    def _journal_context(
+        context,
+        *,
+        run_id: str | None,
+        session_id: str | None,
+        actor_id: str | None,
+        tenant_id: str | None,
+        writer_id: str | None,
+        fencing_token: int | None,
+    ):
+        if context is not None:
+            if run_id is not None and run_id != context.run_id:
+                raise RunJournalIdentityError("run_id does not match context")
+            if session_id is not None and session_id != context.session_id:
+                raise RunJournalIdentityError("session_id does not match context")
+            if actor_id is not None and actor_id != context.actor_id:
+                raise RunJournalIdentityError("actor_id does not match context")
+            if tenant_id is not None and tenant_id != context.tenant_id:
+                raise RunJournalIdentityError("tenant_id does not match context")
+            context_writer = getattr(context, "lease_owner", None)
+            context_token = getattr(context, "fencing_token", None)
+            if context_writer is not None or context_token is not None:
+                if writer_id is not None and writer_id != context_writer:
+                    raise RunJournalFencingError("writer_id does not match context")
+                if fencing_token is not None and fencing_token != context_token:
+                    raise RunJournalFencingError("fencing_token does not match context")
+            return context
+        missing = [
+            name
+            for name, value in (
+                ("run_id", run_id),
+                ("session_id", session_id),
+                ("actor_id", actor_id),
+                ("tenant_id", tenant_id),
+            )
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            raise RunJournalIdentityError(
+                "journal scope is incomplete: " + ", ".join(missing)
+            )
+        if writer_id is None or fencing_token is None:
+            raise RunJournalFencingError(
+                "journal writer_id and fencing_token are required"
+            )
+        return SimpleNamespace(
+            run_id=run_id,
+            session_id=session_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+            lease_owner=writer_id if fencing_token > 0 else None,
+            fencing_token=fencing_token if fencing_token > 0 else None,
+        )
+
+    def get_run_journal_snapshot(
+        self,
+        run_id: str,
+        *,
+        session_id: str,
+        actor_id: str,
+        tenant_id: str,
+    ) -> RunJournalSnapshot:
+        return get_run_journal_snapshot(
+            self,
+            run_id=run_id,
+            session_id=session_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+
+    read_run_journal_snapshot = get_run_journal_snapshot
+    get_run_journal = get_run_journal_snapshot
+
+    def compare_and_set_run_journal(
+        self,
+        context=None,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        actor_id: str | None = None,
+        tenant_id: str | None = None,
+        expected_revision: int,
+        expected_phase,
+        phase,
+        expected_loop_cursor: int,
+        loop_cursor: int,
+        expected_model_attempt: int,
+        model_attempt: int,
+        expected_event_sequence: int,
+        event_sequence: int,
+        expected_fencing_token: int,
+        stable_boundary,
+        budget_snapshot: dict,
+        writer_id: str | None = None,
+        fencing_token: int | None = None,
+        context_checkpoint_id=_JOURNAL_UNSET,
+        plan_id=_JOURNAL_UNSET,
+        evidence_id=_JOURNAL_UNSET,
+        operation_id=_JOURNAL_UNSET,
+        artifact_id=_JOURNAL_UNSET,
+        last_tool_event_id=_JOURNAL_UNSET,
+    ) -> RunJournalSnapshot:
+        context = self._journal_context(
+            context,
+            run_id=run_id,
+            session_id=session_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+            writer_id=writer_id,
+            fencing_token=fencing_token,
+        )
+        return compare_and_set_run_journal(
+            self,
+            context,
+            expected_revision=expected_revision,
+            expected_phase=expected_phase,
+            phase=phase,
+            expected_loop_cursor=expected_loop_cursor,
+            loop_cursor=loop_cursor,
+            expected_model_attempt=expected_model_attempt,
+            model_attempt=model_attempt,
+            expected_event_sequence=expected_event_sequence,
+            event_sequence=event_sequence,
+            expected_fencing_token=expected_fencing_token,
+            stable_boundary=stable_boundary,
+            budget_snapshot=budget_snapshot,
+            context_checkpoint_id=context_checkpoint_id,
+            plan_id=plan_id,
+            evidence_id=evidence_id,
+            operation_id=operation_id,
+            artifact_id=artifact_id,
+            last_tool_event_id=last_tool_event_id,
+        )
+
+    cas_run_journal = compare_and_set_run_journal
+    compare_and_set_journal = compare_and_set_run_journal
 
     def prepare_run_resume(
         self,
@@ -3090,6 +3336,7 @@ class StateStore:
             "evidence",
             "state_schema_migrations",
             "api_requests",
+            "run_journals",
         }
         if table not in allowed:
             raise ValueError(f"不允许统计表：{table}")
