@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from importlib import import_module
 from importlib.metadata import entry_points
+import re
 from typing import Protocol
 
 
@@ -12,10 +13,23 @@ class ToolProvider(Protocol):
 
     def tool_names(self) -> list[str]: ...
 
+    def build_tool_manifest(self, **kwargs): ...
+
 
 class PluginContext:
-    def __init__(self, *, register_tool):
-        self.register_tool = register_tool
+    def __init__(self, *, register_tool, source: str = "plugin:unknown", version: str = "0.0.0"):
+        self._register_tool = register_tool
+        self.source = source
+        self.version = version
+
+    def register_tool(self, **kwargs):
+        declared_source = kwargs.pop("source", self.source)
+        if declared_source != self.source:
+            raise ValueError(
+                f"插件 source 必须为加载器冻结的 {self.source}，不能声明 {declared_source}"
+            )
+        kwargs.setdefault("version", self.version)
+        return self._register_tool(source=self.source, **kwargs)
 
 
 class PluginManager:
@@ -48,7 +62,16 @@ class PluginManager:
         register = getattr(plugin, "register", None)
         if not callable(register):
             raise TypeError(f"插件 {name} 必须提供 register(context) 函数")
-        register(PluginContext(register_tool=self.registry.register_tool))
+        if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", name) is None:
+            raise ValueError("插件名必须是稳定标识符")
+        version = str(getattr(plugin, "__version__", "0.0.0"))
+        register(
+            PluginContext(
+                register_tool=self.registry.register_tool,
+                source=f"plugin:{name}",
+                version=version,
+            )
+        )
         if name not in self.loaded:
             self.loaded.append(name)
         return name

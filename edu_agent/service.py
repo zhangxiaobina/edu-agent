@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from .agent.graph import _select_tools, run_agent
+from .agent.graph import _select_tool_manifest, run_agent
 from .agent.loop_journal import frozen_route_shape, tool_manifest_hash
 from .agent.prompts import SYSTEM_PROMPT
 from .agent.turn_finalizer import FinalizationResult, TurnFinalizer
@@ -267,6 +267,24 @@ class EduAgentService:
             approval_ttl_seconds=self.config.transaction.approval_ttl_seconds,
         )
 
+    def _model_supports_tool_calling(self) -> bool:
+        """Read the frozen model route capability without assuming a Gateway."""
+
+        resolver = getattr(self.engine, "effective_capabilities", None)
+        if callable(resolver):
+            capabilities = resolver()
+            value = getattr(capabilities, "tool_calling", None)
+            if value is not None:
+                return bool(value)
+        routes = self.engine.begin_turn_routes()
+        if routes:
+            value = getattr(getattr(routes[0], "capabilities", None), "tool_calling", None)
+            if value is not None:
+                return bool(value)
+        # Legacy/mock engines have no route declaration; preserve their old
+        # tool-calling behavior and treat capability as known-by-contract.
+        return True
+
     def _assert_recovery_runtime_identity(
         self,
         context: RunContext,
@@ -274,15 +292,38 @@ class EduAgentService:
     ) -> None:
         if decision.tool_manifest_hash is None:
             return
-        tools = _select_tools(
+        manifest = _select_tool_manifest(
             self.tools_provider,
             context,
             self._execution_policy(),
+            model_tool_calling=self._model_supports_tool_calling(),
         )
-        if tool_manifest_hash(tools) != decision.tool_manifest_hash:
+        context.bind_tool_manifest(manifest)
+        current_hashes = {manifest.manifest_hash}
+        # Compatibility for R2 journals that hashed only the OpenAI schema
+        # list.  New runs always persist the richer manifest hash.
+        current_hashes.add(tool_manifest_hash(manifest.to_openai_tools()))
+        if decision.tool_manifest_hash not in current_hashes:
             raise RunJournalIdentityError(
                 "run tool manifest changed before recovery",
                 run_id=context.run_id,
+            )
+        if decision.tool_manifest_hash != manifest.manifest_hash:
+            # Keep the legacy journal identity for this resumed run while
+            # making the compatibility decision explicit and auditable.  The
+            # executor still receives the richer frozen manifest and checks
+            # every live entry before dispatch.
+            context._tool_manifest_hash_override = decision.tool_manifest_hash
+            self.state_store.record_audit_event(
+                actor_id=context.actor_id,
+                tenant_id=context.tenant_id,
+                action="tool_manifest.compatibility",
+                resource=f"run:{context.run_id}",
+                decision="legacy_schema_hash_accepted",
+                details={
+                    "legacy_hash": decision.tool_manifest_hash,
+                    "canonical_manifest_hash": manifest.manifest_hash,
+                },
             )
         route = RedactionPolicy().redact(frozen_route_shape(self.engine))
         if json.dumps(route, sort_keys=True, separators=(",", ":"), default=str) != json.dumps(
@@ -732,12 +773,20 @@ class EduAgentService:
             context=context,
         )
         policy = self._execution_policy()
+        manifest = _select_tool_manifest(
+            self.tools_provider,
+            context,
+            policy,
+            model_tool_calling=self._model_supports_tool_calling(),
+        )
+        context.bind_tool_manifest(manifest)
         executor = PolicyToolExecutor(
             self.tools_provider,
             policy=policy,
             approval_handler=self.approval_handler,
             state_store=self.state_store,
             result_budget=self.result_budget,
+            manifest=manifest,
         )
         context_payload = {
             "estimated_tokens": snapshot.estimated_tokens,
@@ -772,6 +821,7 @@ class EduAgentService:
                     ).get("id")
                 ),
                 loop_fault_injector=self.loop_fault_injector,
+                tool_manifest=manifest,
             )
             context.check_control("messages.before_final_commit")
             context.emit_run_event(

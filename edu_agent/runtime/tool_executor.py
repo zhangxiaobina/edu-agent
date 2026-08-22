@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -20,6 +21,12 @@ from .transactions import (
     approval_scope,
     idempotency_key,
     payload_hash,
+)
+from ..tools.manifest import (
+    ToolEffect,
+    ToolManifest,
+    ToolManifestMismatch,
+    manifest_entry_matches,
 )
 
 
@@ -134,6 +141,7 @@ class PolicyToolExecutor:
         state_store=None,
         result_budget=None,
         transaction_runtime: TransactionalToolRuntime | None = None,
+        manifest: ToolManifest | None = None,
     ):
         self.provider = provider
         self.policy = policy or ExecutionPolicy()
@@ -143,6 +151,7 @@ class PolicyToolExecutor:
         self.transaction_runtime = transaction_runtime or TransactionalToolRuntime(
             state_store=state_store
         )
+        self.manifest = manifest
 
     def execute_raw(
         self,
@@ -155,10 +164,63 @@ class PolicyToolExecutor:
         tool_call_id: str | None = None,
         plan_step_id: str | None = None,
         caller_idempotency_key: str | None = None,
+        manifest: ToolManifest | None = None,
     ) -> ToolOutcome:
+        frozen_manifest = (
+            manifest
+            if manifest is not None
+            else self.manifest
+            if self.manifest is not None
+            else context.tool_manifest
+        )
+        started = time.monotonic()
+        if frozen_manifest is not None:
+            if hasattr(frozen_manifest, "matches_context") and not frozen_manifest.matches_context(context):
+                return self._finish(
+                    context,
+                    name,
+                    {"_raw": raw_arguments},
+                    started,
+                    ToolOutcome(
+                        False,
+                        error={
+                            "code": "TOOL_MANIFEST_MISMATCH",
+                            "message": "工具 manifest 与当前 actor/tenant/role/course 作用域不一致",
+                        },
+                    ),
+                    tool_call_id=tool_call_id,
+                )
+            try:
+                spec = self._spec(name, manifest=frozen_manifest)
+            except ToolManifestMismatch as error:
+                return self._finish(
+                    context,
+                    name,
+                    {"_raw": raw_arguments},
+                    started,
+                    ToolOutcome(
+                        False,
+                        error={"code": "TOOL_MANIFEST_MISMATCH", "message": str(error)},
+                    ),
+                    tool_call_id=tool_call_id,
+                )
+            if spec is None:
+                return self._finish(
+                    context,
+                    name,
+                    {"_raw": raw_arguments},
+                    started,
+                    ToolOutcome(
+                        False,
+                        error={
+                            "code": "TOOL_NOT_IN_MANIFEST",
+                            "message": f"工具 {name} 不在本 run 冻结的工具面内",
+                        },
+                    ),
+                    tool_call_id=tool_call_id,
+                )
         arguments, parse_error = parse_tool_arguments(raw_arguments)
         if parse_error is not None:
-            started = time.monotonic()
             return self._finish(
                 context,
                 name,
@@ -176,6 +238,7 @@ class PolicyToolExecutor:
             tool_call_id=tool_call_id,
             plan_step_id=plan_step_id,
             caller_idempotency_key=caller_idempotency_key,
+            manifest=frozen_manifest,
         )
 
     def execute(
@@ -189,6 +252,7 @@ class PolicyToolExecutor:
         tool_call_id: str | None = None,
         plan_step_id: str | None = None,
         caller_idempotency_key: str | None = None,
+        manifest: ToolManifest | None = None,
     ) -> ToolOutcome:
         started = time.monotonic()
         context.check_control("tool.before_call")
@@ -218,7 +282,58 @@ class PolicyToolExecutor:
                 ),
                 tool_call_id=tool_call_id,
             )
-        spec = self._spec(name)
+        frozen_manifest = (
+            manifest
+            if manifest is not None
+            else self.manifest
+            if self.manifest is not None
+            else context.tool_manifest
+        )
+        if frozen_manifest is not None and hasattr(frozen_manifest, "matches_context"):
+            if not frozen_manifest.matches_context(context):
+                return self._finish(
+                    context,
+                    name,
+                    arguments,
+                    started,
+                    ToolOutcome(
+                        False,
+                        error={
+                            "code": "TOOL_MANIFEST_MISMATCH",
+                            "message": "工具 manifest 与当前 actor/tenant/role/course 作用域不一致",
+                        },
+                    ),
+                    tool_call_id=tool_call_id,
+                )
+        if frozen_manifest is not None and not frozen_manifest.contains(name):
+            return self._finish(
+                context,
+                name,
+                arguments,
+                started,
+                ToolOutcome(
+                    False,
+                    error={
+                        "code": "TOOL_NOT_IN_MANIFEST",
+                        "message": f"工具 {name} 不在本 run 冻结的工具面内",
+                    },
+                ),
+                tool_call_id=tool_call_id,
+            )
+        try:
+            spec = self._spec(name, manifest=frozen_manifest)
+        except ToolManifestMismatch as error:
+            return self._finish(
+                context,
+                name,
+                arguments,
+                started,
+                ToolOutcome(
+                    False,
+                    error={"code": "TOOL_MANIFEST_MISMATCH", "message": str(error)},
+                ),
+                tool_call_id=tool_call_id,
+            )
         if spec is None:
             return self._finish(
                 context,
@@ -281,7 +396,7 @@ class PolicyToolExecutor:
                 ),
                 tool_call_id=tool_call_id,
             )
-        if name == "run_code" and not self.policy.allow_local_code_execution:
+        if spec.effect is ToolEffect.CODE_EXECUTION and not self.policy.allow_local_code_execution:
             return self._finish(
                 context,
                 name,
@@ -296,7 +411,20 @@ class PolicyToolExecutor:
                 ),
                 tool_call_id=tool_call_id,
             )
-        if name == "run_code":
+        availability = getattr(self.provider, "tool_available", None)
+        if callable(availability) and not self._tool_is_available(availability, name, context):
+            return self._finish(
+                context,
+                name,
+                arguments,
+                started,
+                ToolOutcome(
+                    False,
+                    error={"code": "TOOL_UNAVAILABLE", "message": f"工具 {name} 当前健康状态不可用"},
+                ),
+                tool_call_id=tool_call_id,
+            )
+        if spec.effect is ToolEffect.CODE_EXECUTION:
             approval_outcome = self._approve_code_execution(
                 spec, arguments, context, started=started, tool_call_id=tool_call_id,
             )
@@ -317,16 +445,31 @@ class PolicyToolExecutor:
         try:
             contextual_dispatch = getattr(self.provider, "dispatch_with_context", None)
             if callable(contextual_dispatch):
-                result = contextual_dispatch(name, arguments, context, conn=conn)
+                result = self._dispatch_with_optional_manifest(
+                    contextual_dispatch,
+                    name,
+                    arguments,
+                    context,
+                    conn,
+                    frozen_manifest,
+                    contextual=True,
+                )
             else:
-                result = self.provider.dispatch(name, arguments, conn=conn)
+                result = self._dispatch_with_optional_manifest(
+                    self.provider.dispatch,
+                    name,
+                    arguments,
+                    context,
+                    conn,
+                    frozen_manifest,
+                )
             context.check_control("tool.after_call")
             if isinstance(result, dict) and "error" in result:
                 outcome = ToolOutcome(
                     False,
                     error={"code": "TOOL_ERROR", "message": str(result["error"])},
                 )
-            elif name == "run_code" and isinstance(result, dict) and not result.get("success"):
+            elif spec.effect is ToolEffect.CODE_EXECUTION and isinstance(result, dict) and not result.get("success"):
                 code = str(result.get("status") or result.get("outcome") or "CODE_EXECUTION_FAILED")
                 outcome = ToolOutcome(
                     False,
@@ -620,12 +763,81 @@ class PolicyToolExecutor:
             operation=operation,
         )
 
-    def _spec(self, name: str):
+    def _spec(self, name: str, *, manifest: ToolManifest | None = None):
+        if manifest is not None:
+            entry = manifest.get(name)
+            if entry is None:
+                return None
+            try:
+                current = self.provider.get_spec(name) if hasattr(self.provider, "get_spec") else None
+            except Exception as error:
+                raise ToolManifestMismatch(
+                    f"工具 {name} 当前 registry 元数据不可读取: {type(error).__name__}"
+                ) from error
+            if current is None:
+                raise ToolManifestMismatch(
+                    f"工具 {name} 已从 provider registry 消失，拒绝静默漂移"
+                )
+            if not manifest_entry_matches(entry, current):
+                raise ToolManifestMismatch(
+                    f"工具 {name} 的 registry 元数据/handler 已变化，拒绝执行"
+                )
+            function_map = getattr(self.provider, "TOOL_FUNCTIONS", None)
+            if (
+                isinstance(function_map, dict)
+                and entry.handler is not None
+                and function_map.get(name) is not entry.handler
+            ):
+                raise ToolManifestMismatch(
+                    f"工具 {name} 的 registry handler 映射已变化，拒绝执行"
+                )
         if hasattr(self.provider, "get_spec"):
             return self.provider.get_spec(name)
         from ..tools import registry
 
         return registry.get_spec(name)
+
+    @staticmethod
+    def _tool_is_available(checker, name: str, context: RunContext) -> bool:
+        """Call old and new provider health contracts without broad retries."""
+
+        try:
+            parameters = inspect.signature(checker).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_context = "context" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD
+            for item in parameters.values()
+        )
+        return bool(checker(name, context=context)) if accepts_context else bool(checker(name))
+
+    @staticmethod
+    def _dispatch_with_optional_manifest(
+        dispatch,
+        name: str,
+        arguments: dict,
+        context: RunContext,
+        conn,
+        manifest: ToolManifest | None,
+        *,
+        contextual: bool = False,
+    ):
+        """Dispatch using the provider's declared signature, avoiding TypeError retries."""
+
+        try:
+            parameters = inspect.signature(dispatch).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_manifest = "manifest" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD
+            for item in parameters.values()
+        )
+        kwargs = {"conn": conn}
+        if accepts_manifest:
+            kwargs["manifest"] = manifest
+        if contextual:
+            return dispatch(name, arguments, context, **kwargs)
+        return dispatch(name, arguments, **kwargs)
 
     def _finish(
         self,

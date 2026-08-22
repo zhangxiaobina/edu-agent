@@ -20,6 +20,14 @@ from ..runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor, ToolOut
 from ..state import RunPhase
 from ..state.store import RunCancelled
 from ..tools import registry
+from ..tools.manifest import (
+    ToolCapability,
+    ToolManifest,
+    ToolManifestMismatch,
+    canonical_schema_hash,
+    manifest_from_tools,
+    validate_function_schema,
+)
 from .loop_journal import AgentLoopJournal
 from .prompts import SYSTEM_PROMPT
 
@@ -33,8 +41,30 @@ class AgentState(TypedDict, total=False):
 
 
 def _select_tools(provider, context: RunContext, policy: ExecutionPolicy) -> list[dict]:
+    return _select_tool_manifest(provider, context, policy).to_openai_tools()
+
+
+def _select_tool_manifest(
+    provider,
+    context: RunContext,
+    policy: ExecutionPolicy,
+    *,
+    model_tool_calling: bool = True,
+    model_capabilities=None,
+    enabled_capabilities=None,
+) -> ToolManifest:
+    builder = getattr(provider, "build_tool_manifest", None)
+    if callable(builder):
+        return builder(
+            context=context,
+            role=context.role,
+            allow_local_code_execution=policy.allow_local_code_execution,
+            model_tool_calling=model_tool_calling,
+            model_capabilities=model_capabilities,
+            enabled_capabilities=enabled_capabilities,
+        )
     try:
-        return provider.openai_tools(
+        tools = provider.openai_tools(
             role=context.role,
             allow_local_code_execution=policy.allow_local_code_execution,
         )
@@ -49,7 +79,23 @@ def _select_tools(provider, context: RunContext, policy: ExecutionPolicy) -> lis
             if name == "run_code" and not policy.allow_local_code_execution:
                 continue
             selected.append(tool)
-    return selected
+        tools = selected
+    specs = {}
+    if hasattr(provider, "get_spec"):
+        for tool in tools:
+            name = tool["function"]["name"]
+            spec = provider.get_spec(name)
+            if spec is not None:
+                specs[name] = spec
+    return manifest_from_tools(
+        tools,
+        specs=specs,
+        default_capability=ToolCapability.TOOL_CALLING.value,
+        actor_id=context.actor_id,
+        tenant_id=context.tenant_id,
+        role=context.role,
+        course_ids=context.course_ids,
+    )
 
 
 def _scope_tools(tools: list[dict], step) -> list[dict]:
@@ -69,6 +115,31 @@ def _scope_tools(tools: list[dict], step) -> list[dict]:
         )
         selected.append(scoped)
     return selected
+
+
+def _validate_tool_schema_subset(
+    tool_schemas: list[dict], manifest: ToolManifest,
+) -> None:
+    """Allow callers to narrow a frozen surface, never replace its schemas."""
+
+    for item in tool_schemas:
+        function = item.get("function") if isinstance(item, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        entry = manifest.get(name) if isinstance(name, str) else None
+        if entry is None or not isinstance(function, dict):
+            raise ToolManifestMismatch(
+                f"传入的 tool_schemas 含未冻结工具: {name!r}"
+            )
+        try:
+            normalized = validate_function_schema(function, name=name)
+        except Exception as error:
+            raise ToolManifestMismatch(
+                f"传入的 tool_schemas 含无效 schema {name!r}: {error}"
+            ) from error
+        if canonical_schema_hash(normalized) != entry.canonical_schema_hash:
+            raise ToolManifestMismatch(
+                f"传入的 tool_schemas 修改了冻结工具 {name} 的 schema"
+            )
 
 
 def _plan_stop_message(coordinator: PlanCoordinator, status: str, reason: str) -> str:
@@ -92,6 +163,7 @@ def build_agent(
     plan_coordinator: PlanCoordinator | None = None,
     evidence_verifier: EvidenceVerifier | None = None,
     loop_journal: AgentLoopJournal | None = None,
+    tool_manifest: ToolManifest | None = None,
     entry_point: str = "agent",
 ):
     """编译 Agent 图；生产控制由 RunContext 和 ToolExecutor 承担。"""
@@ -107,7 +179,33 @@ def build_agent(
         provider,
         policy=ExecutionPolicy.legacy_demo(),
     )
-    tools = tool_schemas or _select_tools(provider, context, executor.policy)
+    if tool_manifest is not None:
+        context.bind_tool_manifest(tool_manifest)
+    manifest = (
+        tool_manifest
+        if tool_manifest is not None
+        else context.tool_manifest
+        if context.tool_manifest is not None
+        else getattr(executor, "manifest", None)
+    )
+    if manifest is None:
+        manifest = _select_tool_manifest(provider, context, executor.policy)
+        context.bind_tool_manifest(manifest)
+    elif context.tool_manifest is None:
+        context.bind_tool_manifest(manifest)
+    executor_manifest = getattr(executor, "manifest", None)
+    if (
+        executor_manifest is not None
+        and executor_manifest.manifest_hash != manifest.manifest_hash
+    ):
+        raise ToolManifestMismatch("executor 与 run 冻结的 tool manifest 不一致")
+    tools = tool_schemas if tool_schemas is not None else (
+        manifest.to_openai_tools()
+        if isinstance(manifest, ToolManifest)
+        else _select_tools(provider, context, executor.policy)
+    )
+    if tool_schemas is not None and isinstance(manifest, ToolManifest):
+        _validate_tool_schema_subset(tool_schemas, manifest)
 
     def agent_node(state: AgentState):
         context.check_control("model.before_call")
@@ -262,6 +360,7 @@ def build_agent(
                             context,
                             conn=db_conn,
                             allowed_tools=allowed_tools,
+                            manifest=manifest,
                             tool_call_id=call_id,
                             plan_step_id=state.get("active_step_id"),
                         )
@@ -496,6 +595,7 @@ def run_agent(
     force_plan: bool | None = None,
     context_checkpoint_id: str | None = None,
     loop_fault_injector=None,
+    tool_manifest: ToolManifest | None = None,
 ) -> dict:
     """运行一次 Agent turn，返回回答、轨迹、消息、预算和模型 usage。"""
     context = run_context or RunContext.create(
@@ -511,11 +611,37 @@ def run_agent(
         policy=ExecutionPolicy.legacy_demo(),
         state_store=state_store,
     )
-    tools = tool_schemas or _select_tools(provider, context, executor.policy)
+    if tool_manifest is not None:
+        context.bind_tool_manifest(tool_manifest)
+    manifest = (
+        tool_manifest
+        if tool_manifest is not None
+        else context.tool_manifest
+        if context.tool_manifest is not None
+        else getattr(executor, "manifest", None)
+    )
+    if manifest is None:
+        manifest = _select_tool_manifest(provider, context, executor.policy)
+        context.bind_tool_manifest(manifest)
+    elif context.tool_manifest is None:
+        context.bind_tool_manifest(manifest)
+    executor_manifest = getattr(executor, "manifest", None)
+    if (
+        executor_manifest is not None
+        and executor_manifest.manifest_hash != manifest.manifest_hash
+    ):
+        raise ToolManifestMismatch("executor 与 run 冻结的 tool manifest 不一致")
+    if executor_manifest is None:
+        executor.manifest = manifest
+    tools = tool_schemas if tool_schemas is not None else manifest.to_openai_tools()
+    if tool_schemas is not None:
+        _validate_tool_schema_subset(tool_schemas, manifest)
     loop_journal = AgentLoopJournal(
         state_store or executor.state_store,
         context,
         tools=tools,
+        manifest=manifest,
+        manifest_hash_override=getattr(context, "_tool_manifest_hash_override", None),
         engine=engine,
         context_checkpoint_id=context_checkpoint_id,
         fault_injector=loop_fault_injector,
@@ -607,6 +733,7 @@ def run_agent(
         plan_coordinator=coordinator,
         evidence_verifier=verifier,
         loop_journal=loop_journal if loop_journal.active else None,
+        tool_manifest=manifest,
         entry_point=entry_point,
     )
     messages = initial_messages or [

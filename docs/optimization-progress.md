@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R2.7
-- next_prompt: R3.1
+- last_completed_prompt: R3.1
+- next_prompt: R3.2
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
-- stage_gate: passed
-- stage_gate_reason: R0-R2 门禁已通过；R2 的真实 Provider/Agent delta、统一取消、增量 journal、幂等 finalizer、稳定 cursor 决策、五个进程重开窗口、持久 sequence/fence、两种 wire mode、真实 socket/API replay 和独立 R2 门禁均已验证
+- stage_gate: in_progress
+- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1 ToolManifest 切片已通过，R3 总门禁仍需 R3.2-R3.6 的 Provider、参数治理、并发和插件/MCP 收口
 
 ## Baseline Reproduction
 
@@ -738,3 +738,35 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R2 passed`；R0-R2 顶层 stage gate 为 `passed`。
 - next: R3.1，读取本交接、工具 registry/schema/插件/MCP、Plan 工具裁剪与 RunJournal manifest hash，冻结 run 级
   `ToolManifest`；保持工具顺序执行，不提前开始 R3.5 并发。
+
+### R3.1 - 2026-08-23
+
+- commit/evidence: 会话从 R2 gate=passed、工作区含本会话未提交改动的状态开始；本次未创建本地提交或推送，
+  未覆盖用户既有改动。未新增 SQLite migration、配置项或依赖。
+- inventory: 盘点并为 16 个内置工具建立显式 `source/version/schema_hash/capability/risk/effect/parallel_safe/`
+  `resource_keys/timeout/allowed_roles/data_classification`；`retrieve_course_materials` 仅在 RAG provider 可用时
+  附加，`run_code` 仅在隔离执行 provider 健康且能力完整时附加。工具执行仍严格按原 assistant call 顺序。
+- manifest: 新增不可变 `ToolManifestEntry`/`ToolManifest` 和确定性 canonical JSON/schema hash。manifest hash 绑定
+  actor、tenant、role、course scope 与按名称规范化的完整条目；Entry schema/分类/集合均冻结。Plan 的
+  `allowed_tools` 只收窄已冻结面，`build_agent` 拒绝未冻结或改写 schema 的工具列表。
+- registration: registry admission 完整校验 JSON Schema、同步 handler(conn, **parameters) 契约、稳定 name/source/version、
+  resource pointer/template、字段分类、effect/risk/mutation/parallel 组合和冲突。未知插件默认 `critical`、
+  `parallel_safe=false` 且 capability 缺失时不暴露；插件裸写/code-execution effect fail closed。健康探针异常、
+  代码后端不完整或 RAG 暂不可用均隐藏/拒绝工具，不靠工具名推断 effect。
+- runtime/recovery: Service/Agent run start 冻结 manifest，RunJournal 的 `tool_manifest_hash` 与
+  `tool_manifest.frozen` audit/Trace 同时记录 hash、scope 和脱敏元数据；executor 每次复验 manifest membership、
+  live schema/metadata/handler、ACL、course scope、审批和健康状态。插件注册、handler 替换、RAG/代码健康变化不能
+  改变既有 run 工具面。恢复 hash 不符直接拒绝；仅对 R2 旧 schema-list hash 做显式、可审计的
+  `tool_manifest.compatibility/legacy_schema_hash_accepted` 兼容决策，新 run 使用 richer manifest hash。
+- tests/verification: `uv lock --check`、`uv run --frozen --offline uv pip check`、全仓 ruff 和 `git diff --check` 通过；
+  ToolManifest/registry/Plan/MCP/RAG/plugin/code-execution/runtime/transaction/recovery 及扩展边界专项最终
+  `184 passed`；获准本机 loopback 复跑 `tests/test_stage8_boundaries_recovery_trace.py` 为 `13 passed`；
+  `zsh scripts/accept_stage8.sh` 完整通过，R2 内门禁 `141 passed`，最终全量离线回归 `439 passed`，数据边界和
+  eval lineage audit 均无 findings。
+- not_verified: 未访问公网或真实模型/Provider，未启动 Docker/Jobe；这些不属于本切片的离线通过条件。未迁移 SQLite
+  工具、未实现参数规范化/Repair、未实现任何工具并发，仍留给后续 R3 提示词。
+- residual_risks: R2 旧 schema-only hash 无法表达历史 metadata；当前只在 hash 与现行 schema list 完全匹配时接受，
+  并写明确 compatibility audit，后续可在 R3.6 收口时淘汰该兼容分支。MCP 远端工具必须提供完整 metadata/hash，
+  否则不进入 manifest。`ToolManifest` 只冻结当前进程 provider identity，跨主机 registry 发布/版本治理仍未实现。
+- gate: `R3.1 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
+- next: R3.2，建立 Canonical Teaching Provider，只迁移只读查询/分析/知识图谱切片；继续不做参数修复、并发或事务写工具迁移。

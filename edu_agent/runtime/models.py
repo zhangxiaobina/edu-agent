@@ -79,6 +79,8 @@ class RunContext:
         repr=False,
         compare=False,
     )
+    _tool_manifest: object | None = field(default=None, repr=False, compare=False)
+    _tool_manifest_hash_override: str | None = field(default=None, repr=False, compare=False)
 
     def bind_runtime_control(
         self,
@@ -130,6 +132,61 @@ class RunContext:
         the parent's fencing token.
         """
         self._control_check = control_check
+
+    @property
+    def tool_manifest(self):
+        return self._tool_manifest
+
+    @property
+    def tool_manifest_hash(self) -> str | None:
+        manifest = self._tool_manifest
+        return getattr(manifest, "manifest_hash", None) if manifest is not None else None
+
+    def bind_tool_manifest(self, manifest) -> None:
+        """Freeze the tool surface for this run; a second identity is rejected."""
+
+        manifest_hash = getattr(manifest, "manifest_hash", None)
+        if not isinstance(manifest_hash, str) or not manifest_hash.strip():
+            raise ValueError("run tool manifest must expose a non-empty manifest_hash")
+        matches_context = getattr(manifest, "matches_context", None)
+        if callable(matches_context) and not matches_context(self):
+            from ..state import RunJournalIdentityError
+
+            raise RunJournalIdentityError(
+                "tool manifest scope does not match run context",
+                run_id=self.run_id,
+            )
+        existing = self._tool_manifest
+        if existing is not None:
+            same_hash = getattr(existing, "manifest_hash", None) == manifest_hash
+            same_entries = False
+            existing_entries = getattr(existing, "entries", None)
+            incoming_entries = getattr(manifest, "entries", None)
+            if same_hash and existing_entries is not None and incoming_entries is not None:
+                try:
+                    existing_by_name = {item.name: item for item in existing_entries}
+                    incoming_by_name = {item.name: item for item in incoming_entries}
+                    same_entries = (
+                        existing_by_name.keys() == incoming_by_name.keys()
+                        and all(
+                            existing_by_name[name].to_dict() == incoming_by_name[name].to_dict()
+                            and (
+                                getattr(existing_by_name[name], "handler", None)
+                                is getattr(incoming_by_name[name], "handler", None)
+                            )
+                            for name in existing_by_name
+                        )
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    same_entries = False
+            if not same_hash or not same_entries:
+                from ..state import RunJournalIdentityError
+
+                raise RunJournalIdentityError(
+                    "run tool manifest cannot be replaced after freeze",
+                    run_id=self.run_id,
+                )
+        self._tool_manifest = manifest
 
     @classmethod
     def create(

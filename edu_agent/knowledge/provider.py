@@ -3,10 +3,18 @@ from __future__ import annotations
 import re
 import sqlite3
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol
 
+from ..tools.manifest import (
+    ToolCapability,
+    ToolEffect,
+    ToolManifest,
+    enabled_capability_set,
+    manifest_entry_matches,
+    manifest_from_tools,
+)
 from ..tools.registry import ToolSpec
 
 
@@ -475,16 +483,96 @@ class KnowledgeToolProvider:
             handler=lambda connection, **arguments: arguments,
             category="knowledge",
             risk_level="low",
+            source="builtin:edu_agent.rag",
+            version="1.0.0",
+            capability=ToolCapability.RAG.value,
+            effect=ToolEffect.READ,
+            parallel_safe=True,
+            resource_keys=("/course_id",),
+            timeout=30.0,
+        )
+
+    def build_tool_manifest(self, **kwargs) -> ToolManifest:
+        builder = getattr(self.base, "build_tool_manifest", None)
+        if callable(builder):
+            base_manifest = builder(**kwargs)
+        else:
+            tools = self.base.openai_tools(**{
+                key: value
+                for key, value in kwargs.items()
+                if key in {"role", "categories", "allow_local_code_execution"}
+            })
+            specs = {
+                name: self.base.get_spec(name)
+                for name in getattr(self.base, "tool_names", lambda: [])()
+                if hasattr(self.base, "get_spec")
+            }
+            base_manifest = manifest_from_tools(
+                tools,
+                specs=specs,
+                default_capability=ToolCapability.TOOL_CALLING.value,
+                actor_id=getattr(kwargs.get("context"), "actor_id", None),
+                tenant_id=getattr(kwargs.get("context"), "tenant_id", None),
+                role=kwargs.get("role") or getattr(kwargs.get("context"), "role", None),
+                course_ids=getattr(kwargs.get("context"), "course_ids", ()),
+            )
+        entries = list(base_manifest.entries)
+        context = kwargs.get("context")
+        role = kwargs.get("role") or getattr(context, "role", None)
+        categories = kwargs.get("categories")
+        enabled = kwargs.get("enabled_capabilities")
+        if enabled is None:
+            enabled = kwargs.get("capabilities")
+        enabled = set(enabled_capability_set(enabled) or ()) if enabled is not None else None
+        model_tool_calling = kwargs.get("model_tool_calling", True)
+        model_capabilities = kwargs.get("model_capabilities")
+        if model_capabilities is not None:
+            capability_mapping = model_capabilities
+            if not isinstance(capability_mapping, Mapping):
+                to_event = getattr(capability_mapping, "to_event", None)
+                capability_mapping = (
+                    to_event()
+                    if callable(to_event)
+                    else {
+                        name: getattr(model_capabilities, name)
+                        for name in ("tool_calling", "structured_output", "usage", "streaming")
+                        if hasattr(model_capabilities, name)
+                    }
+                )
+            if not isinstance(capability_mapping, Mapping):
+                raise ValueError("model_capabilities 必须是 mapping 或 capability object")
+            declared_tool_calling = capability_mapping.get(
+                "tool_calling", model_tool_calling
+            )
+            if not isinstance(declared_tool_calling, bool):
+                raise ValueError("model capability tool_calling 必须是 bool")
+            model_tool_calling = declared_tool_calling
+        if not isinstance(model_tool_calling, bool):
+            raise ValueError("model_tool_calling 必须是 bool")
+        if (
+            model_tool_calling
+            and self.knowledge.available()
+            and (role is None or role in self._spec.allowed_roles)
+            and (categories is None or "knowledge" in categories)
+            and (
+                enabled is None
+                or "*" in enabled
+                or "tool_calling" in enabled
+                or self._spec.capabilities <= enabled
+            )
+        ):
+            if self._spec.schema["name"] not in {entry.name for entry in entries}:
+                entries.append(self._spec.to_manifest_entry())
+        return ToolManifest(
+            tuple(entries),
+            actor_id=getattr(context, "actor_id", base_manifest.actor_id),
+            tenant_id=getattr(context, "tenant_id", base_manifest.tenant_id),
+            role=role or base_manifest.role,
+            course_ids=getattr(context, "course_ids", base_manifest.course_ids),
         )
 
     def openai_tools(self, **kwargs) -> list[dict]:
-        tools = self.base.openai_tools(**kwargs)
-        categories = kwargs.get("categories")
-        if self.knowledge.available() and (
-            categories is None or "knowledge" in categories
-        ):
-            tools.append({"type": "function", "function": self._spec.schema})
-        return tools
+        return self.build_tool_manifest(**kwargs).to_openai_tools()
 
     def tool_names(self) -> list[str]:
         names = list(self.base.tool_names())
@@ -493,17 +581,53 @@ class KnowledgeToolProvider:
         return names
 
     def get_spec(self, name: str):
-        if name == "retrieve_course_materials" and self.knowledge.available():
+        # Keep the declaration stable after a run freezes it.  Availability is
+        # a separate live health check, so a temporary RAG outage yields
+        # TOOL_UNAVAILABLE instead of pretending the registry metadata changed.
+        if name == "retrieve_course_materials":
             return self._spec
         return self.base.get_spec(name)
+
+    def get_manifest_entry(self, name: str):
+        spec = self.get_spec(name)
+        return spec.to_manifest_entry() if spec is not None else None
+
+    def tool_available(self, name: str, context=None) -> bool:
+        if name == "retrieve_course_materials":
+            return self.knowledge.available()
+        checker = getattr(self.base, "tool_available", None)
+        return bool(checker(name, context=context)) if callable(checker) else self.get_spec(name) is not None
 
     def dispatch(self, name: str, arguments: dict | None = None, conn=None) -> dict:
         if name == "retrieve_course_materials":
             return {"error": "知识检索需要带身份与课程作用域的执行上下文"}
         return self.base.dispatch(name, arguments, conn=conn)
 
-    def dispatch_with_context(self, name: str, arguments: dict, context, conn=None) -> dict:
+    def dispatch_with_context(
+        self,
+        name: str,
+        arguments: dict,
+        context,
+        conn=None,
+        *,
+        manifest: ToolManifest | None = None,
+    ) -> dict:
+        if manifest is not None:
+            entry = manifest.get(name)
+            current = self.get_manifest_entry(name)
+            if entry is None:
+                return {"error": "工具不在本 run 冻结的 manifest 中"}
+            if current is None or not manifest_entry_matches(entry, current):
+                return {"error": "知识工具 registry 在 run 内发生变化，manifest 身份不匹配"}
         if name != "retrieve_course_materials":
+            dispatch = getattr(self.base, "dispatch_with_context", None)
+            if callable(dispatch):
+                try:
+                    return dispatch(name, arguments, context, conn=conn, manifest=manifest)
+                except TypeError as error:
+                    if "manifest" not in str(error):
+                        raise
+                    return dispatch(name, arguments, context, conn=conn)
             return self.base.dispatch(name, arguments, conn=conn)
         course_id = int(arguments["course_id"])
         results = self.knowledge.search(

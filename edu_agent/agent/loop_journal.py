@@ -6,6 +6,7 @@ from typing import Any
 
 from ..observability.redaction import RedactionPolicy
 from ..runtime.transactions import FaultInjector
+from ..tools.manifest import ToolManifest, canonical_json
 from ..state import (
     RunJournalIdentityError,
     RunJournalNotFound,
@@ -16,18 +17,17 @@ from ..state import (
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
+    return canonical_json(value)
 
 
-def tool_manifest_hash(tools: list[dict]) -> str:
-    return hashlib.sha256(_canonical(tools).encode("utf-8")).hexdigest()
+def tool_manifest_hash(tools: list[dict] | ToolManifest) -> str:
+    if isinstance(tools, ToolManifest):
+        return tools.manifest_hash
+    # Keep the pre-R3 schema-list hash byte-for-byte compatible for recovery of
+    # R2 journals.  New runs use ToolManifest.manifest_hash, whose entry order
+    # is canonicalized independently.
+    canonical_tools = [json.loads(_canonical(tool)) for tool in tools]
+    return hashlib.sha256(_canonical(canonical_tools).encode("utf-8")).hexdigest()
 
 
 def frozen_route_shape(engine) -> dict[str, Any]:
@@ -47,13 +47,20 @@ class AgentLoopJournal:
         context,
         *,
         tools: list[dict],
+        manifest: ToolManifest | None = None,
+        manifest_hash_override: str | None = None,
         engine,
         context_checkpoint_id: str | None = None,
         fault_injector: FaultInjector | None = None,
     ):
         self.state_store = state_store
         self.context = context
-        self.manifest_hash = tool_manifest_hash(tools)
+        self.tools = tools
+        self.manifest = manifest
+        self.canonical_manifest_hash = (
+            manifest.manifest_hash if manifest is not None else tool_manifest_hash(tools)
+        )
+        self.manifest_hash = manifest_hash_override or self.canonical_manifest_hash
         self.route = RedactionPolicy().redact(frozen_route_shape(engine))
         self.context_checkpoint_id = context_checkpoint_id
         self.faults = fault_injector or FaultInjector()
@@ -118,6 +125,67 @@ class AgentLoopJournal:
             raise RunJournalIdentityError(
                 "run budget snapshot counters are inconsistent",
                 run_id=self.context.run_id,
+            )
+        details = {
+            "run_id": self.context.run_id,
+            "session_id": self.context.session_id,
+            "actor_id": self.context.actor_id,
+            "tenant_id": self.context.tenant_id,
+            "role": self.context.role,
+            "course_ids": sorted(self.context.course_ids),
+            "manifest_hash": self.manifest_hash,
+            "tool_manifest_hash": self.manifest_hash,
+            "canonical_manifest_hash": self.canonical_manifest_hash,
+            "tool_names": [
+                item.name for item in self.manifest.entries
+            ] if isinstance(self.manifest, ToolManifest) else [
+                item.get("function", {}).get("name") for item in self.tools
+            ],
+            "entries": [
+                entry.to_dict(include_schema=False)
+                for entry in self.manifest.entries
+            ] if isinstance(self.manifest, ToolManifest) else [],
+        }
+        connector = getattr(self.state_store, "connect", None)
+        existing_audit = None
+        existing_trace = None
+        if callable(connector):
+            try:
+                with connector() as connection:
+                    existing_audit = connection.execute(
+                        "SELECT 1 FROM audit_events WHERE action=? AND resource=? AND decision=? LIMIT 1",
+                        (
+                            "tool_manifest.frozen",
+                            f"run:{self.context.run_id}",
+                            "frozen",
+                        ),
+                    ).fetchone()
+                    existing_trace = connection.execute(
+                        "SELECT 1 FROM provider_events WHERE run_id=? AND provider=? AND event=? LIMIT 1",
+                        (self.context.run_id, "runtime", "tool_manifest.frozen"),
+                    ).fetchone()
+            except Exception:
+                # Lightweight test stores may not expose the optional trace
+                # tables.  The durable journal hash remains authoritative.
+                existing_audit = existing_trace = None
+        recorder = getattr(self.state_store, "record_audit_event", None)
+        if callable(recorder) and existing_audit is None:
+            recorder(
+                actor_id=self.context.actor_id,
+                tenant_id=self.context.tenant_id,
+                action="tool_manifest.frozen",
+                resource=f"run:{self.context.run_id}",
+                decision="frozen",
+                details=details,
+            )
+        trace_recorder = getattr(self.state_store, "record_provider_event", None)
+        if callable(trace_recorder) and existing_trace is None:
+            trace_recorder(
+                run_id=self.context.run_id,
+                provider="runtime",
+                event="tool_manifest.frozen",
+                attempt=0,
+                details=details,
             )
         return snapshot
 

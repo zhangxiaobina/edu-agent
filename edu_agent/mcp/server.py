@@ -17,6 +17,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from ..tools import registry
+from ..tools.manifest import ToolEffect
 
 
 def _configure_code_execution() -> None:
@@ -44,6 +45,26 @@ async def list_tools() -> list[types.Tool]:
             name=tool["function"]["name"],
             description=tool["function"].get("description", ""),
             inputSchema=tool["function"]["parameters"],
+            annotations=types.ToolAnnotations(
+                readOnlyHint=(
+                    registry.get_spec(tool["function"]["name"]).effect.value
+                    in {"read", "pure"}
+                ),
+                destructiveHint=(
+                    registry.get_spec(tool["function"]["name"]).effect.value
+                    in {"write", "conditional_write", "code_execution"}
+                ),
+                idempotentHint=(
+                    registry.get_spec(tool["function"]["name"]).effect.value
+                    in {"read", "pure"}
+                ),
+                openWorldHint=False,
+            ),
+            _meta={
+                "edu_agent": registry.get_spec(
+                    tool["function"]["name"]
+                ).to_manifest_entry().to_dict(include_schema=False),
+            },
         )
         for tool in registry.openai_tools(allow_local_code_execution=False)
     ]
@@ -58,7 +79,7 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
     """
     normalized = arguments or {}
     spec = registry.get_spec(name)
-    if name == "run_code":
+    if spec is not None and spec.effect is ToolEffect.CODE_EXECUTION:
         result = {
             "error": "MCP_CODE_EXECUTION_REQUIRES_APPROVAL",
             "message": "MCP 独立 server 不持有 actor/session 审批上下文",
