@@ -88,7 +88,11 @@ class TraceCursor(str):
 
 
 class TraceRepository:
-    """Projects existing state tables into one deterministic, read-only trace."""
+    """Projects durable state tables into the deterministic RuntimeEvent v1 trace.
+
+    RunEventBus transport events are deliberately not a source: persisted domain
+    and audit rows remain the only Trace truth and can rebuild the derived index.
+    """
 
     def __init__(self, state_store, *, redaction: RedactionPolicy | None = None):
         self.state_store = state_store

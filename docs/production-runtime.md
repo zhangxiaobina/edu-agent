@@ -302,6 +302,16 @@ tenant/actor/session 分目录，读取必须匹配 owner 并通过路径与 has
 这些表使一次失败可以回答“哪个用户、哪次 run、哪个工具、什么参数、为什么被拒绝或失败”，
 而不是只剩终端日志。
 
+R2.1 另定义了进程内 `RunEvent v2` 传输 envelope 和 `RunEventBus`。事件按 `(run_id, attempt)` 在线程安全的
+临界区分配单调 sequence，并用 `writer_id + fencing_token` 拒绝旧 writer；`completed/error` 后关闭 stream。
+订阅是 future-only 有界 buffer，stream state 和活跃订阅数也有 fail-closed 总上限；溢出只隔离慢消费者，
+主动取消只取消订阅，不取消 run。所有 payload 在发布前经过共享 `RedactionPolicy`，但 EventBus 不写
+SQLite、不保留历史，也不提供恢复游标。
+
+持久边界保持不变：`TraceRepository` 继续只从上述业务/审计表投影 `RuntimeEvent v1`，EventBus 不是第二套
+Trace 真相；恢复 sequence/loop cursor 由 R2.2 的 `RunJournal` 承担。当前 Provider 和 Agent Loop 仍同步，SSE
+仍为 `accepted/keepalive/completed`，本阶段没有改变 assistant/tool 消息的提交时机。
+
 ## 可插拔扩展
 
 - 本地 registry、MCP provider 都实现 `ToolProvider` 契约。

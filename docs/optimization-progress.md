@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R1.5
-- next_prompt: R2.1
+- last_completed_prompt: R2.1
+- next_prompt: R2.2
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
-- stage_gate: passed
-- stage_gate_reason: R0 与 R1 门禁均已通过；下一阶段为 R2.1。R2-R5 仍未实现，不得在 README 中写成已完成
+- stage_gate: in_progress
+- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent 协议已完成；R2 Journal、真流式、统一取消与恢复门禁仍未完成
 
 ## Baseline Reproduction
 
@@ -452,3 +452,46 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   attempt 审计、usage/终态 ownership 和 key 脱敏；本阶段没有开始 token streaming。
 - next: R2.1，先定义 typed `RunEvent v2`、单调 sequence、单 writer 发布协议；不得回头把 R2-R5 能力写成当前
   已实现，也不得引入凭据池或跳过 R2 前置门禁。
+
+### R2.1 - 2026-08-22
+
+- commit/evidence: 会话从与 `origin/main` 同步的 R1.5 提交
+  `e0be594cbffeaa3563e6a12adad486063ac13172` 开始，开始时工作区无改动。实现未创建本地提交，后续提交
+  哈希不在本交接中预填；前置 `R1 gate=passed` 已由源码、测试和上一交接共同确认。
+- v1 inventory/compatibility: `RuntimeEvent v1` 的生产侧仍是 runs/messages/session lease、Provider attempt、
+  Plan/Evidence、tool/operation、Artifact、delegation、scheduler/audit 等持久业务表及其同事务
+  `trace_event_index` trigger；消费侧仍是 `TraceRepository`、Service/API 查询和 JSON/JSONL 导出、CLI inspector、
+  benchmark 及可选 telemetry。`SCHEMA_VERSION=edu-agent.runtime-event.v1`、查询 cursor、owner scope、导出 envelope
+  均未改变；`TraceRepository` 明确只投影持久审计/业务状态，不读取 EventBus，因此没有第二套 Trace 真相源。
+- run-event schema: 在现有 observability 边界新增 `edu-agent.run-event.v2`，稳定 envelope 包含 event/schema、
+  run/session、attempt、sequence、UTC timestamp、writer/fencing identity 和 payload。typed family 覆盖
+  `run.phase`（accepted/planning/model/tools/verifying/finalizing/terminal）、`text.delta`、
+  `tool_call.delta`、`usage`、`plan.updated`、`tool.started/completed`、`context.compacted`、
+  `fallback.activated`、`completed/error`；反序列化拒绝缺失/未知字段、坏类型、naive time 和非有限 JSON。
+  payload 在发布前经过注入的共享 `RedactionPolicy`，`RunEvent` 构造边界再执行默认 fail-closed 脱敏。
+- publication protocol: `RunEventBus` 在一个临界区内按 `(run_id, attempt)` 校验 writer、分配连续 sequence 并
+  fan-out；同 token 不允许不同 writer，更高 fencing token 接管后延续 sequence，旧 handle 的结果被拒绝。
+  `completed/error` 原子设置 terminal tombstone，此后拒绝所有新事件和新 writer 接管。`sequence_start` 只作为
+  未来 RunJournal 恢复注入点；总线本身 future-only，不落库、不回放，也不拥有恢复 cursor。
+- backpressure/cancellation: 每个订阅 buffer、活跃订阅数和 stream state 数均有固定上限并 fail closed；单个
+  buffer 满时只断开该慢消费者、清空其不完整队列并返回 `SlowConsumerError`，不阻塞生产者或其他消费者。
+  主动取消会唤醒阻塞 waiter，但只取消订阅，不等同于 run cancellation；terminal 订阅可排空已接收事件后关闭。
+  terminal tombstone 不做静默容量淘汰，只在 EventBus 关闭时统一释放。
+- scope/migrations/config: 没有数据库 migration、依赖、lockfile、环境变量或应用配置变化；没有修改
+  `api.py`、`service.py`、Provider adapter、Agent Loop、StateStore schema 或消息提交路径。本会话只使用 fake
+  producer；当前 Provider 仍同步，SSE 仍为 `accepted/keepalive/completed`，RunJournal/真实 delta/统一取消分别
+  留给 R2.2/R2.5/R2.6。
+- verification: fake RunEvent 协议 `12 passed (0.15s)`；RunEvent + observability/Trace/Stage 8 Trace + Provider
+  审计兼容专项 `129 passed (4.03s)`，覆盖完整事件族、schema/UTC/JSON 校验、中心脱敏、sequence seed、多个
+  并发 producer handle、writer takeover、terminal fence、慢消费者、waiter 取消、future-only 无 replay、总容量
+  和 v1 envelope/query/export；全仓 `uv run --frozen --offline ruff check .` 0 diagnostics；显式清空模型/平台凭据
+  并禁用外部 pytest plugin 的全量离线回归 `311 passed (15.64s)`；`git diff --check` 通过。普通切片按通用协议
+  未运行 R2 阶段收口用 `accept_stage8.sh`。
+- not_verified: 未访问公网、真实 Provider/model、Docker/Jobe、GitHub-hosted CI 或真实 token stream；未验证
+  跨进程事件传输，因为 EventBus 的合同明确仅为进程内。R2.1 不声称 SSE 真流、断线恢复或增量消息提交。
+- residual_risks: 默认 stream/subscription 容量目前只在 EventBus 构造处定义，待真正接入 Service 生命周期时需
+  根据并发上限配置和监控；terminal tombstone 为保证 late delta fence 保留到 bus close，达到 stream cap 会显式
+  拒绝新 stream，而不会淘汰安全状态。恢复 sequence 的持久原子性尚不存在，必须由 R2.2 RunJournal 完成。
+- gate: `R2.1 passed`；R2 总门禁保持 `in_progress`，不得把本协议写成 Provider/SSE 已流式化。
+- next: R2.2，实现 RunJournal 持久 schema、migration、原子 cursor API 和旧库兼容；不改变 Agent Loop 的实际
+  提交点，也不得提前进入 assistant/tool 增量提交。

@@ -208,6 +208,37 @@ scope/filter、`MAX(index.id)` 快照、最后排序键、total 和过期时间�
 API 仍流式计算完整 SHA-256 且只保留请求范围。`artifacts/trace-scaling.json` 记录当次事件量、page size、
 查询数、峰值内存和耗时；它是本机可重复样本，不是长期容量结论。
 
+### RunEvent v2 传输协议
+
+`RunEvent v2` 是运行中传输协议，不替代 `RuntimeEvent v1` Trace。稳定 envelope 为
+`schema_version/event_id/event_type/run_id/session_id/attempt/sequence/timestamp/writer_id/fencing_token/payload`；
+timestamp 规范化为 UTC，payload 在进入总线前经过中心脱敏并验证为有限 JSON。最小事件族为
+`run.phase`、`text.delta`、`tool_call.delta`、`usage`、`plan.updated`、`tool.started`、`tool.completed`、
+`context.compacted`、`fallback.activated`、`completed` 和 `error`。`RunPhase` 固定为
+`accepted -> planning -> model -> tools -> verifying -> finalizing -> terminal`。
+
+同一 `(run_id, attempt)` 的 sequence 在锁内分配；生产者完成时间和墙钟可以乱序，消费者只以 sequence
+判断该 stream 的发布顺序。相同 fencing token 只能由同一 writer 使用；更高 token 可在 terminal 前接管并
+延续 sequence，旧 writer 随即被拒绝。`completed/error` 是唯一 terminal event，发布后拒绝包括 delta 在内的
+任何后续事件，也拒绝新 writer 接管。attempt/fencing token 为非负整数：`0` 只保留给 attempt 前生命周期事件
+或尚未绑定持久 lease 的本地 producer，获得持久 lease 后使用其递增 token。
+
+| 层 | 职责 | 明确不负责 |
+|---|---|---|
+| `RunEventBus` | 当前进程内 future-only 发布/订阅、sequence、writer fence、有界 fan-out | 落库、历史回放、断线恢复、跨进程传输 |
+| `TraceRepository` | 从现有业务/审计表只读投影并导出 `RuntimeEvent v1`；索引可重建 | 消费 EventBus 作为新真相源、保存 token delta |
+| `RunJournal`（R2.2） | 后续保存恢复所需 sequence/loop cursor 和提交状态 | 替代 Plan/Evidence/ToolOperation/Artifact/Trace 真相 |
+
+每个订阅 buffer、进程内 stream state 数和活跃订阅总数都有固定上限。达到 stream/subscription 上限时
+fail closed；buffer 满时只取消该慢消费者、清空不完整队列并显式返回 `SlowConsumerError`，生产者和其他
+订阅者不阻塞。消费者主动取消会唤醒等待线程，但不等同于取消 run。terminal tombstone 不静默淘汰，避免
+以内存回收为由重新接受 late delta。总线不缓存订阅前事件，重连方必须在后续阶段依赖持久 cursor/状态，
+而不能向 EventBus 请求 replay。
+
+R2.1 只用 fake producer 验证该协议。当前 Provider 仍为同步 `chat()`，HTTP SSE 仍只有
+`accepted/keepalive/completed`，assistant/tool 消息提交时机也未改变；真 Provider delta 和 SSE 映射分别留给
+R2.5、R2.6。
+
 ## 安全边界
 
 | 风险 | 执行层保证 | 剩余边界 |
