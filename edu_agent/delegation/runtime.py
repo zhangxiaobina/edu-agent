@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from ..data import db
 from ..runtime.artifacts import ArtifactStore
+from ..runtime.cancellation import CancellationRequested, CancellationToken
 from ..runtime.models import RunContext
 from ..runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor, ToolOutcome
 from ..state.store import FencingTokenRejected, RunCancelled
@@ -106,6 +107,7 @@ class ChildExecution:
     deadline: float
 
     def checkpoint(self, boundary: str) -> None:
+        self.context.cancellation_token.checkpoint(boundary)
         if time.monotonic() >= self.deadline or self.stop_reason[:1] == ["timeout"]:
             self.stop_reason[:] = ["timeout"]
             self.stop_event.set()
@@ -245,17 +247,18 @@ class DelegationRuntime:
             tenant_id=parent_context.tenant_id,
         )
         root_run_id = parent["root_run_id"] if parent else parent_context.run_id
+        tree = self.state.tree(
+            root_run_id,
+            actor_id=parent_context.actor_id,
+            tenant_id=parent_context.tenant_id,
+        )
         count = self.state.cancel_root(
             root_run_id,
             actor_id=parent_context.actor_id,
             tenant_id=parent_context.tenant_id,
             reason=reason,
         )
-        with self._active_lock:
-            targets = list(self._active_stops.values())
-        for stop_event, stop_reason in targets:
-            stop_reason[:] = [reason]
-            stop_event.set()
+        self._signal_children({node["id"] for node in tree["nodes"]}, reason)
         return count
 
     def delegate(
@@ -268,6 +271,7 @@ class DelegationRuntime:
     ) -> DelegationBatchResult:
         if not tasks:
             raise ValueError("delegation tasks 不能为空")
+        parent_context.check_control("delegation.before_batch")
         if partial_policy == PartialSuccessPolicy.required_quorum:
             if required_quorum is None or not 1 <= required_quorum <= len(tasks):
                 raise ValueError("required_quorum 必须位于 1..task_count")
@@ -294,13 +298,28 @@ class DelegationRuntime:
                 SubtaskStatus.cancelled.value,
             }:
                 continue
-            future = self._pool.submit(self._execute_child, record, task)
+            future = self._pool.submit(
+                self._execute_child,
+                record,
+                task,
+                parent_context.cancellation_token,
+            )
             futures[future] = record["id"]
 
         pending = set(futures)
         fail_fast_triggered = False
         while pending:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            try:
+                parent_context.check_control("delegation.wait")
+            except (RunCancelled, CancellationRequested) as error:
+                outstanding = {futures[item] for item in pending}
+                self.state.cancel_children(outstanding, reason=str(error))
+                self._signal_children(outstanding, str(error))
+            done, pending = wait(
+                pending,
+                timeout=0.05,
+                return_when=FIRST_COMPLETED,
+            )
             for future in done:
                 try:
                     future.result()
@@ -546,7 +565,12 @@ class DelegationRuntime:
             citations.append(citation)
         return evidence, citations
 
-    def _execute_child(self, record: dict[str, Any], task: TeachingSubtask) -> None:
+    def _execute_child(
+        self,
+        record: dict[str, Any],
+        task: TeachingSubtask,
+        parent_token: CancellationToken | None = None,
+    ) -> None:
         queue_deadline = time.monotonic() + self.policy.child_timeout_seconds
         claimed = None
         while claimed is None and time.monotonic() < queue_deadline:
@@ -581,6 +605,7 @@ class DelegationRuntime:
         heartbeat = None
         child_started = time.monotonic()
         try:
+            child_token = CancellationToken(parent=parent_token)
             context = RunContext.create(
                 session_id=record["session_id"],
                 run_id=record["id"],
@@ -590,6 +615,7 @@ class DelegationRuntime:
                 course_ids=set(record["course_ids"]),
                 max_model_calls=int(record["budget"]["max_model_calls"]),
                 max_tool_calls=int(record["budget"]["max_tool_calls"]),
+                cancellation_token=child_token,
             )
             child_input = SubagentInput(
                 system_prompt=input_payload["system_prompt"],
@@ -706,7 +732,7 @@ class DelegationRuntime:
                     result=None,
                     failure_reason=str(error),
                 )
-        except RunCancelled as error:
+        except (RunCancelled, CancellationRequested) as error:
             if context is None:
                 self.state.fail_running_worker(
                     record["id"], worker_owner=self.worker_id, reason=str(error)
@@ -746,6 +772,8 @@ class DelegationRuntime:
                 close()
             with self._active_lock:
                 self._active_stops.pop(record["id"], None)
+            if context is not None:
+                context.cancellation_token.close()
 
     def _heartbeat_loop(self, execution: ChildExecution, stopped: threading.Event) -> None:
         interval = max(0.05, min(1.0, self.policy.worker_lease_seconds / 3))

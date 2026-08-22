@@ -15,6 +15,7 @@ from edu_agent.code_execution import (
     build_code_execution_provider,
 )
 from edu_agent.runtime.artifacts import ArtifactStore, ToolResultBudget
+from edu_agent.runtime.cancellation import CancellationRequested, CancellationToken
 from edu_agent.runtime.config import CodeExecutionConfig
 from edu_agent.runtime.models import RunContext
 from edu_agent.runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor
@@ -456,3 +457,32 @@ def test_runtime_cancellation_propagates_out_of_registry():
     )
     with pytest.raises(RunCancelled, match="code_execution.poll"):
         executor.execute("run_code", {"source_code": "while True: pass"}, context)
+
+
+def test_sync_sandbox_result_is_rejected_when_token_cancels_during_call():
+    provider = FakeProvider()
+    token = CancellationToken()
+
+    def execute(request, *, cancel_event=None):
+        assert cancel_event is not None
+        token.cancel("client disconnected", source="client_disconnect")
+        return ExecutionResult(status="success", stdout="late\n", provider=provider.name)
+
+    provider.execute = execute
+    registry.configure_code_execution(provider)
+    context = RunContext.create(
+        session_id="sandbox-session",
+        actor_id="teacher-1",
+        role="teacher",
+        tenant_id="school-1",
+        cancellation_token=token,
+    )
+    executor = PolicyToolExecutor(
+        registry,
+        policy=ExecutionPolicy(
+            allow_local_code_execution=True,
+            require_code_execution_approval=False,
+        ),
+    )
+    with pytest.raises(CancellationRequested, match="code_execution.after_call"):
+        executor.execute("run_code", {"source_code": "print('late')"}, context)

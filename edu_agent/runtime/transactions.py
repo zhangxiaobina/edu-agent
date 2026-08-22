@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any
 
 from ..state.store import FencingTokenRejected, RunCancelled
+from .cancellation import CancellationRequested
 from .security import redact_sensitive
 
 
@@ -401,6 +402,8 @@ class TransactionalToolRuntime:
             )
             with fence_guard as fence_connection:
                 result = handler()
+                if context is not None:
+                    context.check_control("tool.operation.after_handler")
                 if not isinstance(result, dict):
                     raise TypeError("写工具必须返回 JSON object")
                 if "error" in result:
@@ -458,7 +461,10 @@ class TransactionalToolRuntime:
                     )
         except BaseException as error:
             connection.rollback()
-            if not isinstance(error, (FencingTokenRejected, RunCancelled)):
+            if not isinstance(
+                error,
+                (FencingTokenRejected, RunCancelled, CancellationRequested),
+            ):
                 self._mark_execution_failed(
                     connection,
                     current["id"],

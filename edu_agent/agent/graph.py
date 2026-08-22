@@ -9,11 +9,13 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, StateGraph
 
 from ..engine.base import Engine
+from ..engine.streaming import consume_provider_stream
 from ..planning.models import PlanStatus, StepStatus
 from ..planning.planner import ModelPlanGenerator, PlanGenerationError, should_create_plan
 from ..planning.runtime import PlanCoordinator, PlanningOptions
 from ..planning.verifier import EvidenceVerifier
 from ..runtime.models import BudgetExceeded, RunContext
+from ..runtime.cancellation import CancellationRequested
 from ..runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor, ToolOutcome
 from ..state import RunPhase
 from ..state.store import RunCancelled
@@ -109,6 +111,7 @@ def build_agent(
 
     def agent_node(state: AgentState):
         context.check_control("model.before_call")
+        context.emit_run_event("run.phase", {"phase": "model"})
         active_step = None
         current_tools = tools
         if plan_coordinator is not None:
@@ -148,7 +151,13 @@ def build_agent(
         model_attempt = (
             loop_journal.start_model_attempt() if loop_journal is not None else None
         )
-        response = engine.chat(state["messages"], current_tools)
+        response = consume_provider_stream(
+            engine,
+            state["messages"],
+            current_tools,
+            cancellation_token=context.cancellation_token,
+            event_sink=context.emit_provider_event if context.streams_events else None,
+        )
         context.check_control("model.after_call")
         usage = [response.usage] if response.usage else []
         assistant_message = response.to_assistant_message()
@@ -165,6 +174,7 @@ def build_agent(
         }
 
     def tools_node(state: AgentState):
+        context.emit_run_event("run.phase", {"phase": "tools"})
         last = next(
             (
                 message
@@ -178,7 +188,7 @@ def build_agent(
         output = []
         turn_results = []
         model_attempt = state.get("model_attempt")
-        cancellation: RunCancelled | None = None
+        cancellation: RunCancelled | CancellationRequested | None = None
         allowed_tools = None
         if plan_coordinator is not None:
             step = next(
@@ -219,6 +229,10 @@ def build_agent(
             try:
                 if cancellation is None:
                     context.check_control("tools.before_batch" if not output else "tool.between_calls")
+                    context.emit_run_event(
+                        "tool.started",
+                        {"tool_call_id": call_id, "tool_name": name},
+                    )
                     if operation_record is not None and operation_record["status"] in {
                         "executing",
                         "manual_review",
@@ -249,13 +263,22 @@ def build_agent(
                             tool_call_id=call_id,
                             plan_step_id=state.get("active_step_id"),
                         )
+                    context.emit_run_event(
+                        "tool.completed",
+                        {
+                            "tool_call_id": call_id,
+                            "tool_name": name,
+                            "ok": outcome.ok,
+                            "error": outcome.error,
+                        },
+                    )
                 else:
                     outcome = ToolOutcome(
                         False,
                         error={"code": "CANCELLED", "message": str(cancellation)},
                         meta={"run_id": context.run_id, "tool_call_id": call_id},
                     )
-            except RunCancelled as error:
+            except (RunCancelled, CancellationRequested) as error:
                 cancellation = error
                 outcome = ToolOutcome(
                     False,
@@ -307,6 +330,7 @@ def build_agent(
 
     def verify_node(state: AgentState):
         context.check_control("plan.step_boundary")
+        context.emit_run_event("run.phase", {"phase": "verifying"})
         if plan_coordinator is None or evidence_verifier is None:
             return {}
         step = next(
@@ -542,6 +566,14 @@ def run_agent(
                 "stop_reason": status,
                 "plan": coordinator.result(),
             }
+        context.emit_run_event(
+            "plan.updated",
+            {
+                "plan_id": coordinator.plan.id,
+                "status": coordinator.plan.status.value,
+                "plan": coordinator.result(),
+            },
+        )
         verifier = EvidenceVerifier(
             persistent_store,
             context,
@@ -553,6 +585,7 @@ def run_agent(
     loop_journal.enter_planning(
         plan_id=coordinator.plan.id if coordinator is not None else None
     )
+    context.emit_run_event("run.phase", {"phase": "model"})
 
     entry_point = "agent"
     if loop_journal.active:
@@ -624,6 +657,16 @@ def run_agent(
         initial_state,
         {"recursion_limit": recursion_limit},
     )
+    if coordinator is not None:
+        plan_result = coordinator.result()
+        context.emit_run_event(
+            "plan.updated",
+            {
+                "plan_id": coordinator.plan.id,
+                "status": (plan_result or {}).get("status", "running"),
+                "plan": plan_result,
+            },
+        )
     result_messages = state["messages"]
     trace = []
     for message in result_messages:

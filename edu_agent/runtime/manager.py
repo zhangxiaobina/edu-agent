@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Iterator
 
+from .cancellation import CancellationToken
 from .models import RunContext
 
 
@@ -59,6 +60,7 @@ class RuntimeManager:
         self._session_locks: dict[str, threading.RLock] = {}
         self._session_refs: dict[str, int] = {}
         self._active: dict[str, ActiveRun] = {}
+        self._cancellation_tokens: dict[str, CancellationToken] = {}
 
     @contextmanager
     def session_scope(
@@ -68,16 +70,27 @@ class RuntimeManager:
         session_id: str,
         actor_id: str,
         tenant_id: str,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[LeaseClaim | None]:
+        token = cancellation_token or CancellationToken()
         with self._guard:
+            existing_token = self._cancellation_tokens.get(run_id)
+            if existing_token is not None and existing_token is not token:
+                raise RuntimeError(f"run {run_id} already has a cancellation token")
             lock = self._session_locks.setdefault(session_id, threading.RLock())
             self._session_refs[session_id] = self._session_refs.get(session_id, 0) + 1
-        lock.acquire()
+            self._cancellation_tokens[run_id] = token
+        acquired = False
         claim = None
         stopped = threading.Event()
         heartbeat_thread = None
+        unregister_stop = token.register(lambda _: stopped.set())
         try:
+            while not acquired:
+                token.checkpoint("session.lock.acquire")
+                acquired = lock.acquire(timeout=min(0.05, self.heartbeat_seconds))
             if self.state_store is not None:
+                token.checkpoint("session.lease.before_acquire")
                 record = self.state_store.acquire_session_lease(
                     session_id=session_id,
                     run_id=run_id,
@@ -95,7 +108,7 @@ class RuntimeManager:
                 )
                 heartbeat_thread = threading.Thread(
                     target=self._heartbeat_loop,
-                    args=(claim, stopped),
+                    args=(claim, stopped, token),
                     name=f"edu-agent-session-heartbeat-{session_id[:8]}",
                     daemon=True,
                 )
@@ -113,6 +126,7 @@ class RuntimeManager:
             yield claim
         finally:
             stopped.set()
+            unregister_stop()
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=max(1.0, self.heartbeat_seconds * 2))
             if claim is not None:
@@ -153,7 +167,10 @@ class RuntimeManager:
                     )
             with self._guard:
                 self._active.pop(run_id, None)
-            lock.release()
+                if self._cancellation_tokens.get(run_id) is token:
+                    self._cancellation_tokens.pop(run_id, None)
+            if acquired:
+                lock.release()
             with self._guard:
                 refs = self._session_refs[session_id] - 1
                 if refs == 0:
@@ -172,12 +189,20 @@ class RuntimeManager:
         )
 
     def checkpoint(self, context: RunContext, boundary: str) -> None:
+        context.cancellation_token.checkpoint(boundary)
         if self.state_store is None:
             return
         self.state_store.assert_run_writable(context, boundary=boundary)
 
-    def _heartbeat_loop(self, claim: LeaseClaim, stopped: threading.Event) -> None:
+    def _heartbeat_loop(
+        self,
+        claim: LeaseClaim,
+        stopped: threading.Event,
+        cancellation_token: CancellationToken,
+    ) -> None:
         while not stopped.wait(self.heartbeat_seconds):
+            if cancellation_token.is_set():
+                return
             if not self.state_store.heartbeat_session_lease(
                 session_id=claim.session_id,
                 run_id=claim.run_id,
@@ -186,6 +211,17 @@ class RuntimeManager:
                 lease_seconds=self.lease_seconds,
             ):
                 return
+
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "run cancellation requested",
+        source: str = "explicit",
+    ) -> bool:
+        with self._guard:
+            token = self._cancellation_tokens.get(run_id)
+        return token.cancel(reason, source=source) if token is not None else False
 
     def active_runs(self) -> list[dict]:
         with self._guard:

@@ -324,8 +324,11 @@ version 提升到 11，并由唯一 `TurnFinalizer` 按固定 cursor 完成未�
 usage；terminal 后恢复继续未完成的 hooks/cleanup，再重建兼容 `ChatResult`。R2.5 已让 Chat Completions 与
 Responses adapter 产生带 route/attempt/provider event id 的真实 text/tool/usage/completed/error 流；同步
 `chat()` 聚合同一流为兼容 `EngineResponse`。首个可见 delta 前的瞬态错误可按既有策略 retry/fallback，之后的
-失败直接结束该 Provider 流且不拼接新输出。HTTP SSE 仍为 `accepted/keepalive/completed`，完整取消传播留给
-R2.6。
+失败直接结束该 Provider 流且不拼接新输出。R2.6 的 HTTP SSE 通过绑定 attempt 与 session lease fence 的单个
+`RunStreamWriter` 输出 accepted、text/tool/plan/usage 和 completed/error，handler 是唯一 socket writer；
+keepalive 只在事件空闲时保活。有界订阅队列隔离慢消费者，断流、显式 cancel 与 deadline 取消同一个
+`CancellationToken`，并传播到 Provider、Agent、工具、子 Agent 和代码执行。同步 SDK 若不能强杀，返回后仍由
+token/fence 拒绝迟到提交；EventBus 不承担跨进程 replay，五崩溃窗恢复仍留给 R2.7。
 
 ## 可插拔扩展
 

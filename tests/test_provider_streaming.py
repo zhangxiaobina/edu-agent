@@ -23,6 +23,7 @@ from edu_agent.engine import (
     ResponsesAdapter,
     aggregate_provider_stream,
 )
+from edu_agent.runtime.cancellation import CancellationRequested, CancellationToken
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "provider_streams"
@@ -224,6 +225,57 @@ def test_streaming_request_reuses_unread_json_response_without_second_request(
     assert response.model == "json-model"
     assert len(requests) == 1
     assert requests[0]["stream"] is True
+
+
+@pytest.mark.parametrize(
+    ("adapter_type", "client_factory"),
+    [
+        (
+            ChatCompletionsAdapter,
+            lambda endpoint: SimpleNamespace(
+                chat=SimpleNamespace(completions=endpoint)
+            ),
+        ),
+        (
+            ResponsesAdapter,
+            lambda endpoint: SimpleNamespace(responses=endpoint),
+        ),
+    ],
+)
+def test_adapter_closes_sync_sdk_stream_returned_after_cancellation(
+    adapter_type,
+    client_factory,
+):
+    token = CancellationToken()
+
+    class LateStream:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+        def __iter__(self):
+            raise AssertionError("cancelled late stream must not be consumed")
+
+    stream = LateStream()
+
+    class Endpoint:
+        def create(self, **_request):
+            token.cancel("deadline elapsed", source="deadline")
+            return stream
+
+    route = ProviderGateway().begin_turn(
+        ProviderSpec(
+            model="stream-model",
+            endpoint="https://provider.example/v1",
+            api_mode=adapter_type.api_mode,
+        )
+    )
+    adapter = adapter_type(client_factory(Endpoint()))
+
+    with pytest.raises(CancellationRequested, match="after_request"):
+        list(adapter.stream_events(route, [], [], cancellation_token=token))
+    assert stream.closed
 
 
 def test_fragmented_tool_json_is_not_materialized_before_completed():

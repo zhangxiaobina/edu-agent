@@ -18,6 +18,12 @@ from typing import Any
 
 import httpx
 
+from ..runtime.cancellation import (
+    CancellationRequested,
+    CancellationToken,
+    accepts_cancellation_token,
+    call_with_cancellation,
+)
 from .base import Engine, EngineResponse
 from .gateway import (
     ApiMode,
@@ -802,15 +808,27 @@ class ResilientEngine(Engine):
         route: _RouteSnapshot,
         messages: list[dict],
         tools: list[dict],
+        cancellation_token: CancellationToken | None = None,
     ) -> EngineResponse:
         if route.route is not None:
             routed_chat = getattr(engine, "chat_on_route", None)
             if callable(routed_chat):
-                return routed_chat(route.route, messages, tools)
+                return call_with_cancellation(
+                    routed_chat,
+                    route.route,
+                    messages,
+                    tools,
+                    cancellation_token=cancellation_token,
+                )
             current = _route_snapshot(engine)
             if current.identity != route.identity:
                 raise RuntimeError("provider route changed after turn start")
-        return engine.chat(messages, tools)
+        return call_with_cancellation(
+            engine.chat,
+            messages,
+            tools,
+            cancellation_token=cancellation_token,
+        )
 
     @staticmethod
     def _stream_frozen_route(
@@ -820,6 +838,7 @@ class ResilientEngine(Engine):
         tools: list[dict],
         *,
         attempt: int,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         if route.route is None:
             raise ProviderStreamProtocolError(
@@ -828,14 +847,13 @@ class ResilientEngine(Engine):
             )
         routed_stream = getattr(engine, "stream_chat_on_route", None)
         if callable(routed_stream):
-            return iter(
-                routed_stream(
-                    route.route,
-                    messages,
-                    tools,
-                    attempt=attempt,
-                )
-            )
+            kwargs = {"attempt": attempt}
+            if (
+                cancellation_token is not None
+                and accepts_cancellation_token(routed_stream)
+            ):
+                kwargs["cancellation_token"] = cancellation_token
+            return iter(routed_stream(route.route, messages, tools, **kwargs))
         current = _route_snapshot(engine)
         if current.identity != route.identity:
             raise RuntimeError("provider route changed after turn start")
@@ -847,7 +865,27 @@ class ResilientEngine(Engine):
                 "provider engine 缺少 stream_chat",
                 code="provider_stream_unsupported",
             )
-        return iter(stream(messages, tools, attempt=attempt))
+        kwargs = {"attempt": attempt}
+        if cancellation_token is not None and accepts_cancellation_token(stream):
+            kwargs["cancellation_token"] = cancellation_token
+        return iter(stream(messages, tools, **kwargs))
+
+    @staticmethod
+    def _acquire_with_cancellation(
+        semaphore: threading.Semaphore,
+        cancellation_token: CancellationToken | None,
+        boundary: str,
+    ) -> None:
+        if cancellation_token is None:
+            semaphore.acquire()
+            return
+        while not semaphore.acquire(timeout=0.05):
+            cancellation_token.checkpoint(boundary)
+        try:
+            cancellation_token.checkpoint(boundary)
+        except CancellationRequested:
+            semaphore.release()
+            raise
 
     @staticmethod
     def _supports_provider_stream(engine: Engine, route: _RouteSnapshot) -> bool:
@@ -993,11 +1031,16 @@ class ResilientEngine(Engine):
         route_role: str,
         start_attempt: int,
         max_retries: int,
+        cancellation_token: CancellationToken | None = None,
     ) -> _RouteExecution:
         attempts = 0
         with self.route_registry.lease(route.identity) as state:
             for retry_index in range(max_retries + 1):
-                state.semaphore.acquire()
+                self._acquire_with_cancellation(
+                    state.semaphore,
+                    cancellation_token,
+                    "provider.semaphore.acquire",
+                )
                 permit: _CircuitPermit | None = None
                 response: EngineResponse | None = None
                 error: Exception | None = None
@@ -1025,7 +1068,11 @@ class ResilientEngine(Engine):
                             route,
                             messages,
                             tools,
+                            cancellation_token,
                         )
+                    except CancellationRequested:
+                        state.breaker.record_non_retryable(permit)
+                        raise
                     except Exception as caught:
                         error = caught
                         decision = classify_failure(caught)
@@ -1133,7 +1180,11 @@ class ResilientEngine(Engine):
                         "breaker_state": breaker_after,
                     },
                 )
-                self.sleeper(delay)
+                if cancellation_token is not None:
+                    if cancellation_token.wait(delay):
+                        cancellation_token.checkpoint("provider.retry_delay")
+                else:
+                    self.sleeper(delay)
 
         raise AssertionError("provider attempt loop exited unexpectedly")
 
@@ -1147,11 +1198,16 @@ class ResilientEngine(Engine):
         route_role: str,
         start_attempt: int,
         max_retries: int,
+        cancellation_token: CancellationToken | None = None,
     ) -> Generator[ProviderStreamEvent, None, _StreamRouteExecution]:
         attempts = 0
         with self.route_registry.lease(route.identity) as state:
             for retry_index in range(max_retries + 1):
-                state.semaphore.acquire()
+                self._acquire_with_cancellation(
+                    state.semaphore,
+                    cancellation_token,
+                    "provider.stream.semaphore.acquire",
+                )
                 permit: _CircuitPermit | None = None
                 response: EngineResponse | None = None
                 completed_event: ProviderStreamEvent | None = None
@@ -1196,8 +1252,11 @@ class ResilientEngine(Engine):
                             messages,
                             tools,
                             attempt=attempt_number,
+                            cancellation_token=cancellation_token,
                         )
                         for event in iterator:
+                            if cancellation_token is not None:
+                                cancellation_token.checkpoint("provider.stream.event")
                             if not isinstance(event, ProviderStreamEvent):
                                 raise ProviderStreamProtocolError(
                                     "provider engine 产生了非 ProviderStreamEvent",
@@ -1269,6 +1328,9 @@ class ResilientEngine(Engine):
                                 error=error,
                                 retryable=not visible,
                             )
+                    except CancellationRequested:
+                        state.breaker.record_non_retryable(permit)
+                        raise
                     except Exception as caught:
                         error = caught
                         assert route.route is not None
@@ -1416,11 +1478,20 @@ class ResilientEngine(Engine):
                         "delay_source": delay_source,
                     },
                 )
-                self.sleeper(delay)
+                if cancellation_token is not None and cancellation_token.wait(delay):
+                    cancellation_token.checkpoint("provider.stream.retry_delay")
+                elif cancellation_token is None:
+                    self.sleeper(delay)
 
         raise AssertionError("provider stream attempt loop exited unexpectedly")
 
-    def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
+    def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> EngineResponse:
         with self._chat_route_plan() as route_plan:
             streamable = self._supports_provider_stream(
                 self.primary,
@@ -1431,8 +1502,18 @@ class ResilientEngine(Engine):
                 and self._supports_provider_stream(self.fallback, route_plan.fallback)
             )
             if streamable:
-                return aggregate_provider_stream(self.stream_chat(messages, tools))
-            return self._chat_sync(messages, tools)
+                return aggregate_provider_stream(
+                    self.stream_chat(
+                        messages,
+                        tools,
+                        cancellation_token=cancellation_token,
+                    )
+                )
+            return self._chat_sync(
+                messages,
+                tools,
+                cancellation_token=cancellation_token,
+            )
 
     def stream_chat(
         self,
@@ -1440,6 +1521,7 @@ class ResilientEngine(Engine):
         tools: list[dict],
         *,
         attempt: int = 1,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         if attempt != 1:
             raise ValueError("ResilientEngine stream attempt 必须从 1 开始")
@@ -1475,6 +1557,7 @@ class ResilientEngine(Engine):
                 route_role="primary",
                 start_attempt=0,
                 max_retries=self.max_retries,
+                cancellation_token=cancellation_token,
             )
             attempts = primary.attempts
             if primary.response is not None:
@@ -1674,6 +1757,7 @@ class ResilientEngine(Engine):
                 route_role="fallback",
                 start_attempt=attempts,
                 max_retries=0,
+                cancellation_token=cancellation_token,
             )
             attempts += fallback.attempts
             if fallback.response is not None:
@@ -1741,7 +1825,13 @@ class ResilientEngine(Engine):
 
     stream_events = stream_chat
 
-    def _chat_sync(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
+    def _chat_sync(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> EngineResponse:
         with self._chat_route_plan() as route_plan:
             primary_route = route_plan.primary
             requirements = infer_request_requirements(messages, tools)
@@ -1765,6 +1855,7 @@ class ResilientEngine(Engine):
                 route_role="primary",
                 start_attempt=0,
                 max_retries=self.max_retries,
+                cancellation_token=cancellation_token,
             )
             attempts = primary.attempts
             if primary.response is not None:
@@ -1866,6 +1957,7 @@ class ResilientEngine(Engine):
                 route_role="fallback",
                 start_attempt=attempts,
                 max_retries=0,
+                cancellation_token=cancellation_token,
             )
             attempts += fallback.attempts
             if fallback.response is not None:

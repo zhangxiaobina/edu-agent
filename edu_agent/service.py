@@ -13,7 +13,7 @@ from .agent.turn_finalizer import FinalizationResult, TurnFinalizer
 from .code_execution import build_code_execution_provider
 from .engine import Engine, get_engine
 from .knowledge import KnowledgeToolProvider, SQLiteKnowledgeProvider
-from .observability import RedactionPolicy, TraceRepository
+from .observability import RedactionPolicy, RunEventType, TraceRepository
 from .planning.runtime import PlanningOptions
 from .planning.runtime import PlanCoordinator
 from .planning.verifier import EvidenceVerifier
@@ -21,6 +21,7 @@ from .runtime.config import AppConfig, load_config
 from .runtime.context import ContextBudgetExceeded, ContextManager
 from .runtime.artifacts import ArtifactStore, ToolResultBudget
 from .runtime.context_engine import CheckpointContextEngine, ContextEngine
+from .runtime.cancellation import CancellationRequested, CancellationToken
 from .runtime.models import BudgetExceeded, RunContext
 from .runtime.manager import RuntimeManager
 from .runtime.tool_executor import ApprovalRequest, ExecutionPolicy, PolicyToolExecutor
@@ -178,6 +179,8 @@ class EduAgentService:
         run_id: str | None = None,
         db_conn=None,
         replay_scope: str | None = None,
+        cancellation_token: CancellationToken | None = None,
+        stream_writer=None,
     ) -> ChatResult:
         if not message.strip():
             raise ValueError("message 不能为空")
@@ -192,7 +195,13 @@ class EduAgentService:
             run_id=run_id or uuid.uuid4().hex,
             max_model_calls=self.config.runtime.max_model_calls,
             max_tool_calls=self.config.runtime.max_tool_calls,
+            cancellation_token=cancellation_token,
         )
+        if stream_writer is not None:
+            context.bind_event_sinks(
+                run_event_sink=stream_writer.publish,
+                provider_event_sink=stream_writer.provider_event,
+            )
         self.state_store.ensure_session(
             session_id,
             actor_id=actor_id,
@@ -207,8 +216,22 @@ class EduAgentService:
             session_id=session_id,
             actor_id=actor_id,
             tenant_id=tenant_id,
+            cancellation_token=context.cancellation_token,
         ) as claim:
             self.runtime_manager.bind_context(context, claim)
+            if stream_writer is not None:
+                stream_writer.bind(
+                    session_id=session_id,
+                    fencing_token=claim.fencing_token if claim is not None else 0,
+                )
+                stream_writer.publish(
+                    RunEventType.RUN_PHASE,
+                    {
+                        "phase": "accepted",
+                        "status": "accepted",
+                        "run_id": context.run_id,
+                    },
+                )
             return self._chat_turn(message, context=context, db_conn=db_conn)
 
     @staticmethod
@@ -381,7 +404,7 @@ class EduAgentService:
                     db_conn=db_conn,
                     resume=resume,
                 )
-        except RunCancelled as error:
+        except (RunCancelled, CancellationRequested) as error:
             finalization = self._finalize_turn(
                 context,
                 result={
@@ -412,6 +435,7 @@ class EduAgentService:
     ) -> ChatResult:
         session_id = context.session_id
         context.check_control("turn.start")
+        context.emit_run_event(RunEventType.RUN_PHASE.value, {"phase": "planning"})
         routes = self.engine.begin_turn_routes()
         for index, route in enumerate(routes):
             details = route.to_event()
@@ -585,6 +609,10 @@ class EduAgentService:
                 loop_fault_injector=self.loop_fault_injector,
             )
             context.check_control("messages.before_final_commit")
+            context.emit_run_event(
+                RunEventType.RUN_PHASE.value,
+                {"phase": "finalizing"},
+            )
             generated = result["messages"][len(agent_messages) :]
             final_message = next(
                 (
@@ -604,7 +632,7 @@ class EduAgentService:
                 finalization,
                 context_payload=context_payload,
             )
-        except RunCancelled as error:
+        except (RunCancelled, CancellationRequested) as error:
             finalization = self._finalize_turn(
                 context,
                 result={
@@ -651,11 +679,35 @@ class EduAgentService:
         actor_id: str,
         tenant_id: str = "default",
     ) -> bool:
-        return self.state_store.cancel_run(
+        requested = self.state_store.cancel_run(
             run_id,
             actor_id=actor_id,
             tenant_id=tenant_id,
         )
+        self.runtime_manager.cancel_run(
+            run_id,
+            reason="run cancellation requested",
+            source="explicit",
+        )
+        if self._delegation_runtime is not None:
+            status = self.state_store.get_run_status(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            )
+            if status is not None:
+                context = RunContext.create(
+                    session_id=status["session_id"],
+                    run_id=run_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                    role=status.get("role") or self.config.security.default_role,
+                )
+                self._delegation_runtime.cancel_root(
+                    context,
+                    reason="PARENT_RUN_CANCELLED",
+                )
+        return requested
 
     def resume_run(
         self,
@@ -664,6 +716,8 @@ class EduAgentService:
         actor_id: str,
         tenant_id: str = "default",
         db_conn=None,
+        cancellation_token: CancellationToken | None = None,
+        stream_writer=None,
     ) -> ChatResult:
         try:
             record = self.state_store.prepare_run_resume(
@@ -700,14 +754,30 @@ class EduAgentService:
             run_id=run_id,
             max_model_calls=self.config.runtime.max_model_calls,
             max_tool_calls=self.config.runtime.max_tool_calls,
+            cancellation_token=cancellation_token,
         )
+        if stream_writer is not None:
+            context.bind_event_sinks(
+                run_event_sink=stream_writer.publish,
+                provider_event_sink=stream_writer.provider_event,
+            )
         with self.runtime_manager.session_scope(
             run_id=run_id,
             session_id=context.session_id,
             actor_id=actor_id,
             tenant_id=tenant_id,
+            cancellation_token=context.cancellation_token,
         ) as claim:
             self.runtime_manager.bind_context(context, claim)
+            if stream_writer is not None:
+                stream_writer.bind(
+                    session_id=context.session_id,
+                    fencing_token=claim.fencing_token if claim is not None else 0,
+                )
+                stream_writer.publish(
+                    RunEventType.RUN_PHASE,
+                    {"phase": "accepted", "status": "resumed"},
+                )
             pending_finalizer = self.state_store.get_turn_finalizer(
                 run_id,
                 session_id=context.session_id,
@@ -965,15 +1035,32 @@ class EduAgentService:
         *,
         actor_id: str,
         tenant_id: str = "default",
+        cancellation_token: CancellationToken | None = None,
+        stream_writer=None,
     ) -> ChatResult:
         """Resume a claimed queued/abandoned request using persistent run state."""
         record = self.state_store.get_run_status(run_id, actor_id=actor_id, tenant_id=tenant_id)
         if record is None:
             raise KeyError(f"run 不存在：{run_id}")
         if record["status"] == "abandoned":
-            return self.resume_run(run_id, actor_id=actor_id, tenant_id=tenant_id)
+            return self.resume_run(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                cancellation_token=cancellation_token,
+                stream_writer=stream_writer,
+            )
         if record["status"] != "queued":
             if record["status"] in {"completed", "failed", "interrupted"}:
+                if stream_writer is not None:
+                    stream_writer.bind(
+                        session_id=record["session_id"],
+                        fencing_token=0,
+                    )
+                    stream_writer.publish(
+                        RunEventType.RUN_PHASE,
+                        {"phase": "accepted", "status": "replaying"},
+                    )
                 return self.recover_chat_result(run_id, actor_id=actor_id, tenant_id=tenant_id)
             pending_finalizer = self.state_store.get_turn_finalizer(
                 run_id,
@@ -982,7 +1069,13 @@ class EduAgentService:
                 tenant_id=tenant_id,
             )
             if pending_finalizer is not None and not pending_finalizer.terminal:
-                return self.resume_run(run_id, actor_id=actor_id, tenant_id=tenant_id)
+                return self.resume_run(
+                    run_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                    cancellation_token=cancellation_token,
+                    stream_writer=stream_writer,
+                )
             raise RuntimeError(f"run 不能从当前状态恢复：{record['status']}")
         with self.state_store.connect() as connection:
             session = connection.execute(
@@ -1000,14 +1093,30 @@ class EduAgentService:
             run_id=run_id,
             max_model_calls=self.config.runtime.max_model_calls,
             max_tool_calls=self.config.runtime.max_tool_calls,
+            cancellation_token=cancellation_token,
         )
+        if stream_writer is not None:
+            context.bind_event_sinks(
+                run_event_sink=stream_writer.publish,
+                provider_event_sink=stream_writer.provider_event,
+            )
         with self.runtime_manager.session_scope(
             run_id=run_id,
             session_id=context.session_id,
             actor_id=actor_id,
             tenant_id=tenant_id,
+            cancellation_token=context.cancellation_token,
         ) as claim:
             self.runtime_manager.bind_context(context, claim)
+            if stream_writer is not None:
+                stream_writer.bind(
+                    session_id=context.session_id,
+                    fencing_token=claim.fencing_token if claim is not None else 0,
+                )
+                stream_writer.publish(
+                    RunEventType.RUN_PHASE,
+                    {"phase": "accepted", "status": "resumed"},
+                )
             return self._chat_turn(
                 record.get("request_text") or "",
                 context=context,

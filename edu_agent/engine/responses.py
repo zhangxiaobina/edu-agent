@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ..runtime.cancellation import CancellationRequested, CancellationToken
 from .base import EngineResponse, ToolCall
 from .gateway import (
     ApiMode,
@@ -371,9 +372,17 @@ class ResponsesAdapter:
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        cancellation_token: CancellationToken | None = None,
     ) -> EngineResponse:
         return aggregate_provider_stream(
-            self.stream_events(route, messages, tools, attempt=1)
+            self.stream_events(
+                route,
+                messages,
+                tools,
+                attempt=1,
+                cancellation_token=cancellation_token,
+            )
         )
 
     def stream_events(
@@ -383,13 +392,27 @@ class ResponsesAdapter:
         tools: list[dict],
         *,
         attempt: int = 1,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[ProviderStreamEvent]:
+        if cancellation_token is not None:
+            cancellation_token.checkpoint("responses.before_request")
         request = self.build_request(route, messages, tools)
         if not (self.capabilities.streaming and route.capabilities.streaming):
             raise ProviderCapabilityError(("streaming",))
         request["stream"] = True
+        raw_stream = None
         try:
             raw_stream = self._client_for(route).responses.create(**request)
+            if cancellation_token is not None:
+                cancellation_token.checkpoint("responses.after_request")
+        except CancellationRequested:
+            close = getattr(raw_stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            raise
         except Exception as error:
             yield provider_stream_error_event(
                 route=route,
@@ -404,9 +427,20 @@ class ResponsesAdapter:
             return
 
         close = getattr(raw_stream, "close", None)
+        unregister_close = (
+            cancellation_token.register(lambda _: close())
+            if cancellation_token is not None and callable(close)
+            else lambda: None
+        )
         try:
             json_response = read_stream_json_response(raw_stream)
+        except CancellationRequested:
+            unregister_close()
+            raise
         except Exception as error:
+            unregister_close()
+            if cancellation_token is not None:
+                cancellation_token.checkpoint("responses.read_response")
             if callable(close):
                 close()
             yield provider_stream_error_event(
@@ -424,6 +458,7 @@ class ResponsesAdapter:
                     attempt=attempt,
                 )
             finally:
+                unregister_close()
                 if callable(close):
                     close()
             return
@@ -436,6 +471,8 @@ class ResponsesAdapter:
         terminal = False
         try:
             for raw_event in raw_stream:
+                if cancellation_token is not None:
+                    cancellation_token.checkpoint("responses.event")
                 events = list(
                     self._response_stream_events(
                         raw_event,
@@ -468,6 +505,8 @@ class ResponsesAdapter:
                     "error",
                 }:
                     terminal = True
+        except CancellationRequested:
+            raise
         except Exception as error:
             yield provider_stream_error_event(
                 route=route,
@@ -477,6 +516,7 @@ class ResponsesAdapter:
             )
             return
         finally:
+            unregister_close()
             if callable(close):
                 close()
 

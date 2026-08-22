@@ -8,6 +8,7 @@ from typing import Callable
 
 from ..data import db
 from ..state import FencingTokenRejected, RunCancelled
+from ..runtime.cancellation import CancellationRequested
 from . import ai_tools, analysis_tools, kg_tools, ops_tools, query_tools
 from .schemas import SCHEMA_BY_NAME
 
@@ -208,7 +209,7 @@ def dispatch_with_context(name: str, arguments: dict | None, context, conn=None)
         if own:
             connection.commit()
         return result
-    except (FencingTokenRejected, RunCancelled):
+    except (FencingTokenRejected, RunCancelled, CancellationRequested):
         raise
     except Exception as error:
         if own:

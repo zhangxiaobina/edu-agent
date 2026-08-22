@@ -10,6 +10,7 @@ from typing import Any
 
 from ..data import db
 from ..state.store import FencingTokenRejected, RunCancelled
+from .cancellation import CancellationRequested
 from .models import BudgetExceeded, RunContext
 from .security import redact_sensitive
 from .transactions import (
@@ -334,7 +335,7 @@ class PolicyToolExecutor:
                 )
             else:
                 outcome = ToolOutcome(True, data=result)
-        except (FencingTokenRejected, RunCancelled):
+        except (FencingTokenRejected, RunCancelled, CancellationRequested):
             raise
         except TimeoutError as error:
             outcome = ToolOutcome(
@@ -577,7 +578,7 @@ class PolicyToolExecutor:
                 meta={"idempotent_replay": execution.replayed},
             )
             operation = execution.operation
-        except (FencingTokenRejected, RunCancelled):
+        except (FencingTokenRejected, RunCancelled, CancellationRequested):
             raise
         except IdempotencyConflict as error:
             outcome = ToolOutcome(

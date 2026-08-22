@@ -144,7 +144,7 @@ private-contract/
 | Agent Loop / turn 收尾 | `agent/conversation_loop.py`、`agent/turn_finalizer.py` | `agent/graph.py` 已有 `agent -> tools -> verify`、双预算和确定性结束门 | 不重写 LangGraph；增加 typed event、增量 journal 和唯一 finalizer | R2 |
 | 工具注册与窄核心 | `model_tools.py`、`toolsets.py`、`tools/registry.py` | `tools/registry.py`、MCP、entry point plugin 已能扩展 | 增加不可变 `ToolManifest`、来源/版本/hash/capability/并发元数据；会话内冻结 | R3 |
 | Provider/API Mode 解析 | `hermes_cli/runtime_provider.py` | 只有 OpenAI-compatible Chat Completions；Provider 选择等同于一个字符串 | 建立窄 `ProviderGateway`；首期只支持 `chat_completions` 与 `responses` 两种 mode | R1 |
-| 流式响应与中断 | `agent/chat_completion_helpers.py`、`agent/stream_single_writer.py`、`tools/interrupt.py` | API SSE 只有 `accepted/keepalive/completed`；取消在模型/工具边界协作检查 | 增加 token/tool/plan/usage 事件、单 writer fence 和 Provider 取消；不承诺强杀任意 SDK | R2 |
+| 流式响应与中断 | `agent/chat_completion_helpers.py`、`agent/stream_single_writer.py`、`tools/interrupt.py` | API SSE 已输出 typed Provider/Agent delta；单 writer fence 与统一 token 贯穿执行树 | 保持进程内流与持久恢复边界分离；不承诺强杀任意 SDK | R2 |
 | 工具参数修复与校验 | `model_tools.py::coerce_tool_args`、`agent/tool_executor.py` | 能解析 JSON 并递归校验基础 Schema；坏 JSON 结构化拒绝后由模型自行重试 | 只做 schema-guided、无歧义规范化；写工具禁止语义猜测；保留 original/normalized 审计 | R3 |
 | 顺序/并发工具执行 | `agent/tool_dispatch_helpers.py::_plan_tool_batch_segments`、`agent/tool_executor.py` | 同一 assistant 回合的 tool calls 顺序执行；只有受控子任务层已有并发 | 只并发显式 `parallel_safe` 的只读调用，写/审批/代码执行为 barrier，结果按原顺序回灌 | R3 |
 | 重试、限流与 fallback | `agent/retry_utils.py`、`agent/backend_identity.py` | 有错误分类、固定指数退避、熔断和一个 fallback | 增加 `Retry-After`、jitter、并发上限、按 deployment 的 breaker 和兼容性门禁 | R1 |
@@ -160,9 +160,9 @@ private-contract/
 
 ### 3.1 必须如实描述的现状
 
-- **当前 HTTP 仍不是 token streaming。** Provider Gateway 已能迭代真实 text/tool/usage 事件，但
-  `edu_agent/api.py::_stream_chat` 仍在线程中等待同步 `service.chat()`，期间只发送 keepalive，最后一次性发送
-  完整结果。它已经支持断流触发协作取消，但客户端侧不能写成“模型实时流式”。
+- **当前 HTTP 已消费真实 Provider/Agent 流。** `edu_agent/api.py::_stream_chat` 将 typed RunEvent 按单调
+  sequence 映射为 SSE，逐步发送 text/tool/plan/usage 与 terminal；keepalive 只在空闲时保活。EventBus
+  future-only 且不跨进程，因此这不是持久断线回放；完整崩溃恢复仍由 R2.7 收口。
 - **当前没有自动修复坏 JSON。** `parse_tool_arguments()` 对 malformed JSON 返回 `INVALID_JSON`；
   `_validate_value()` 会拒绝类型、范围和未知字段错误。模型下一轮可以自行修正，这是“校验 + 回灌”，不是修复器。
 - **当前工具批次是顺序执行。** `agent/graph.py::tools_node` 逐个执行 tool call。委派层的并发不能当作
@@ -174,7 +174,7 @@ private-contract/
   tool description；如果将来依赖 Provider prompt cache，需要冻结 session tool manifest，或先量化接受缓存失效的成本。
 - **当前 Provider 容错仍是单 primary + 单 fallback。** 已有 Chat Completions/Responses 两种显式 API mode、
   Provider 事件流、同步聚合兼容、`Retry-After`、按冻结 route identity 的 breaker/并发隔离和 capability-safe
-  fallback；仍没有凭据池、OAuth、多厂商完整矩阵或 HTTP token streaming。
+  fallback，以及 typed HTTP SSE；仍没有凭据池、OAuth 或多厂商完整矩阵。
 - **父子共享预算不能写成 Hermes 优势。** 当前 Hermes `IterationBudget` 明确给每个子 Agent 新预算；
   EduAgent 的 child 预留与 root 聚合更严格。不过现有 root ledger 主要统计委派树，父级主 Loop 的调用仍需纳入
   才能成为真正的全树总预算。
@@ -606,7 +606,7 @@ context overflow 不盲重试；fallback 不选择 capability 不兼容模型；
 |---|---|---|
 | 已实现 | 源码 + 专项测试 + 一键验收 | Plan/Evidence、事务工具、lease/fencing、Trace、受控委派 |
 | 已接入但未线上验证 | 协议/故障测试通过，真实环境报告明确 `not_run/not_verified` | 新 Provider adapter、外部数据 Adapter |
-| 计划中 | 只出现在本文，不写入 README “技术亮点” | HTTP SSE 真流、统一取消、ToolManifest、统一预算总账、Background Review |
+| 计划中 | 只出现在本文，不写入 README “技术亮点” | 五崩溃窗恢复、ToolManifest、统一预算总账、Background Review |
 
 ## 9. 当前下一步
 
@@ -617,8 +617,8 @@ R0-R5 拆成 33 个可独立验收和交接的提示词；前一编号未满足�
 
 1. 完成 R0：建立可追溯 Git/CI 基线，保持 Stage 8 单一公开验收入口，并修正 `commit="unavailable"`。
 2. R1 已完成：Provider Gateway 已跑通 Chat Completions/Responses mode、Retry-After 和兼容 fallback。
-3. R2.1-R2.5 已完成 RunEvent、RunJournal、增量工具消息、TurnFinalizer 和 Provider 真流；下一步 R2.6 将
-   Provider/Agent 事件接入 HTTP SSE，并贯穿统一取消与 writer fence。
+3. R2.1-R2.6 已完成 RunEvent、RunJournal、增量工具消息、TurnFinalizer、Provider/SSE 真流、统一取消与
+   writer fence；下一步 R2.7 完成五崩溃窗恢复和 R2 独立门禁。
 4. 完成 R3：冻结 ToolManifest，落地参数规范化和只读工具 segment 并发，再把 SQLite 工具收口为 SyntheticProvider。
 5. 完成 R4：补实际 token/overflow recovery、全树预算、drain 与 backup/restore。
 6. 完成 R5：跑一次固定真实模型独立 Test，更新演示、部署和运行手册，冻结秋招候选版。

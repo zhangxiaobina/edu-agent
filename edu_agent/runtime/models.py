@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from .cancellation import CancellationToken
+
 
 class BudgetExceeded(RuntimeError):
     pass
@@ -57,7 +59,22 @@ class RunContext:
     budget: IterationBudget = field(default_factory=IterationBudget)
     lease_owner: str | None = None
     fencing_token: int | None = None
+    cancellation_token: CancellationToken = field(
+        default_factory=CancellationToken,
+        repr=False,
+        compare=False,
+    )
     _control_check: Callable[[str], None] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _run_event_sink: Callable[[str, dict], None] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _provider_event_sink: Callable[[object], None] | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -77,8 +94,32 @@ class RunContext:
 
     def check_control(self, boundary: str) -> None:
         """Cooperative cancellation/fencing checkpoint used by the agent loop."""
+        self.cancellation_token.checkpoint(boundary)
         if self._control_check is not None:
             self._control_check(boundary)
+
+    def bind_event_sinks(
+        self,
+        *,
+        run_event_sink: Callable[[str, dict], None] | None = None,
+        provider_event_sink: Callable[[object], None] | None = None,
+    ) -> None:
+        self._run_event_sink = run_event_sink
+        self._provider_event_sink = provider_event_sink
+
+    @property
+    def streams_events(self) -> bool:
+        return self._run_event_sink is not None or self._provider_event_sink is not None
+
+    def emit_run_event(self, event_type: str, payload: dict | None = None) -> None:
+        self.cancellation_token.checkpoint("run_event.before_publish")
+        if self._run_event_sink is not None:
+            self._run_event_sink(event_type, dict(payload or {}))
+
+    def emit_provider_event(self, event: object) -> None:
+        self.cancellation_token.checkpoint("provider_event.before_publish")
+        if self._provider_event_sink is not None:
+            self._provider_event_sink(event)
 
     def bind_control_check(self, control_check: Callable[[str], None]) -> None:
         """Bind a cooperative child control check without a session lease.
@@ -103,6 +144,7 @@ class RunContext:
         run_id: str | None = None,
         max_model_calls: int = 12,
         max_tool_calls: int = 24,
+        cancellation_token: CancellationToken | None = None,
     ) -> RunContext:
         return cls(
             session_id=session_id,
@@ -116,4 +158,5 @@ class RunContext:
                 max_model_calls=max_model_calls,
                 max_tool_calls=max_tool_calls,
             ),
+            cancellation_token=cancellation_token or CancellationToken(),
         )

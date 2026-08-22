@@ -121,8 +121,10 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   `TurnFinalizer` 统一关闭未配对 call、复验 Plan/Evidence、提交唯一最终 assistant、结算 usage/budget、标记
   terminal 并执行有界后处理。Provider Gateway 已将 Chat Completions 与 Responses 的真实 SDK 流归一为
   text/tool/usage/completed/error 事件；同步 `chat()` 聚合相同事件流，首个 delta 后的失败不会重试或拼接
-  fallback 输出。HTTP SSE 尚未消费 Provider delta，当前仍为 `accepted/keepalive/completed`；完整取消传播与
-  writer fence 接线留给 R2.6。OTLP 默认关闭；只有安装
+  fallback 输出。HTTP SSE 通过单个、绑定 API attempt 与 session lease fencing token 的 `RunStreamWriter`
+  直接消费 Provider/Agent 事件，输出 accepted、text/tool/plan/usage 与 completed/error；keepalive 只在空闲时
+  保活。断流、显式 cancel 与 deadline 共用 `CancellationToken`，并贯穿模型、工具、委派和 sandbox；不支持
+  强杀的同步调用返回后仍必须通过 token/fence 才能提交。五崩溃窗恢复留给 R2.7。OTLP 默认关闭；只有安装
   `otel` extra 并显式配置 endpoint 后才尝试导出，失败不击穿主路径。
 
 ## 目录结构

@@ -2,6 +2,7 @@ from .config import AppConfig, PlanningConfig, load_config
 from .artifacts import ArtifactRef, ArtifactStore, ToolResultBudget
 from .context import ContextBudgetExceeded, ContextManager, ContextSnapshot
 from .context_engine import CheckpointContextEngine, CompactionResult, ContextEngine
+from .cancellation import Cancellation, CancellationRequested, CancellationToken
 from .models import IterationBudget, RunContext
 from .manager import ActiveRun, LeaseClaim, RuntimeManager
 from .security import redact_sensitive
@@ -23,6 +24,9 @@ __all__ = [
     "ContextEngine",
     "ContextBudgetExceeded",
     "CheckpointContextEngine",
+    "Cancellation",
+    "CancellationRequested",
+    "CancellationToken",
     "CompactionResult",
     "ExecutionPolicy",
     "IterationBudget",

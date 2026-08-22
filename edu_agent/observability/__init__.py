@@ -28,6 +28,7 @@ from .events import (
     SubscriptionClosed,
 )
 from .redaction import RedactionPolicy, contains_sensitive_data
+from .run_stream import RunStreamWriter, RunStreamWriterRegistry
 from .telemetry import OptionalTelemetryExporter, build_opentelemetry_exporter
 from .trace import TracePage, TraceRepository
 
@@ -53,6 +54,8 @@ __all__ = [
     "RunEventValidationError",
     "RunEventWriterRejected",
     "RunPhase",
+    "RunStreamWriter",
+    "RunStreamWriterRegistry",
     "RuntimeEvent",
     "SCHEMA_VERSION",
     "SlowConsumerError",

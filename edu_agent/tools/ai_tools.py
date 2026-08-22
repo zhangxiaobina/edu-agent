@@ -99,6 +99,8 @@ def run_code(conn: sqlite3.Connection, source_code, language="python", stdin=Non
     )
     cancel_event = _ContextCancelEvent(_context) if _context is not None else None
     result = provider.execute(request, cancel_event=cancel_event)
+    if _context is not None:
+        _context.check_control("code_execution.after_call")
     if not result.success:
         return {
             "outcome": {"timeout": "TLE", "memory_limit": "MLE"}.get(result.status, result.status.upper()),

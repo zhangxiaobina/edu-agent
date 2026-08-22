@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
 
 from .base import Engine, EngineResponse
+from ..runtime.cancellation import (
+    CancellationToken,
+    accepts_cancellation_token,
+    call_with_cancellation,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -375,6 +380,8 @@ class ProviderAdapter(Protocol):
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        cancellation_token: CancellationToken | None = None,
     ) -> EngineResponse:
         ...
 
@@ -388,6 +395,7 @@ class ProviderStreamAdapter(ProviderAdapter, Protocol):
         tools: list[dict],
         *,
         attempt: int = 1,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         ...
 
@@ -630,10 +638,18 @@ class ProviderGateway:
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        cancellation_token: CancellationToken | None = None,
     ) -> EngineResponse:
         """Dispatch one normalized synchronous request without changing Engine.chat."""
         self.validate_request(route, messages, tools)
-        return self.adapter_for(route).chat(route, messages, tools)
+        return call_with_cancellation(
+            self.adapter_for(route).chat,
+            route,
+            messages,
+            tools,
+            cancellation_token=cancellation_token,
+        )
 
     def stream_events(
         self,
@@ -642,6 +658,7 @@ class ProviderGateway:
         tools: list[dict],
         *,
         attempt: int = 1,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         """Dispatch one validated provider event stream."""
         self.validate_request(route, messages, tools)
@@ -650,12 +667,13 @@ class ProviderGateway:
         stream_events = getattr(self.adapter_for(route), "stream_events", None)
         if not callable(stream_events):
             raise ValueError("provider adapter 缺少 stream_events")
-        return stream_events(
-            route,
-            messages,
-            tools,
-            attempt=attempt,
-        )
+        kwargs = {"attempt": attempt}
+        if (
+            cancellation_token is not None
+            and accepts_cancellation_token(stream_events)
+        ):
+            kwargs["cancellation_token"] = cancellation_token
+        return stream_events(route, messages, tools, **kwargs)
 
     def begin_turn(self, spec: ProviderSpec) -> ResolvedRoute:
         _reject_credential_in_route_fields(spec)
@@ -787,8 +805,15 @@ class GatewayEngine(Engine):
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        cancellation_token: CancellationToken | None = None,
     ) -> EngineResponse:
-        return self.gateway.chat(route, messages, tools)
+        return self.gateway.chat(
+            route,
+            messages,
+            tools,
+            cancellation_token=cancellation_token,
+        )
 
     def stream_chat_on_route(
         self,
@@ -797,12 +822,14 @@ class GatewayEngine(Engine):
         tools: list[dict],
         *,
         attempt: int = 1,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         return self.gateway.stream_events(
             route,
             messages,
             tools,
             attempt=attempt,
+            cancellation_token=cancellation_token,
         )
 
     def stream_chat(
@@ -811,18 +838,31 @@ class GatewayEngine(Engine):
         tools: list[dict],
         *,
         attempt: int = 1,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         return self.gateway.stream_events(
             self.route,
             messages,
             tools,
             attempt=attempt,
+            cancellation_token=cancellation_token,
         )
 
     stream_events = stream_chat
 
-    def chat(self, messages: list[dict], tools: list[dict]) -> EngineResponse:
-        return self.gateway.chat(self.route, messages, tools)
+    def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> EngineResponse:
+        return self.gateway.chat(
+            self.route,
+            messages,
+            tools,
+            cancellation_token=cancellation_token,
+        )
 
 
 __all__ = [

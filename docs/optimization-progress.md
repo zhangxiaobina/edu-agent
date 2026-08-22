@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R2.5
-- next_prompt: R2.6
+- last_completed_prompt: R2.6
+- next_prompt: R2.7
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent、R2.2 RunJournal、R2.3 工具消息增量提交、R2.4 幂等 TurnFinalizer 与 R2.5 Provider 真流/同步聚合已完成；HTTP SSE、统一取消与完整恢复门禁仍待 R2.6-R2.7
+- stage_gate_reason: R0 与 R1 门禁已通过，R2.1-R2.6 已完成 typed RunEvent、RunJournal、工具消息增量提交、幂等 TurnFinalizer、Provider/SSE 真流、统一取消与 writer fence；R2 总门禁仍待 R2.7 五崩溃窗恢复与独立验收
 
 ## Baseline Reproduction
 
@@ -656,3 +656,40 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R2.5 passed`；R2 总门禁保持 `in_progress`，不能把 Provider 真流误写成 HTTP SSE 已流式化。
 - next: R2.6，将 R2.5 Provider 事件接入 HTTP SSE，映射 RunEvent v2，贯穿统一取消与 writer fence；不重复实现
   Provider 核心解析，也不把 SSE terminal 行为提前扩展到本阶段。
+
+### R2.6 - 2026-08-22
+
+- commit/evidence: 会话从 `72d52509ddde022e8c01d16e85ba59dc96e41f38`（`feat: add provider event streaming`，
+  `main` 与 `origin/main` 同步）开始；本次未创建本地提交或推送。开始时工作区干净，当前改动均属于 R2.6，
+  未覆盖用户已有文件。
+- SSE/RunEvent: `EduAgentApi._stream_chat` 直接订阅 R2.5 Provider/Agent 真流并发送完整 RunEvent v2 envelope；
+  SSE event id 使用单调 sequence，覆盖 accepted、text/tool-call delta、tool started/completed、plan updated、
+  usage、fallback 和 completed/error。keepalive 只在队列空闲时保活。HTTP handler 是唯一 socket writer；并发
+  producer 只写有界 `RunEventBus` subscription。
+- writer/fence: 新增每个 run/API attempt 唯一的 `RunStreamWriter` 与 registry，取得 session lease 后绑定真实
+  fencing token。writer 内锁串行化发布并拒绝旧 Provider attempt、fallback 前一 attempt 的迟到流、被替换 API
+  owner、取消后 producer 与 terminal 后 delta；新 attempt 会关闭旧 writer 并取消旧 token。completed/error
+  是唯一 terminal，后续事件不可进入 socket。
+- cancellation/lifecycle: 新增线程安全、幂等、支持 deadline/父子传播/关闭回调的 `CancellationToken`。客户端
+  断流、`POST /v1/runs/{id}/cancel` 与 deadline 走同一 token，并传入 Gateway/两种 adapter、ResilientEngine、
+  Agent/Planner、ToolExecutor/事务提交检查、delegation child 和代码执行 Provider。Provider stream cancel 会关闭
+  可关闭的 SDK iterator；无法强杀的同步调用在返回后检查 token 与 lease fence，禁止迟到提交。RuntimeManager
+  在 token 取消时停止 heartbeat，terminal 后释放 lease；API 对慢消费者、writer/socket 异常和未停止 Provider
+  使用有界队列、写超时与有界 request cleanup。
+- migrations/config: 无数据库 migration、无依赖、无环境变量或 AppConfig 变更；API 新增的 buffer、keepalive、
+  cleanup 与 socket write timeout 均有保守构造默认值。不新增崩溃恢复策略。
+- fixtures/tests: 新增 `tests/test_api_sse_cancellation.py` 的真实 `127.0.0.1:0` 测试，覆盖 accepted/首 delta
+  顺序、单调 id、plan/tool lifecycle、半段 tool JSON 断流、fallback 旧流迟到、terminal 后 delta、deadline、
+  慢消费者和重复 cancel；新增 CancellationToken 直接合同、同步 sandbox 迟到结果拒绝及父 token 取消委派树测试。
+- verification: `uv lock --check`、`uv pip check`、全仓 ruff 与 `git diff --check` 通过；显式清空模型/平台
+  凭据并禁用外部 pytest plugin 后，API/stream/cancel/sandbox/delegation/runtime 专项为 `179 passed`，全量
+  离线回归为 `409 passed`。受限沙箱内首轮专项除回环测试外 `165 passed`，7 个失败均为绑定
+  `127.0.0.1:0` 时的 `PermissionError: [Errno 1] Operation not permitted`；按协议在获准本机回环环境复跑
+  同组测试后全部通过。
+- not_verified: 未访问公网或真实 Provider/model，未运行真实 Docker/Jobe、GitHub-hosted CI 或生产反向代理；
+  未运行 R2 阶段收口入口 `zsh scripts/accept_stage8.sh`。真实 socket 与锁定 SDK/wire fixture 已验证。
+- residual_risks: EventBus 仍是进程内 future-only transport，不提供跨进程或 `Last-Event-ID` 历史 replay；同步
+  SDK 只能协作取消并等待自身 timeout，但返回结果会被 token/fence 拒绝。五崩溃窗、进程重开恢复决策和 R2
+  独立总门禁留给 R2.7；工具仍顺序执行。
+- gate: `R2.6 passed`；R2 总门禁保持 `in_progress`，不得把本阶段描述成已完成五崩溃窗恢复。
+- next: R2.7，基于 R2.1-R2.6 交接完成五崩溃窗、进程重开恢复决策、演示与 R2 独立门禁；不得开始工具并发。

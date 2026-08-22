@@ -7,6 +7,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from ..engine.base import Engine
+from ..runtime.cancellation import call_with_cancellation
 from ..runtime.models import RunContext
 from .models import PlanSpec, PlanValidationError, validate_plan_graph
 
@@ -53,7 +54,8 @@ class ModelPlanGenerator:
             "max_steps": max_steps,
             "output_schema": PlanSpec.model_json_schema(),
         }
-        response = self.engine.chat(
+        response = call_with_cancellation(
+            self.engine.chat,
             [
                 {
                     "role": "system",
@@ -66,6 +68,7 @@ class ModelPlanGenerator:
                 {"role": "user", "content": task},
             ],
             [],
+            cancellation_token=context.cancellation_token,
         )
         if response.tool_calls:
             raise PlanGenerationError(

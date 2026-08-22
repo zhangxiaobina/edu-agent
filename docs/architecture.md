@@ -71,7 +71,8 @@ primary/fallback route plan 在 turn 起点冻结；fallback 只允许连接、�
 
 流式重试复用同一 breaker、semaphore、Retry-After、fallback capability 和审计策略。只有首个 text/tool delta
 前的瞬态失败能继续 retry/fallback；一旦已有可见 delta，error 即为该流终态，不会无提示拼接另一 attempt。
-旧 attempt 或旧 route 迟到的事件转成可审计 ignored，不进入聚合结果。HTTP terminal 映射尚未接入这一层。
+旧 attempt 或旧 route 迟到的事件转成可审计 ignored，不进入聚合结果。R2.6 将胜出流映射为 HTTP SSE，
+Provider/Agent 失败统一结束为 typed error，terminal 后 writer 拒绝所有 delta。
 
 ## 请求数据流
 
@@ -97,14 +98,16 @@ sequenceDiagram
     T->>DB: tool event / operation / outbox / artifact index
     G-->>S: answer + budget + plan
     S->>DB: TurnFinalizer cursor -> unique final + usage + terminal
-    S-->>A: ChatResult
+    S-->>A: typed RunEvent + ChatResult
     A->>S: finish_api_request(response)
     S->>R: release terminal run lease
-    A-->>C: JSON or SSE completed
+    A-->>C: JSON or typed SSE delta/terminal
 ```
 
-HTTP SSE 目前只流式传输状态，不伪装 token streaming，也尚未消费上述 Provider 事件。连接断开后 API 请求
-协作取消；若外部模型/工具调用不可中断，它返回后仍需通过取消和 fencing 检查，结果才可能提交。
+HTTP SSE 由 handler 单线程写 socket，Provider、Agent、工具和 Plan 的并发事件只进入有界 RunEvent 队列。
+每帧 `id` 使用单调 sequence；keepalive 只用于空闲连接保活，不代表 streaming 能力。连接断开、显式 cancel
+与 deadline 取消同一个 run token；若外部模型/工具调用不可强杀，它返回后仍需通过取消和 fencing 检查，
+迟到结果不会提交。
 
 `api_requests` 在 actor/tenant 内将 request id 永久绑定 payload hash，并在启动 Agent 前原子绑定预分配
 run id、owner lease 与 attempt。首次响应先规范化并脱敏、落库并计算 response hash，再返回；重放读取
@@ -247,7 +250,8 @@ fail closed；buffer 满时只取消该慢消费者、清空不完整队列并�
 
 R2.1 只用 fake producer 验证 RunEvent 协议；R2.3 已把 assistant tool-call envelope 和逐个 tool result 移到
 Agent Loop 的稳定提交点。R2.5 已在 Provider Gateway 提供真实 delta 迭代器，并让同步 `chat()` 聚合同一流；
-HTTP SSE 仍只有 `accepted/keepalive/completed`，Provider-to-RunEvent/SSE 映射和统一取消留给 R2.6。
+R2.6 将 Provider/Agent 事件映射为 typed SSE，并用单 writer、attempt/fence、共享 CancellationToken、慢消费者
+隔离和有界清理约束 socket 生命周期。EventBus 仍是进程内 future-only transport，不提供断线历史回放。
 
 ### RunJournal 持久恢复边界（R2.2）
 
@@ -275,7 +279,7 @@ envelope 的消息行、全部 call 行和 `model -> tools` journal 更新在同
 提升到 11。R2.4 `TurnFinalizer` 以持久 cursor、CAS 和 `final-assistant:<run_id>` 唯一键统一最终消息、
 Plan/Evidence 复验、usage/budget、run terminal、后处理与有界 cleanup。API request completion 和 lease
 release 都位于可证明的 terminal 之后；terminal 后恢复仍会完成未结束的 hooks/cleanup。Provider streaming 已
-由 R2.5 完成；HTTP SSE 事件映射、完整取消传播和并发工具仍未实现。
+由 R2.5 完成；HTTP SSE 事件映射与统一取消由 R2.6 完成。并发工具和五崩溃窗恢复仍未实现。
 
 ## 安全边界
 

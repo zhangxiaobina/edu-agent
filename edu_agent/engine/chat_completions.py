@@ -12,6 +12,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
+from ..runtime.cancellation import CancellationRequested, CancellationToken
 from .base import EngineResponse, ToolCall
 from .gateway import (
     ApiMode,
@@ -198,9 +199,17 @@ class ChatCompletionsAdapter:
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        cancellation_token: CancellationToken | None = None,
     ) -> EngineResponse:
         return aggregate_provider_stream(
-            self.stream_events(route, messages, tools, attempt=1)
+            self.stream_events(
+                route,
+                messages,
+                tools,
+                attempt=1,
+                cancellation_token=cancellation_token,
+            )
         )
 
     def stream_events(
@@ -210,13 +219,27 @@ class ChatCompletionsAdapter:
         tools: list[dict],
         *,
         attempt: int = 1,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[ProviderStreamEvent]:
+        if cancellation_token is not None:
+            cancellation_token.checkpoint("chat_completions.before_request")
         request = self.build_request(route, messages, tools)
         if not (self.capabilities.streaming and route.capabilities.streaming):
             raise ProviderCapabilityError(("streaming",))
         request.update(stream=True, stream_options={"include_usage": True})
+        raw_stream = None
         try:
             raw_stream = self._client_for(route).chat.completions.create(**request)
+            if cancellation_token is not None:
+                cancellation_token.checkpoint("chat_completions.after_request")
+        except CancellationRequested:
+            close = getattr(raw_stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            raise
         except Exception as error:
             yield provider_stream_error_event(
                 route=route,
@@ -231,9 +254,20 @@ class ChatCompletionsAdapter:
             return
 
         close = getattr(raw_stream, "close", None)
+        unregister_close = (
+            cancellation_token.register(lambda _: close())
+            if cancellation_token is not None and callable(close)
+            else lambda: None
+        )
         try:
             json_response = read_stream_json_response(raw_stream)
+        except CancellationRequested:
+            unregister_close()
+            raise
         except Exception as error:
+            unregister_close()
+            if cancellation_token is not None:
+                cancellation_token.checkpoint("chat_completions.read_response")
             if callable(close):
                 close()
             yield provider_stream_error_event(
@@ -251,6 +285,7 @@ class ChatCompletionsAdapter:
                     attempt=attempt,
                 )
             finally:
+                unregister_close()
                 if callable(close):
                     close()
             return
@@ -260,6 +295,8 @@ class ChatCompletionsAdapter:
         visible = False
         try:
             for raw_chunk in raw_stream:
+                if cancellation_token is not None:
+                    cancellation_token.checkpoint("chat_completions.chunk")
                 events, chunk_terminal, chunk_content_seen = self._chunk_events(
                     raw_chunk,
                     route=route,
@@ -284,6 +321,8 @@ class ChatCompletionsAdapter:
                         )
                         return
                     terminal = chunk_terminal
+        except CancellationRequested:
+            raise
         except Exception as error:
             yield provider_stream_error_event(
                 route=route,
@@ -293,6 +332,7 @@ class ChatCompletionsAdapter:
             )
             return
         finally:
+            unregister_close()
             if callable(close):
                 close()
 

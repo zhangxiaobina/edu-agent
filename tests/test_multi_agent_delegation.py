@@ -18,6 +18,7 @@ from edu_agent.delegation import (
 )
 from edu_agent.knowledge import KnowledgeToolProvider, SQLiteKnowledgeProvider, build_synthetic_corpus
 from edu_agent.runtime.artifacts import ArtifactStore
+from edu_agent.runtime.cancellation import CancellationToken
 from edu_agent.runtime.models import RunContext
 from edu_agent.state import StateStore
 from edu_agent.tools import registry
@@ -272,6 +273,50 @@ def test_parent_cancel_propagates_to_running_children(tmp_path):
     runtime.close()
     assert not thread.is_alive()
     assert result_holder[0].results[0].status == SubtaskStatus.cancelled
+    assert runtime.tree(parent)["nodes"][0]["status"] == "cancelled"
+
+
+def test_parent_cancellation_token_stops_child_and_rejects_late_result(tmp_path):
+    entered = threading.Event()
+    token = CancellationToken()
+
+    def runner(execution):
+        entered.set()
+        while True:
+            execution.checkpoint("test.token_wait")
+            time.sleep(0.01)
+
+    _, _, runtime = _runtime(
+        tmp_path,
+        policy=DelegationPolicy(
+            max_concurrency=1,
+            child_timeout_seconds=2,
+            worker_lease_seconds=3,
+        ),
+        child_runner=runner,
+    )
+    parent = RunContext.create(
+        session_id="parent-session",
+        run_id="token-parent",
+        actor_id="teacher-1",
+        role="teacher",
+        course_ids={1},
+        cancellation_token=token,
+    )
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(runtime.delegate(parent, [_task("token-cancel")]))
+    )
+    thread.start()
+    assert entered.wait(1)
+    started = time.monotonic()
+    assert token.cancel("SSE disconnected", source="client_disconnect") is True
+    assert token.cancel("duplicate", source="explicit") is False
+    thread.join(1)
+    runtime.close()
+    assert not thread.is_alive()
+    assert time.monotonic() - started < 0.5
+    assert results[0].results[0].status == SubtaskStatus.cancelled
     assert runtime.tree(parent)["nodes"][0]["status"] == "cancelled"
 
 

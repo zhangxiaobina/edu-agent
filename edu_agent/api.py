@@ -3,17 +3,34 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import time
+import threading
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeout,
+    wait as wait_futures,
+)
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 
+from .observability import (
+    RunEvent,
+    RunEventBus,
+    RunEventTerminalError,
+    RunEventType,
+    RunEventWriterRejected,
+    RunStreamWriter,
+    RunStreamWriterRegistry,
+    SlowConsumerError,
+    SubscriptionClosed,
+)
 from .observability.redaction import RedactionPolicy
+from .runtime.cancellation import CancellationRequested, CancellationToken
 
 
 @dataclass(frozen=True)
@@ -92,15 +109,82 @@ class EduAgentApi:
         authenticator: Authenticator,
         max_timeout_seconds: float = 300.0,
         redaction: RedactionPolicy | None = None,
+        stream_buffer_size: int = 128,
+        stream_keepalive_seconds: float = 0.25,
+        stream_cleanup_seconds: float = 1.0,
+        stream_write_timeout_seconds: float = 1.0,
     ):
+        if stream_buffer_size <= 0:
+            raise ValueError("stream_buffer_size must be positive")
+        if (
+            stream_keepalive_seconds <= 0
+            or stream_cleanup_seconds <= 0
+            or stream_write_timeout_seconds <= 0
+        ):
+            raise ValueError("stream keepalive/cleanup seconds must be positive")
         self.service = service
         self.authenticator = authenticator
         self.max_timeout_seconds = max_timeout_seconds
         self.redaction = redaction or RedactionPolicy()
         self._pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="edu-agent-api")
+        self._run_events = RunEventBus(max_buffer_size=stream_buffer_size)
+        self._stream_writers = RunStreamWriterRegistry(self._run_events)
+        self._stream_buffer_size = int(stream_buffer_size)
+        self._stream_keepalive_seconds = float(stream_keepalive_seconds)
+        self._stream_cleanup_seconds = float(stream_cleanup_seconds)
+        self._stream_write_timeout_seconds = float(stream_write_timeout_seconds)
+        self._controls_lock = threading.Lock()
+        self._controls: dict[str, CancellationToken] = {}
+        self._lifecycle_lock = threading.Lock()
+        self._futures: set[Future[Any]] = set()
+        self._closing = False
 
     def close(self) -> None:
-        self._pool.shutdown(wait=True, cancel_futures=False)
+        with self._lifecycle_lock:
+            if self._closing:
+                return
+            self._closing = True
+            futures = tuple(self._futures)
+        with self._controls_lock:
+            controls = tuple(self._controls.values())
+            self._controls.clear()
+        for token in controls:
+            token.cancel("API is closing", source="shutdown")
+        self._stream_writers.close()
+        self._run_events.close()
+        wait_futures(futures, timeout=self._stream_cleanup_seconds)
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def _submit(self, call, /, *args) -> Future[Any]:
+        with self._lifecycle_lock:
+            if self._closing:
+                raise RuntimeError("API is closing")
+            future = self._pool.submit(call, *args)
+            self._futures.add(future)
+
+        def release(completed: Future[Any]) -> None:
+            with self._lifecycle_lock:
+                self._futures.discard(completed)
+
+        future.add_done_callback(release)
+        return future
+
+    def _register_control(self, run_id: str, token: CancellationToken) -> None:
+        with self._controls_lock:
+            current = self._controls.get(run_id)
+            if current is not None and current is not token:
+                current.cancel("superseded API attempt", source="owner_replaced")
+            self._controls[run_id] = token
+
+    def _release_control(self, run_id: str, token: CancellationToken) -> None:
+        with self._controls_lock:
+            if self._controls.get(run_id) is token:
+                self._controls.pop(run_id, None)
+
+    def _cancel_control(self, run_id: str, *, reason: str, source: str) -> bool:
+        with self._controls_lock:
+            token = self._controls.get(run_id)
+        return token.cancel(reason, source=source) if token is not None else False
 
     @staticmethod
     def _request_hash(payload: dict[str, Any]) -> str:
@@ -129,15 +213,35 @@ class EduAgentApi:
         owner_id: str,
         attempt: int,
         recovery_action: str = "execute",
+        cancellation_token: CancellationToken | None = None,
+        stream_writer: RunStreamWriter | None = None,
     ) -> dict[str, Any]:
         try:
+            if cancellation_token is not None:
+                cancellation_token.checkpoint("api.run.before_service")
             if recovery_action == "resume":
                 result = self.service.resume_api_run(
                     run_id,
                     actor_id=principal.actor_id,
                     tenant_id=principal.tenant_id,
+                    cancellation_token=cancellation_token,
+                    stream_writer=stream_writer,
                 )
             elif recovery_action == "recover_completed":
+                terminal = self.service.get_run_status(
+                    run_id,
+                    actor_id=principal.actor_id,
+                    tenant_id=principal.tenant_id,
+                )
+                if stream_writer is not None and terminal is not None:
+                    stream_writer.bind(
+                        session_id=terminal["session_id"],
+                        fencing_token=0,
+                    )
+                    stream_writer.publish(
+                        RunEventType.RUN_PHASE,
+                        {"phase": "accepted", "status": "replaying"},
+                    )
                 result = self.service.recover_chat_result(
                     run_id,
                     actor_id=principal.actor_id,
@@ -152,6 +256,8 @@ class EduAgentApi:
                     course_ids={int(item) for item in payload.get("course_ids", [])},
                     session_id=payload.get("session_id"),
                     run_id=run_id,
+                    cancellation_token=cancellation_token,
+                    stream_writer=stream_writer,
                 )
             terminal = self.service.get_run_status(
                 run_id,
@@ -178,8 +284,29 @@ class EduAgentApi:
                 response_content_type="application/json; charset=utf-8",
                 retention_seconds=self._request_retention_seconds(success=True),
             )
+            if stream_writer is not None and not stream_writer.terminal:
+                stream_writer.complete(
+                    {
+                        "stop_reason": response.get("stop_reason") or "completed",
+                        "response": record["response"],
+                    }
+                )
             return record["response"]
         except Exception as error:
+            if stream_writer is not None and not stream_writer.bound:
+                try:
+                    failed_run = self.service.get_run_status(
+                        run_id,
+                        actor_id=principal.actor_id,
+                        tenant_id=principal.tenant_id,
+                    )
+                    if failed_run is not None:
+                        stream_writer.bind(
+                            session_id=failed_run["session_id"],
+                            fencing_token=0,
+                        )
+                except (KeyError, PermissionError, RunEventWriterRejected):
+                    pass
             try:
                 terminal = self.service.get_run_status(
                     run_id,
@@ -206,6 +333,13 @@ class EduAgentApi:
                         response_content_type="application/json; charset=utf-8",
                         retention_seconds=self._request_retention_seconds(success=True),
                     )
+                    if stream_writer is not None and not stream_writer.terminal:
+                        stream_writer.complete(
+                            {
+                                "stop_reason": response.get("stop_reason") or "completed",
+                                "response": record["response"],
+                            }
+                        )
                     return record["response"]
                 self.service.finish_api_request(
                     actor_id=principal.actor_id,
@@ -221,7 +355,22 @@ class EduAgentApi:
                 )
             except RuntimeError:
                 pass
+            if stream_writer is not None and not stream_writer.terminal:
+                try:
+                    stream_writer.fail(
+                        code=(
+                            "CANCELLED"
+                            if isinstance(error, CancellationRequested)
+                            else "INTERNAL"
+                        ),
+                        message=f"{type(error).__name__}: {error}",
+                    )
+                except (RunEventTerminalError, RunEventWriterRejected):
+                    pass
             raise
+        finally:
+            if cancellation_token is not None:
+                self._release_control(run_id, cancellation_token)
 
     def _claim_request(
         self, payload: dict[str, Any], principal: Principal, request_id: str
@@ -298,21 +447,31 @@ class EduAgentApi:
         self._role(principal, {"student", "teacher", "admin"})
         if not str(payload.get("message", "")).strip():
             raise ApiError(400, "INVALID_ARGUMENT", "message is required")
+        timeout = min(float(payload.get("timeout_seconds", self.max_timeout_seconds)), self.max_timeout_seconds)
+        if timeout <= 0:
+            raise ApiError(400, "INVALID_ARGUMENT", "timeout_seconds must be positive")
         claim, run_id, owner_id, attempt = self._claim_request(payload, principal, request_id)
         if claim["status"] == "completed":
             return self._record_response(claim, replay=True)
         if payload.get("stream") is True:
             return ApiResponse(
                 200,
-                self._stream_chat(payload, principal, request_id, run_id, owner_id, attempt),
+                self._stream_chat(
+                    payload,
+                    principal,
+                    request_id,
+                    run_id,
+                    owner_id,
+                    attempt,
+                    recovery_action=claim.get("recovery_action", "execute"),
+                ),
                 content_type="text/event-stream; charset=utf-8",
                 headers={"Cache-Control": "no-cache"},
             )
-        timeout = min(float(payload.get("timeout_seconds", self.max_timeout_seconds)), self.max_timeout_seconds)
-        if timeout <= 0:
-            raise ApiError(400, "INVALID_ARGUMENT", "timeout_seconds must be positive")
+        cancellation_token = CancellationToken.with_timeout(timeout)
+        self._register_control(run_id, cancellation_token)
         recovery_action = claim.get("recovery_action", "execute")
-        future = self._pool.submit(
+        future = self._submit(
             self._run_chat,
             payload,
             principal,
@@ -321,10 +480,13 @@ class EduAgentApi:
             owner_id,
             attempt,
             recovery_action,
+            cancellation_token,
+            None,
         )
         try:
             response = future.result(timeout=timeout)
         except FutureTimeout as error:
+            cancellation_token.cancel("chat deadline exceeded", source="deadline")
             self.service.cancel_run(
                 run_id, actor_id=principal.actor_id, tenant_id=principal.tenant_id
             )
@@ -336,6 +498,19 @@ class EduAgentApi:
             raise
         return ApiResponse(200, response)
 
+    @staticmethod
+    def _sse_event(event: RunEvent) -> bytes:
+        name = event.event_type.value
+        if event.event_type is RunEventType.RUN_PHASE:
+            phase = event.payload.get("phase")
+            if phase == "accepted":
+                name = "accepted"
+        return (
+            f"id: {event.sequence}\nevent: {name}\ndata: ".encode("utf-8")
+            + _json_bytes(event.to_dict())
+            + b"\n\n"
+        )
+
     def _stream_chat(
         self,
         payload: dict[str, Any],
@@ -344,11 +519,29 @@ class EduAgentApi:
         run_id: str,
         owner_id: str,
         attempt: int,
+        recovery_action: str = "execute",
     ) -> Iterator[bytes]:
+        timeout = min(
+            float(payload.get("timeout_seconds", self.max_timeout_seconds)),
+            self.max_timeout_seconds,
+        )
+        cancellation_token = CancellationToken.with_timeout(timeout)
+        writer = self._stream_writers.open(
+            run_id=run_id,
+            attempt=attempt,
+            writer_id=f"api:{owner_id}",
+            cancellation_token=cancellation_token,
+        )
+        subscription = self._run_events.subscribe(
+            run_id=run_id,
+            attempt=attempt,
+            buffer_size=self._stream_buffer_size,
+        )
+        self._register_control(run_id, cancellation_token)
         future = None
-        completed = False
+        terminal_seen = False
         try:
-            future = self._pool.submit(
+            future = self._submit(
                 self._run_chat,
                 payload,
                 principal,
@@ -356,49 +549,77 @@ class EduAgentApi:
                 run_id,
                 owner_id,
                 attempt,
-                "execute",
+                recovery_action,
+                cancellation_token,
+                writer,
             )
-            for _ in range(20):
-                if future.done() or self.service.get_run_status(
-                    run_id,
-                    actor_id=principal.actor_id,
-                    tenant_id=principal.tenant_id,
-                ) is not None:
-                    break
-                time.sleep(0.005)
-            yield b"event: accepted\ndata: " + _json_bytes(
-                {"request_id": request_id, "run_id": run_id, "status": "accepted"}
-            ) + b"\n\n"
-            deadline = time.monotonic() + min(
-                float(payload.get("timeout_seconds", self.max_timeout_seconds)),
-                self.max_timeout_seconds,
-            )
-            while not future.done():
-                if time.monotonic() >= deadline:
-                    self.service.cancel_run(
-                        run_id, actor_id=principal.actor_id, tenant_id=principal.tenant_id
-                    )
-                    raise ApiError(504, "TIMEOUT", "stream exceeded its cooperative timeout")
-                yield b": keepalive\n\n"
-                time.sleep(0.05)
-            response = future.result()
-            completed = True
-            yield b"event: completed\ndata: " + _json_bytes(response) + b"\n\n"
+            while not terminal_seen:
+                if cancellation_token.cancelled:
+                    cancellation = cancellation_token.cancellation
+                    if cancellation is not None and cancellation.source == "deadline":
+                        self.service.cancel_run(
+                            run_id,
+                            actor_id=principal.actor_id,
+                            tenant_id=principal.tenant_id,
+                        )
+                try:
+                    event = subscription.get(timeout=self._stream_keepalive_seconds)
+                except TimeoutError:
+                    if future.done() and not writer.bound:
+                        future.result()
+                    yield b": keepalive\n\n"
+                    continue
+                yield self._sse_event(event)
+                terminal_seen = event.event_type in {
+                    RunEventType.COMPLETED,
+                    RunEventType.ERROR,
+                }
+            if future.done():
+                try:
+                    future.result()
+                except Exception:
+                    pass
         except GeneratorExit:
+            cancellation_token.cancel(
+                "client disconnected from SSE stream",
+                source="client_disconnect",
+            )
             raise
+        except SlowConsumerError:
+            cancellation_token.cancel(
+                "SSE consumer exceeded the bounded event buffer",
+                source="slow_consumer",
+            )
+        except SubscriptionClosed:
+            pass
         except Exception as error:
             api_error = error if isinstance(error, ApiError) else ApiError(
                 500, "INTERNAL", f"{type(error).__name__}: {error}"
             )
-            yield b"event: error\ndata: " + _json_bytes(api_error.payload(request_id)) + b"\n\n"
+            if not terminal_seen:
+                cancellation_token.cancel(api_error.message, source="writer_error")
         finally:
-            if not completed:
+            subscription.cancel()
+            if not terminal_seen:
+                cancellation_token.cancel(
+                    "SSE stream closed before a terminal event",
+                    source="client_disconnect",
+                )
                 try:
                     self.service.cancel_run(
                         run_id, actor_id=principal.actor_id, tenant_id=principal.tenant_id
                     )
                 except (KeyError, PermissionError):
                     pass
+            if future is not None and not future.done():
+                future.cancel()
+                try:
+                    future.result(timeout=self._stream_cleanup_seconds)
+                except Exception:
+                    pass
+            self._release_control(run_id, cancellation_token)
+            self._stream_writers.release(writer)
+            cancellation_token.close()
 
     def _openapi(self) -> dict[str, Any]:
         return {
@@ -460,9 +681,20 @@ class EduAgentApi:
                         raise ApiError(404, "NOT_FOUND", "run not found")
                     return ApiResponse(200, record)
                 if method == "POST" and parts[3:] == ["cancel"]:
-                    return ApiResponse(202, {"cancel_requested": self.service.cancel_run(
-                        run_id, actor_id=principal.actor_id, tenant_id=principal.tenant_id
-                    )})
+                    requested = self.service.cancel_run(
+                        run_id,
+                        actor_id=principal.actor_id,
+                        tenant_id=principal.tenant_id,
+                    )
+                    controlled = self._cancel_control(
+                        run_id,
+                        reason="run cancellation requested",
+                        source="explicit",
+                    )
+                    return ApiResponse(
+                        202,
+                        {"cancel_requested": requested or controlled},
+                    )
                 if method == "POST" and parts[3:] == ["resume"]:
                     result = self.service.resume_run(
                         run_id, actor_id=principal.actor_id, tenant_id=principal.tenant_id
@@ -639,11 +871,14 @@ def make_http_server(api: EduAgentApi, host: str = "127.0.0.1", port: int = 8080
                 self.wfile.write(payload)
                 return
             iterator = iter(response.body)
+            self.connection.settimeout(api._stream_write_timeout_seconds)
             try:
                 for chunk in iterator:
                     self.wfile.write(chunk)
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                pass
+            finally:
                 close = getattr(iterator, "close", None)
                 if callable(close):
                     close()

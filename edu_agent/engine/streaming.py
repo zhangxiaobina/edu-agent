@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..data_classification import redact_text
 from .base import EngineResponse, ToolCall
+from ..runtime.cancellation import CancellationToken, accepts_cancellation_token
 
 if TYPE_CHECKING:
     from .gateway import ResolvedRoute
@@ -386,6 +387,52 @@ def aggregate_provider_stream(events: Iterable[ProviderStreamEvent]) -> EngineRe
     aggregator = ProviderStreamAggregator()
     for event in events:
         aggregator.feed(event)
+    return aggregator.result()
+
+
+def consume_provider_stream(
+    engine: Any,
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    cancellation_token: CancellationToken | None = None,
+    event_sink: Callable[[ProviderStreamEvent], None] | None = None,
+) -> EngineResponse:
+    """Consume one engine stream while exposing the exact normalized events."""
+
+    stream = getattr(engine, "stream_chat", None) if event_sink is not None else None
+    if not callable(stream) and event_sink is not None:
+        stream = getattr(engine, "stream_events", None)
+    if not callable(stream):
+        chat = engine.chat
+        if cancellation_token is not None:
+            cancellation_token.checkpoint("model.before_sync_call")
+        kwargs = {}
+        if cancellation_token is not None and accepts_cancellation_token(chat):
+            kwargs["cancellation_token"] = cancellation_token
+        response = chat(messages, tools, **kwargs)
+        if cancellation_token is not None:
+            cancellation_token.checkpoint("model.after_sync_call")
+        return response
+
+    kwargs = {"attempt": 1}
+    if cancellation_token is not None and accepts_cancellation_token(stream):
+        kwargs["cancellation_token"] = cancellation_token
+    iterator = iter(stream(messages, tools, **kwargs))
+    aggregator = ProviderStreamAggregator()
+    try:
+        for event in iterator:
+            if cancellation_token is not None:
+                cancellation_token.checkpoint("provider.stream.receive")
+            if event_sink is not None:
+                event_sink(event)
+            aggregator.feed(event)
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close()
+    if cancellation_token is not None:
+        cancellation_token.checkpoint("provider.stream.completed")
     return aggregator.result()
 
 
