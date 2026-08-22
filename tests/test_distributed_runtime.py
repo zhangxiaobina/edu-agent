@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -290,6 +291,17 @@ def test_cancel_between_tool_calls_stops_second_call(tmp_path):
 
     assert result.stop_reason == "interrupted"
     assert seen == ["first"]
+    protocol = service.state_store.get_run_messages(result.run_id)
+    assert [message["role"] for message in protocol] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert [message["tool_call_id"] for message in protocol[2:]] == ["call-1"]
+    assert all(
+        json.loads(message["content"])["error"]["code"] == "CANCELLED"
+        for message in protocol[2:]
+    )
 
 
 class MutatingProvider(QueryProvider):
@@ -348,6 +360,15 @@ def test_cancel_during_approval_wait_stops_before_write(tmp_path):
         assert connection.execute(
             "SELECT status FROM tool_operation_refs"
         ).fetchone()[0] == "prepared"
+    protocol = service.state_store.get_run_messages(results[0].run_id)
+    assert [message["role"] for message in protocol] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    cancelled = json.loads(protocol[-1]["content"])
+    assert cancelled["error"]["code"] == "CANCELLED"
+    assert cancelled["meta"]["operation_id"]
 
 
 def test_stalled_recovery_preserves_state_and_blocks_uncertain_write(tmp_path):

@@ -336,6 +336,11 @@ class PolicyToolExecutor:
                 outcome = ToolOutcome(True, data=result)
         except (FencingTokenRejected, RunCancelled):
             raise
+        except TimeoutError as error:
+            outcome = ToolOutcome(
+                False,
+                error={"code": "TOOL_TIMEOUT", "message": str(error) or "工具执行超时"},
+            )
         except Exception as error:
             outcome = ToolOutcome(
                 False,
@@ -584,6 +589,11 @@ class PolicyToolExecutor:
                 False,
                 error={"code": "OPERATION_UNAVAILABLE", "message": str(error)},
             )
+        except TimeoutError as error:
+            outcome = ToolOutcome(
+                False,
+                error={"code": "TOOL_TIMEOUT", "message": str(error) or "工具执行超时"},
+            )
         except Exception as error:
             outcome = ToolOutcome(
                 False,
@@ -657,7 +667,7 @@ class PolicyToolExecutor:
             )
         if self.state_store is not None:
             context.check_control("tool.before_event_commit")
-            self.state_store.record_tool_event(
+            tool_event_id = self.state_store.record_tool_event(
                 run_id=context.run_id,
                 session_id=context.session_id,
                 tool_call_id=tool_call_id,
@@ -669,12 +679,27 @@ class PolicyToolExecutor:
                 duration_ms=outcome.meta["duration_ms"],
                 context=context,
             )
+            outcome.meta["tool_event_id"] = tool_event_id
         return outcome
 
     def enforce_turn_budget(self, messages: list[dict], context: RunContext) -> list[dict]:
         if self.result_budget is None:
             return messages
         return self.result_budget.enforce_turn(messages, context=context)
+
+    def enforce_incremental_turn_budget(
+        self,
+        message: dict,
+        prior_messages: list[dict],
+        context: RunContext,
+    ) -> dict:
+        if self.result_budget is None:
+            return message
+        return self.result_budget.enforce_incremental(
+            message,
+            prior_messages=prior_messages,
+            context=context,
+        )
 
     def _record_approval(
         self,

@@ -310,9 +310,10 @@ R2.1 另定义了进程内 `RunEvent v2` 传输 envelope 和 `RunEventBus`。事
 SQLite、不保留历史，也不提供恢复游标。
 
 持久边界保持不变：`TraceRepository` 继续只从上述业务/审计表投影 `RuntimeEvent v1`，EventBus 不是第二套
-Trace 真相；恢复 sequence/loop cursor 由 R2.2 的 `RunJournal` 承担。RunJournal 的 migration/CAS/snapshot
-边界已实现，但尚未接入 Agent Loop 的实际消息提交点。当前 Provider 和 Agent Loop 仍同步，SSE 仍为
-`accepted/keepalive/completed`。
+Trace 真相；恢复 sequence/loop cursor 由 `RunJournal` 承担。R2.3 已把 assistant tool-call envelope 和逐个
+tool result 接入 Agent Loop：消息、call 配对和 journal cursor 在同一 SQLite 事务提交，旧 fence、孤立 result、
+重复 call id 与跨 run 配对会被拒绝。工具仍严格顺序执行；最终 assistant 仍由 service 的兼容路径追加，等待
+R2.4 的幂等 finalizer。当前 Provider 仍同步，SSE 仍为 `accepted/keepalive/completed`。
 
 ## 可插拔扩展
 

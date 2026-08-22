@@ -321,7 +321,7 @@ class TransactionalToolRuntime:
                     """
                     UPDATE tool_operations
                     SET status='approved', approved_by=?, approval_expires_at=?, updated_at=?
-                    WHERE id=? AND status IN ('prepared', 'approved', 'failed', 'executing')
+                    WHERE id=? AND status IN ('prepared', 'approved', 'failed')
                     """,
                     (approver_id, expires_at, _now(), operation_id),
                 )
@@ -363,6 +363,7 @@ class TransactionalToolRuntime:
         if current["status"] == OperationStatus.committed.value:
             return OperationExecution(current, current["result"], True)
         if current["status"] in {
+            OperationStatus.executing.value,
             OperationStatus.compensating.value,
             OperationStatus.compensated.value,
             OperationStatus.manual_review.value,

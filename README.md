@@ -116,8 +116,10 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   summary、plan/subagent tree 和流式 JSON/JSONL。标准库 HTTP 层只调用 `EduAgentService`，本地
   Demo auth、actor/tenant/role 复验、持久 request id 幂等、结构化错误与 SSE 断流取消均有专项测试。
   `RunEvent v2` 已定义进程内 typed transport、单调 sequence、writer fence 和有界慢消费者隔离；持久
-  `RunJournal` 已提供幂等 migration、严格 CAS 和恢复 snapshot，但尚未接入 Agent Loop 提交点、Provider token
-  stream 或 HTTP SSE；当前 SSE 仍为 accepted/keepalive/completed。OTLP 默认关闭；只有安装
+  `RunJournal` 已提供幂等 migration、严格 CAS 和恢复 snapshot；Agent Loop 会在执行工具前原子提交唯一
+  assistant tool-call envelope，并在每个工具返回、超时、取消或结构化拒绝后立即提交配对 result。最终
+  assistant 的幂等 finalizer、Provider token stream 与 HTTP SSE 仍未实现；当前 SSE 仍为
+  accepted/keepalive/completed。OTLP 默认关闭；只有安装
   `otel` extra 并显式配置 endpoint 后才尝试导出，失败不击穿主路径。
 
 ## 目录结构

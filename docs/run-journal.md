@@ -1,4 +1,4 @@
-# RunJournal 恢复合同（R2.2）
+# RunJournal 恢复合同（R2.2 schema / R2.3 loop integration）
 
 `RunJournal` 是运行恢复的最小持久游标，不是 Plan、Evidence、ToolOperation、Artifact 或 Trace
 的替代品。它只保存这些对象的 ID 引用，以及下一次恢复所需的确定性边界。
@@ -44,6 +44,41 @@ accepted -> planning -> model -> tools -> verifying -> finalizing -> terminal
 
 journal 不保存消息正文、Plan/Evidence/Operation/Artifact payload，也不建立 Trace 副本。Trace 仍从
 现有业务表投影。
+
+## R2.3 工具消息提交协议
+
+`010_agent_tool_messages` 不把消息正文复制到 journal，而是用两个规范化关系把现有 `messages` 表关联到稳定
+cursor：
+
+```text
+R2.2 及以前：run_agent 完整返回
+                    -> service 计算 generated messages
+                    -> append_messages([assistant envelope, tool results, final assistant])
+
+R2.3：agent_node -> append_assistant_tool_envelope() -> tools phase
+                    -> tool 1 -> append_tool_result(call 1) -> cursor
+                    -> tool 2 -> append_tool_result(call 2) -> cursor
+                    -> ... -> service -> append_messages([final assistant only])
+```
+
+`append_messages()` 在已有 journal 的 run 上拒绝 assistant tool-call/tool result，故 Agent Loop 是这些协议消息的
+唯一写入者；service 不再拥有事后批量追加入口，不会在成功返回时重复提交同一 envelope/result。
+
+- `agent_tool_envelopes` 在 `(run_id, model_attempt)` 上唯一，引用 assistant 消息，并冻结 call ids、
+  `tool_manifest_hash`、provider route、提交 cursor 和 fencing token；
+- `agent_tool_calls` 在 `(run_id, tool_call_id)` 上唯一，保持模型声明的 `call_index`，从 `pending` 单向进入
+  `completed`，并引用唯一 result 消息和可选 `ToolOperation`；
+- `messages(run_id, idempotency_key)` 的唯一索引阻止同一 envelope/result 重放产生第二条消息。
+
+Agent Loop 的稳定顺序为：模型返回完整 tool calls，原子写入 envelope/calls 并推进到 `tools`，然后才执行第
+一个工具；每个工具返回、超时、取消或结构化拒绝后立即原子写入一个 result 并推进 cursor。任何 result 必须
+在同一 run/attempt 找到未完成 call，且按 call index 提交；旧 fencing token、孤立 result、重复 call id、跨
+run 配对和写 operation 引用不一致均结构化失败。取消会为已经声明且尚未执行的同 envelope calls 写入配对
+取消结果，但不会提前实现最终 assistant 或 terminal finalizer。
+
+重入时，已提交 result 不再执行工具；未提交的只读结果可以重放。写调用先查询既有 `ToolOperation`：
+`committed` 只复用原回执，`executing/manual_review` 返回不可用且不会调用业务 handler。带显式 replay scope 的
+跨 run 幂等 operation 可以被新 call 引用，但 call/result 自身始终在各自 run 内配对。
 
 ## 不变量
 

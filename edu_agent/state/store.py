@@ -21,10 +21,19 @@ from .journal import (
     initialize_run_journal,
     initialize_run_journal_schema,
 )
+from .tool_messages import (
+    ToolMessagePairingError,
+    append_assistant_tool_envelope,
+    append_tool_result,
+    complete_tool_batch,
+    get_tool_call_record,
+    initialize_agent_tool_message_schema,
+    list_tool_call_records,
+)
 
 
 _UNSET = object()
-STATE_SCHEMA_VERSION = 9
+STATE_SCHEMA_VERSION = 10
 
 
 class SessionLeaseUnavailable(RuntimeError):
@@ -635,6 +644,7 @@ class StateStore:
 
             initialize_trace_index(connection)
             initialize_run_journal_schema(connection, now=self.now_iso())
+            initialize_agent_tool_message_schema(connection, now=self.now_iso())
             connection.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION}")
 
     @staticmethod
@@ -1278,6 +1288,18 @@ class StateStore:
             connection.execute("BEGIN IMMEDIATE")
             if context is not None:
                 self._assert_fence(connection, context, boundary="messages.commit")
+                has_journal = connection.execute(
+                    "SELECT 1 FROM run_journals WHERE run_id=?",
+                    (context.run_id,),
+                ).fetchone()
+                if has_journal is not None and any(
+                    message.get("role") == "tool" or message.get("tool_calls")
+                    for message in messages
+                ):
+                    raise ToolMessagePairingError(
+                        "tool protocol messages must use the atomic paired append API",
+                        run_id=context.run_id,
+                    )
             row = connection.execute(
                 "SELECT COALESCE(MAX(sequence), -1) AS sequence FROM messages WHERE session_id=?",
                 (session_id,),
@@ -1286,33 +1308,151 @@ class StateStore:
             now = _now()
             for message in messages:
                 message = redact_sensitive(message)
-                connection.execute(
-                    """
-                    INSERT INTO messages(
-                        session_id, sequence, role, content, name, tool_call_id,
-                        tool_calls_json, run_id, fencing_token, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session_id,
-                        sequence,
-                        message.get("role", ""),
-                        message.get("content"),
-                        message.get("name"),
-                        message.get("tool_call_id"),
-                        json.dumps(message.get("tool_calls"), ensure_ascii=False)
-                        if message.get("tool_calls") is not None
-                        else None,
-                        getattr(context, "run_id", None),
-                        getattr(context, "fencing_token", None),
-                        now,
-                    ),
-                )
+                idempotency_key = message.get("idempotency_key")
+                if idempotency_key is not None:
+                    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+                        raise ValueError("message idempotency_key must be a non-empty string")
+                    if context is None:
+                        raise ValueError("message idempotency_key requires a run context")
+                    existing = connection.execute(
+                        "SELECT * FROM messages WHERE run_id=? AND idempotency_key=?",
+                        (getattr(context, "run_id", None), idempotency_key),
+                    ).fetchone()
+                    if existing is not None:
+                        existing_calls = (
+                            json.loads(existing["tool_calls_json"])
+                            if existing["tool_calls_json"]
+                            else None
+                        )
+                        if (
+                            existing["role"] != message.get("role", "")
+                            or (existing["content"] or "") != (message.get("content") or "")
+                            or existing["name"] != message.get("name")
+                            or existing["tool_call_id"] != message.get("tool_call_id")
+                            or existing_calls != message.get("tool_calls")
+                        ):
+                            raise ValueError("message idempotency_key 已绑定不同消息")
+                        continue
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO messages(
+                            session_id, sequence, role, content, name, tool_call_id,
+                            tool_calls_json, run_id, fencing_token, idempotency_key,
+                            model_attempt, loop_cursor, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            sequence,
+                            message.get("role", ""),
+                            message.get("content"),
+                            message.get("name"),
+                            message.get("tool_call_id"),
+                            json.dumps(message.get("tool_calls"), ensure_ascii=False)
+                            if message.get("tool_calls") is not None
+                            else None,
+                            getattr(context, "run_id", None),
+                            getattr(context, "fencing_token", None),
+                            idempotency_key,
+                            message.get("model_attempt"),
+                            message.get("loop_cursor"),
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    if idempotency_key is None:
+                        raise
+                    existing = connection.execute(
+                        "SELECT * FROM messages WHERE run_id=? AND idempotency_key=?",
+                        (getattr(context, "run_id", None), idempotency_key),
+                    ).fetchone()
+                    if existing is None:
+                        raise
+                    existing_calls = (
+                        json.loads(existing["tool_calls_json"])
+                        if existing["tool_calls_json"]
+                        else None
+                    )
+                    if (
+                        existing["role"] != message.get("role", "")
+                        or (existing["content"] or "") != (message.get("content") or "")
+                        or existing["name"] != message.get("name")
+                        or existing["tool_call_id"] != message.get("tool_call_id")
+                        or existing_calls != message.get("tool_calls")
+                    ):
+                        raise ValueError("message idempotency_key 已绑定不同消息")
+                    continue
                 sequence += 1
             connection.execute(
                 "UPDATE sessions SET updated_at=? WHERE id=?",
                 (now, session_id),
             )
+
+    def append_assistant_tool_envelope(self, context, message: dict, *, model_attempt: int):
+        return append_assistant_tool_envelope(
+            self,
+            context,
+            message,
+            model_attempt=model_attempt,
+        )
+
+    def append_tool_result(
+        self,
+        context,
+        message: dict,
+        *,
+        model_attempt: int,
+        operation_id: str | None = None,
+        tool_event_id: int | None = None,
+        allow_cancelled: bool = False,
+    ):
+        return append_tool_result(
+            self,
+            context,
+            message,
+            model_attempt=model_attempt,
+            operation_id=operation_id,
+            tool_event_id=tool_event_id,
+            allow_cancelled=allow_cancelled,
+        )
+
+    def complete_tool_batch(self, context, *, model_attempt: int):
+        return complete_tool_batch(self, context, model_attempt=model_attempt)
+
+    def get_tool_call_record(
+        self,
+        *,
+        run_id: str,
+        tool_call_id: str,
+        session_id: str,
+        actor_id: str,
+        tenant_id: str,
+    ):
+        return get_tool_call_record(
+            self,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            session_id=session_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+
+    def list_tool_call_records(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        actor_id: str,
+        tenant_id: str,
+    ):
+        return list_tool_call_records(
+            self,
+            run_id=run_id,
+            session_id=session_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
 
     def get_messages(
         self,
@@ -1976,6 +2116,29 @@ class StateStore:
             row = connection.execute(
                 "SELECT * FROM tool_operation_refs WHERE operation_id=?",
                 (operation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["actor_id"] != actor_id or row["tenant_id"] != tenant_id:
+            raise PermissionError("operation 不属于当前 tenant/actor")
+        return dict(row)
+
+    def get_tool_operation_for_call(
+        self,
+        *,
+        run_id: str,
+        tool_call_id: str,
+        actor_id: str,
+        tenant_id: str,
+    ) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM tool_operation_refs
+                WHERE run_id=? AND tool_call_id=?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (run_id, tool_call_id),
             ).fetchone()
         if row is None:
             return None
@@ -3337,6 +3500,8 @@ class StateStore:
             "state_schema_migrations",
             "api_requests",
             "run_journals",
+            "agent_tool_envelopes",
+            "agent_tool_calls",
         }
         if table not in allowed:
             raise ValueError(f"不允许统计表：{table}")

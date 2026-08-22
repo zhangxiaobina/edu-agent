@@ -31,6 +31,15 @@ from .journal import (
     StableBoundary,
     validate_phase_transition,
 )
+from .tool_messages import (
+    AGENT_TOOL_MESSAGES_MIGRATION,
+    ToolMessageCommit,
+    ToolMessageConflict,
+    ToolMessageError,
+    ToolMessageOperationError,
+    ToolMessagePairingError,
+    ToolMessageSchemaError,
+)
 
 __all__ = [
     "FencingTokenRejected",
@@ -64,4 +73,11 @@ __all__ = [
     "RunStableBoundary",
     "StableBoundary",
     "validate_phase_transition",
+    "AGENT_TOOL_MESSAGES_MIGRATION",
+    "ToolMessageCommit",
+    "ToolMessageConflict",
+    "ToolMessageError",
+    "ToolMessageOperationError",
+    "ToolMessagePairingError",
+    "ToolMessageSchemaError",
 ]

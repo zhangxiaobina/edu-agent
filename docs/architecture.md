@@ -235,9 +235,9 @@ fail closed；buffer 满时只取消该慢消费者、清空不完整队列并�
 以内存回收为由重新接受 late delta。总线不缓存订阅前事件，重连方必须在后续阶段依赖持久 cursor/状态，
 而不能向 EventBus 请求 replay。
 
-R2.1 只用 fake producer 验证该协议。当前 Provider 仍为同步 `chat()`，HTTP SSE 仍只有
-`accepted/keepalive/completed`，assistant/tool 消息提交时机也未改变；真 Provider delta 和 SSE 映射分别留给
-R2.5、R2.6。
+R2.1 只用 fake producer 验证事件协议；R2.3 已把 assistant tool-call envelope 和逐个 tool result 移到 Agent
+Loop 的稳定提交点。当前 Provider 仍为同步 `chat()`，HTTP SSE 仍只有 `accepted/keepalive/completed`；真
+Provider delta 和 SSE 映射分别留给 R2.5、R2.6。
 
 ### RunJournal 持久恢复边界（R2.2）
 
@@ -249,8 +249,20 @@ Plan、Evidence、ToolOperation、Artifact、context checkpoint 和 tool event �
 每次 CAS 在一个 SQLite `BEGIN IMMEDIATE` 中复验 run/session/actor/tenant、期望 revision/phase/cursor、当前
 lease fencing token 与 writer；旧 worker、重复/跳跃 phase、游标回退和终态重入返回结构化 `RunJournal*` 错误。
 `009_run_journal` migration 可重复执行，SQLite `user_version` 高于当前代码时拒绝启动，未知 phase/损坏 JSON
-在只读 snapshot 中直接失败，不用默认值猜恢复位置。该切片没有接入 Agent Loop 的消息提交点，Provider/SSE
-仍保持同步/keepalive 语义。
+在只读 snapshot 中直接失败，不用默认值猜恢复位置。
+
+### Agent 工具消息稳定边界（R2.3）
+
+`010_agent_tool_messages` 将 SQLite schema version 提升到 10，并增加 `agent_tool_envelopes` 与
+`agent_tool_calls`。前者固定 `(run_id, model_attempt)` 的唯一 assistant envelope、call ids、manifest/route 和
+cursor 关联；后者按原 call 顺序保存 pending/completed 配对、结果消息与可选 `ToolOperation` 引用。
+`messages(run_id, idempotency_key)` 的部分唯一索引为重放提供数据库兜底。
+
+envelope 的消息行、全部 call 行和 `model -> tools` journal 更新在同一 `BEGIN IMMEDIATE` 中完成后才允许执行
+第一个工具。每个 result 单独与 call 配对，并与 cursor/event sequence 更新同事务提交；恢复时已完成 result
+直接复用，未证明完成的只读调用可重放，`committed` 写 operation 只读取既有回执，`executing/manual_review`
+不会再次进入 handler。service 只再追加最后的普通 assistant 消息，不重复批量追加 tool 协议消息。最终消息的
+唯一提交与 run 终态一致性仍属于 R2.4，Provider streaming、HTTP SSE 和并发工具也不在本切片中。
 
 ## 安全边界
 

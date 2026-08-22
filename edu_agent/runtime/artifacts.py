@@ -229,3 +229,64 @@ class ToolResultBudget:
             message["content"] = replacement
             total += len(replacement) - len(content)
         return messages
+
+    def enforce_incremental(
+        self,
+        message: dict,
+        *,
+        prior_messages: list[dict],
+        context: RunContext,
+    ) -> dict:
+        """Apply the turn cap without rewriting results already durably committed."""
+        content = message.get("content", "")
+        used = sum(len(item.get("content", "")) for item in prior_messages)
+        if used + len(content) <= self.turn_budget_chars or '"spilled": true' in content:
+            return message
+        try:
+            outcome = json.loads(content)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            outcome = {"ok": True, "data": None, "error": None, "meta": {}}
+        if not isinstance(outcome, dict):
+            outcome = {"ok": True, "data": outcome, "error": None, "meta": {}}
+        try:
+            artifact = self.artifact_store.write_text(
+                content,
+                context=context,
+                kind="tool-turn-result",
+                metadata={"tool": message.get("name"), "characters": len(content)},
+            )
+        except OSError as error:
+            replacement = {
+                "ok": outcome.get("ok", True),
+                "data": {
+                    "preview": content[: self.preview_chars],
+                    "truncated": True,
+                    "original_characters": len(content),
+                },
+                "error": outcome.get("error"),
+                "meta": {
+                    **(outcome.get("meta") or {}),
+                    "spilled": False,
+                    "spill_error": type(error).__name__,
+                    "reason": "turn_budget",
+                },
+            }
+        else:
+            replacement = {
+                "ok": outcome.get("ok", True),
+                "data": {
+                    "preview": content[: self.preview_chars],
+                    "truncated": True,
+                    "artifact_id": artifact.id,
+                    "artifact_path": artifact.path,
+                    "sha256": artifact.sha256,
+                    "original_characters": len(content),
+                },
+                "error": outcome.get("error"),
+                "meta": {
+                    **(outcome.get("meta") or {}),
+                    "spilled": True,
+                    "reason": "turn_budget",
+                },
+            }
+        return {**message, "content": json.dumps(replacement, ensure_ascii=False)}

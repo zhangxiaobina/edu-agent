@@ -54,6 +54,7 @@ class EduAgentService:
         memory_provider: MemoryProvider | None = None,
         context_engine: ContextEngine | None = None,
         plan_generator=None,
+        loop_fault_injector=None,
     ):
         self.config = config or AppConfig()
         self.engine = engine
@@ -105,6 +106,7 @@ class EduAgentService:
             else None
         )
         self.plan_generator = plan_generator
+        self.loop_fault_injector = loop_fault_injector
         self.artifact_store = ArtifactStore(self.config.artifact_path, self.state_store)
         self.trace_repository = TraceRepository(
             self.state_store,
@@ -278,6 +280,7 @@ class EduAgentService:
             limit=None,
         )
         run_messages = self.state_store.get_run_messages(context.run_id) if resume else []
+        resumed_protocol_messages: list[dict] = []
         if resume and run_messages:
             recovered_answer = next(
                 (
@@ -312,8 +315,27 @@ class EduAgentService:
                     stop_reason="completed",
                     plan=None,
                 )
-            if len(run_messages) == 1 and history and history[-1] == run_messages[0]:
-                history = history[:-1]
+            if len(history) >= len(run_messages) and history[-len(run_messages) :] == run_messages:
+                history = history[: -len(run_messages)]
+            else:
+                run_message_count = len(run_messages)
+                matching_start = next(
+                    (
+                        index
+                        for index in range(len(history) - run_message_count, -1, -1)
+                        if history[index : index + run_message_count] == run_messages
+                    ),
+                    None,
+                )
+                if matching_start is None:
+                    raise RuntimeError("resume run messages are not an ordered session segment")
+                history = [
+                    *history[:matching_start],
+                    *history[matching_start + run_message_count :],
+                ]
+            resumed_protocol_messages = [
+                item for item in run_messages if item.get("role") in {"assistant", "tool"}
+            ]
         compaction = (
             self.context_engine.compact_if_needed(
                 session_id,
@@ -345,6 +367,7 @@ class EduAgentService:
             memory_items=memory_snapshot.items if memory_snapshot else [],
             context_checkpoint=checkpoint_summary,
         )
+        agent_messages = [*snapshot.messages, *resumed_protocol_messages]
         if not resume or not self.state_store.get_run_messages(context.run_id):
             self.state_store.append_messages(
                 session_id,
@@ -382,7 +405,7 @@ class EduAgentService:
                 db_conn=db_conn,
                 recursion_limit=max(30, self.config.runtime.max_model_calls * 2 + 2),
                 tools_provider=self.tools_provider,
-                initial_messages=snapshot.messages,
+                initial_messages=agent_messages,
                 run_context=context,
                 tool_executor=executor,
                 planning=PlanningOptions(
@@ -393,14 +416,31 @@ class EduAgentService:
                 ),
                 plan_generator=self.plan_generator,
                 state_store=self.state_store,
+                context_checkpoint_id=(
+                    compaction.checkpoint_id
+                    if compaction is not None
+                    else (
+                        self.state_store.latest_context_checkpoint(session_id) or {}
+                    ).get("id")
+                ),
+                loop_fault_injector=self.loop_fault_injector,
             )
             context.check_control("messages.before_final_commit")
-            generated = result["messages"][len(snapshot.messages) :]
-            self.state_store.append_messages(
-                session_id,
-                generated,
-                context=context,
+            generated = result["messages"][len(agent_messages) :]
+            final_message = next(
+                (
+                    item
+                    for item in reversed(generated)
+                    if item.get("role") == "assistant" and not item.get("tool_calls")
+                ),
+                None,
             )
+            if final_message is not None:
+                self.state_store.append_messages(
+                    session_id,
+                    [final_message],
+                    context=context,
+                )
             self.state_store.finish_run(
                 context.run_id,
                 status=("completed" if result.get("stop_reason") in {None, "completed"} else "failed"),

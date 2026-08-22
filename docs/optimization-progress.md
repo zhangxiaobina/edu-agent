@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R2.2
-- next_prompt: R2.3
+- last_completed_prompt: R2.3
+- next_prompt: R2.4
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent 与 R2.2 RunJournal 已完成；R2.3 增量消息提交、真流式、统一取消与完整恢复门禁仍未完成
+- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent、R2.2 RunJournal 与 R2.3 工具消息增量提交已完成；R2.4 finalizer、真流式、统一取消与完整恢复门禁仍未完成
 
 ## Baseline Reproduction
 
@@ -525,3 +525,48 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R2.2 passed`；R2 总门禁保持 `in_progress`。
 - next: R2.3，在 Agent Loop 工具执行前接入 assistant envelope 和每个 tool result 的原子增量提交；不得在本阶段
   回头实现 Provider streaming、HTTP SSE 或最终消息 finalizer。
+
+### R2.3 - 2026-08-22
+
+- commit/evidence: 会话从与 `origin/main` 同步的 R2.2 提交
+  `da81969a136893b51550c3ae643ec5dd5e22b28b`（`feat: add persistent run journal`）开始，开始时工作区干净；
+  完成验收后收到用户提交指令，R2.3 改动作为单一提交推送到 `origin/main`；准确提交哈希以 Git 历史为准，
+  不在提交内容中预填自引用哈希。
+- changes: 新增 `AgentLoopJournal`，在完整模型响应返回后、任何工具执行前，将唯一 assistant tool-call envelope、
+  call ids、model attempt、manifest/route 和 loop cursor 原子写入；持久化成功后才进入顺序 tools phase。每个
+  result（成功、超时、取消或结构化拒绝）分别与 call 按原索引配对，并和 journal cursor/event sequence 在同一
+  `BEGIN IMMEDIATE` 中提交。取消会关闭同一已声明 envelope 中尚未执行的 calls，但不会执行剩余 handler。
+- idempotency/recovery: `(run_id, model_attempt)` envelope、`(run_id, tool_call_id)` call 和
+  `messages(run_id, idempotency_key)` 均有唯一约束；精确重放返回既有消息，payload 漂移、孤立/乱序 result、
+  重复 call id、跨 run 配对、错误 tool/attempt、越权 operation 与旧 fencing token 均结构化失败。journal 停在
+  `tools/verifying` 时，`run_agent` 合并已提交协议消息并从对应节点重入，保持 envelope/result/下一轮 model 的
+  原顺序；service 不再事后批量追加相同 tool 协议消息，只保留普通 assistant 的兼容追加路径。
+- write safety: result 若引用写操作，必须绑定真实 `ToolOperation` 并在 payload 中携带相同 operation id。
+  `committed` operation 重入只复用原结果；`executing/manual_review` 在 graph 和事务 runtime 两层拒绝再次进入
+  handler，审批重入也不能把 `executing` 降回 `approved`。显式 replay scope 可跨 run 复用同一 operation 回执，
+  但各 run 的 call/result 仍独立配对。
+- schema/migration: 新增幂等 `010_agent_tool_messages`、`agent_tool_envelopes`、`agent_tool_calls`，并给
+  `messages` 增加 `idempotency_key/model_attempt/loop_cursor`；SQLite `PRAGMA user_version=10`。旧库消息原样
+  保留，重复 migration 和 marker 幂等，call 状态/result 引用有数据库 `CHECK`，缺列 schema fail closed。tool
+  result JSON 在持久化前按结构化字段脱敏。无依赖、lockfile、环境变量或配置项变化。
+- fault injection: 覆盖 envelope 提交前/后、只读 result 提交前/后、已 committed 写 operation 到 result 之间；
+  验证前置故障无半条消息、后置故障只保留一个已提交对象、只读未证明结果可重放、已提交写副作用与 operation
+  均唯一。另覆盖多 call 取消配对、timeout/INVALID_JSON、跨 run operation replay 和不确定写 handler 零调用。
+- documentation: 更新 README、architecture、production runtime 与 RunJournal 合同；后者增加旧 service 批量
+  追加与新 Agent Loop 增量路径对照图。文档明确最终消息 finalizer、Provider streaming、HTTP SSE 和工具并发
+  仍未实现。
+- verification: 新增 `tests/test_agent_tool_messages.py`，独立专项 `17 passed (1.46s)`；agent/runtime/transaction/
+  recovery/RunEvent/HTTP 组合在受限环境为 `101 passed/4 failed`，四项均止于 `127.0.0.1` socket bind 的
+  `PermissionError: [Errno 1]`，获准环境同组合最终为 `105 passed (5.77s)`。一次获准中间复跑中，既有 canary
+  检测用例因随机 scope/event id 命中手机号正则而误报；失败轮的数据库/artifact/export canary 断言均已通过，
+  该用例随即单跑 `1 passed`，最终组合与全量也通过。`uv run --frozen --offline ruff check .` 通过；显式清空
+  模型/平台凭据并禁用外部 pytest plugin 的全量离线回归 `344 passed (17.26s)`；`git diff --check` 通过。
+- not_verified: 普通切片未运行阶段收口 `zsh scripts/accept_stage8.sh`；未访问真实 Provider/model、Docker/Jobe、
+  GitHub-hosted CI、真实 token stream 或跨进程 EventBus。
+- residual_risks: 最终普通 assistant、usage/budget 结算和 run terminal 仍不是一个幂等原子 finalizer，崩溃后完整
+  终态恢复留给 R2.4/R2.7；Provider 仍同步聚合，通用 CancellationToken 与 HTTP writer fence 留给 R2.5/R2.6。
+  R2.3 的 fault fixture 验证持久 SQLite 上的边界重入，但尚未声称完成 R2.7 的五窗口进程重开门禁。既有敏感数据
+  检测器仍可能把随机十六进制 ID 中偶现的连续数字误判为手机号，本次未扩大范围修改该 R0/R2.1 测试工具。
+- gate: `R2.3 passed`；R2 总门禁保持 `in_progress`。
+- next: R2.4，沿 service `try/except/finally`、Plan verifier、`finish_run` 和 lease 边界实现唯一幂等
+  `TurnFinalizer`；不得提前实现 Provider streaming、HTTP SSE 或并发工具。
