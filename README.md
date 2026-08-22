@@ -124,7 +124,11 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   fallback 输出。HTTP SSE 通过单个、绑定 API attempt 与 session lease fencing token 的 `RunStreamWriter`
   直接消费 Provider/Agent 事件，输出 accepted、text/tool/plan/usage 与 completed/error；keepalive 只在空闲时
   保活。断流、显式 cancel 与 deadline 共用 `CancellationToken`，并贯穿模型、工具、委派和 sandbox；不支持
-  强杀的同步调用返回后仍必须通过 token/fence 才能提交。五崩溃窗恢复留给 R2.7。OTLP 默认关闭；只有安装
+  强杀的同步调用返回后仍必须通过 token/fence 才能提交。R2 恢复 planner 只从持久稳定 cursor 选择
+  `continue/replay-read/reuse-operation/manual-review/terminal-replay`；进程重开会复验冻结 route/manifest、恢复
+  原预算，并让旧 writer 的每次 publish 重新经过持久 fence。模型返回、envelope、只读 result、写 commit 和
+  final message 五个窗口均用关闭旧 Service、重开同一 SQLite 的 fixture 验证。EventBus 仍不保存历史 delta，
+  工具仍顺序执行。OTLP 默认关闭；只有安装
   `otel` extra 并显式配置 endpoint 后才尝试导出，失败不击穿主路径。
 
 ## 目录结构
@@ -186,6 +190,7 @@ edu-agent/
 │   ├── eval_retrieval.py         Recall/MRR/nDCG/citation/ACL 离线评测
 │   ├── transactional_tools_demo.py  Scheduler 重放、outbox 去重、补偿
 │   ├── runtime_recovery_demo.py  跨实例 lease、fencing、取消与恢复
+│   ├── r2_recovery_demo.py       稳定 cursor 决策、进程重开与脱敏 Trace
 │   ├── code_sandbox_demo.py      Docker/Jobe 真后端资源与逃逸验收
 │   ├── eval_subset.py            子集快测（调参用）
 │   └── debug_trace.py            打印完整消息序列定位失败轨迹
@@ -246,6 +251,9 @@ uv run --frozen python scripts/transactional_tools_demo.py
 
 # 跨进程运行控制：同 session 争抢、旧 owner fencing、取消与僵尸恢复
 uv run --frozen python scripts/runtime_recovery_demo.py
+
+# R2 稳定 cursor：崩溃 Service 重开、只读 replay、terminal replay 与脱敏 Trace
+uv run --frozen --offline python scripts/r2_recovery_demo.py
 
 # 隔离代码执行：固定 digest Docker 后端完整逃逸/资源/取消验收
 uv run --frozen python scripts/code_sandbox_demo.py --provider docker --e2e --require-all

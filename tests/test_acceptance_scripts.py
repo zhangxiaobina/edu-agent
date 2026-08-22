@@ -13,6 +13,7 @@ ZSH = shutil.which("zsh")
 SCRIPT_NAMES = (
     "acceptance_common.sh",
     "prepare_acceptance.sh",
+    "accept_r2.sh",
     "accept_stage7.sh",
     "accept_stage8.sh",
 )
@@ -209,6 +210,7 @@ def test_stage8_controlled_run_bootstraps_and_calls_stage7_once(tmp_path: Path):
     )
     assert sum(entry["args"][-1:] == ["scripts/production_runtime_demo.py"] for entry in entries) == 1
     assert sum(entry["args"][-1:] == ["scripts/mcp_demo.py"] for entry in entries) == 1
+    assert sum(entry["args"][-1:] == ["scripts/r2_recovery_demo.py"] for entry in entries) == 1
     assert sum(
         entry["args"][3:5] == ["python", "scripts/audit_eval_lineage.py"]
         for entry in entries
@@ -347,6 +349,49 @@ def test_stage7_can_run_independently_and_cleans_failures(tmp_path: Path):
     assert roots and all(not root.exists() for root in roots)
 
 
+def test_r2_gate_can_run_independently_and_cleans_failures(tmp_path: Path):
+    repo = _isolated_repo(tmp_path / "success")
+    binary_dir, log_path = _fake_uv(tmp_path / "success-tools")
+    temp_base = tmp_path / "success-temporary"
+    temp_base.mkdir()
+    success = _run(
+        repo,
+        "accept_r2.sh",
+        _environment(binary_dir, log_path, TMPDIR=str(temp_base)),
+    )
+
+    assert success.returncode == 0, success.stdout + success.stderr
+    entries = _entries(log_path)
+    assert _has_args(entries, ["lock", "--check"])
+    assert any("tests/test_r2_recovery.py" in entry["args"] for entry in entries)
+    assert any("scripts/r2_recovery_demo.py" in entry["args"] for entry in entries)
+    assert not any(entry["args"][-2:] == ["tests", "-q"] for entry in entries)
+    roots = {Path(entry["db"]).parent for entry in entries if entry["db"]}
+    assert roots and all(not root.exists() for root in roots)
+
+    repo = _isolated_repo(tmp_path / "failure")
+    binary_dir, log_path = _fake_uv(tmp_path / "failure-tools")
+    temp_base = tmp_path / "failure-temporary"
+    temp_base.mkdir()
+    failure = _run(
+        repo,
+        "accept_r2.sh",
+        _environment(
+            binary_dir,
+            log_path,
+            TMPDIR=str(temp_base),
+            ACCEPTANCE_TEST_FAIL_MATCH="tests/test_r2_recovery.py",
+        ),
+    )
+
+    assert failure.returncode == 42
+    assert not any(
+        entry["args"][-2:] == ["python", "scripts/r2_recovery_demo.py"]
+        for entry in _entries(log_path)
+    )
+    roots = {Path(entry["db"]).parent for entry in _entries(log_path) if entry["db"]}
+    assert roots and all(not root.exists() for root in roots)
+
 def test_prepare_reports_missing_uv_lock_drift_and_incompatible_python(tmp_path: Path):
     repo = _isolated_repo(tmp_path / "missing")
     empty_path = tmp_path / "empty-path"
@@ -416,6 +461,7 @@ def test_stage8_dry_run_traverses_regression_without_claiming_docker(tmp_path: P
     result = _run(repo, "accept_stage8.sh", environment, "--dry-run")
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "scripts/accept_r2.sh --from-stage8 --dry-run" in result.stderr
     assert "scripts/accept_stage7.sh --from-stage8 --dry-run" in result.stderr
     assert "Docker was not executed during dry-run" in result.stderr
     assert "sandbox=not_verified" in result.stdout

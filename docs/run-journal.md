@@ -1,4 +1,4 @@
-# RunJournal 与 TurnFinalizer 恢复合同（R2.2-R2.4）
+# RunJournal、TurnFinalizer 与进程重开恢复合同（R2.2-R2.7）
 
 `RunJournal` 是运行恢复的最小持久游标，不是 Plan、Evidence、ToolOperation、Artifact 或 Trace
 的替代品。它只保存这些对象的 ID 引用，以及下一次恢复所需的确定性边界。
@@ -44,6 +44,34 @@ accepted -> planning -> model -> tools -> verifying -> finalizing -> terminal
 
 journal 不保存消息正文、Plan/Evidence/Operation/Artifact payload，也不建立 Trace 副本。Trace 仍从
 现有业务表投影。
+
+## R2.7 稳定 cursor 决策表
+
+恢复入口先读取 journal、finalizer、工具 call/result 配对和 `ToolOperation` 引用，再产生确定性、脱敏且进入
+Trace 的 `RecoveryDecision`。只有下表声明的稳定 cursor 可以自动继续；journal 缺失、损坏、未知 boundary、
+冻结 route/manifest 不一致或预算快照不合法均 fail closed 到 `manual-review`。
+
+| stable cursor | 可证明的持久状态 | decision | 恢复行为 |
+|---|---|---|---|
+| `accepted` | request/run 已创建 | `continue` | 从 planning 继续 |
+| `plan_committed` | Plan 引用和冻结输入已提交 | `continue` | 从 model 继续，不重建另一份 Plan |
+| `model_attempt_started` | attempt、route、manifest、预算已冻结；模型完整返回未提交 | `continue` | 使用冻结身份重入 model；迟到旧结果先过 fence |
+| `assistant_envelope_committed` | envelope 完整，pending call 为只读且无 result | `replay-read` | 只重放该只读调用并提交唯一配对 result |
+| `assistant_envelope_committed` | pending 写 call 尚无 operation | `continue` | handler 尚未进入；按原幂等键 prepare |
+| `assistant_envelope_committed` | operation 为 `prepared/approved/failed` | `continue` | 只恢复同一个 operation，沿既有事务合同执行 |
+| `assistant_envelope_committed` | operation 为 `committed` | `reuse-operation` | 读取持久回执并提交唯一配对 result，不再执行副作用 |
+| `assistant_envelope_committed` | operation 为 `executing/compensating/compensated/manual_review` 或未知 | `manual-review` | 禁止自动调用 handler，等待人工对账 |
+| `assistant_envelope_committed` | envelope 已无 pending call | `continue` | 进入 verifying/model |
+| `tool_result_committed` | 已提交 result 完整配对；仍有 pending call | 与上述 pending call 规则相同 | 已提交 result 不重做，只处理第一个 pending call |
+| `tool_result_committed` | 所有 call 均有唯一 result | `continue` | 进入 verifying/model |
+| `verification_committed` | Plan/Evidence 复验 cursor 已提交 | `continue` | 进入下一 model attempt 或 finalizer |
+| `final_message_committed` | 唯一 final assistant 已提交，finalizer 尚未 terminal | `continue` | 只继续 usage/budget、terminal、hooks 和 cleanup |
+| `terminal` | completed finalizer/run 已持久化 | `terminal-replay` | 从 finalizer 重建 `ChatResult`/API response |
+| `cancelled` | interrupted finalizer/run 已持久化 | `terminal-replay` | 重建相同失败结果，不回到执行态 |
+| `failed` | failed finalizer/run 已持久化 | `terminal-replay` | 重建相同失败结果，不回到执行态 |
+
+`continue` 不表示从头执行：它只进入该 cursor 对应的下一节点。恢复前重新计算当前工具面和 Provider route，
+必须与 journal 的冻结 hash/脱敏 route 完全一致；预算计数和上限从 snapshot 恢复，不能按新 Service 配置归零。
 
 ## R2.3 工具消息提交协议
 
@@ -108,6 +136,19 @@ API request completion 与 session lease release 都要求先观察到 finalizer
 API response 尚未提交时先继续未完成的 hooks/cleanup，再从 terminal finalizer 重建原 `ChatResult`；已提交时
 继续按原 response hash 重放。
 
+## R2.7 sequence 与进程 fence
+
+`012_r2_recovery` 将 SQLite `user_version` 提升到 12，并在 `runs.stream_event_sequence` 保存传输 sequence
+高水位。`RunStreamWriter` 在事件对 socket 可见前通过状态库预留 sequence，每次预留都重新验证 run scope、
+当前 session lease 和 fencing token；进程重开时从 stream/journal 两个高水位的最大值继续。因此旧进程即使
+仍持有内存 publisher，也会在下一次 publish 时被持久 fence 拒绝。terminal replay 只允许 terminal run 使用
+token `0` 生成新的 replay envelope，不恢复历史 delta，也不把 EventBus 变成持久队列。
+
+五个进程级 fault fixture 分别在模型返回后、tool-call envelope 后、只读 result 后、写 operation commit 后和
+最终消息后抛出绕过进程内 finalizer 的 `BaseException`，关闭第一个 Service，再用同一 SQLite 文件构造新
+Service。验收同时检查 call/result 配对、唯一 final、cursor/sequence 单调、冻结 route/manifest/budget、旧
+writer/fence、写副作用唯一和 API request 字节重放。
+
 ## 不变量
 
 1. **作用域一致**：创建和每次 CAS 都同时验证 `run_id/session_id/actor_id/tenant_id`，并复验 `runs` 与
@@ -122,3 +163,7 @@ API response 尚未提交时先继续未完成的 hooks/cleanup，再从 termina
    中断时，重开会补齐缺失对象。数据库 schema version 高于当前代码时拒绝启动，绝不降级或覆盖。
 6. **恢复诚实**：只读 snapshot 解码所有 JSON 和 phase；损坏值、未知 phase、缺失必需字段直接抛出
    `RunJournalCorrupt`，恢复层不得静默选择一个默认游标。
+7. **恢复身份冻结**：resume 前复验 tool manifest hash 与脱敏 Provider route，并恢复持久预算计数/上限；任一
+   不一致都不得用新进程的默认配置覆盖。
+8. **事件高水位持久化**：可见 RunEvent 的 sequence 先落到 run 高水位，journal 提交与恢复 writer 都只能从
+   两个高水位的最大值向前推进；旧 token 每次 publish 都重新过状态库 fence。

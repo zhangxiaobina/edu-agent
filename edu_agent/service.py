@@ -7,7 +7,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from .agent.graph import run_agent
+from .agent.graph import _select_tools, run_agent
+from .agent.loop_journal import frozen_route_shape, tool_manifest_hash
 from .agent.prompts import SYSTEM_PROMPT
 from .agent.turn_finalizer import FinalizationResult, TurnFinalizer
 from .code_execution import build_code_execution_provider
@@ -24,9 +25,16 @@ from .runtime.context_engine import CheckpointContextEngine, ContextEngine
 from .runtime.cancellation import CancellationRequested, CancellationToken
 from .runtime.models import BudgetExceeded, RunContext
 from .runtime.manager import RuntimeManager
+from .runtime.recovery import (
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryManualReviewRequired,
+    RunRecoveryPlanner,
+)
 from .runtime.tool_executor import ApprovalRequest, ExecutionPolicy, PolicyToolExecutor
 from .scheduler import JobStore, Scheduler
 from .state import MemoryManager, MemoryProvider, StateStore
+from .state import RunJournalIdentityError
 from .state.store import FencingTokenRejected, RunCancelled, TurnFinalizerPending
 from .tools import registry
 
@@ -89,9 +97,14 @@ class EduAgentService:
             lease_seconds=self.config.runtime.session_lease_seconds,
             heartbeat_seconds=self.config.runtime.session_heartbeat_seconds,
         )
-        self.recovery_report = self.state_store.recover_stalled_runs(
+        self.recovery_planner = RunRecoveryPlanner(
+            self.state_store,
+            self.tools_provider,
+        )
+        stalled_recovery = self.state_store.recover_stalled_runs(
             stall_timeout_seconds=self.config.runtime.run_stall_seconds,
         )
+        self.recovery_report = self._startup_recovery_report(stalled_recovery)
         self.memory = memory_provider or MemoryManager(
             self.state_store,
             max_items=self.config.memory.max_recalled_items,
@@ -135,6 +148,161 @@ class EduAgentService:
 
     def _build_code_execution_provider(self):
         return build_code_execution_provider(self.config.code_execution)
+
+    def _startup_recovery_report(self, recovered: list[dict]) -> list[dict]:
+        report: list[dict] = []
+        for item in recovered:
+            with self.state_store.connect() as connection:
+                run = connection.execute(
+                    "SELECT actor_id, tenant_id FROM runs WHERE id=?",
+                    (item["run_id"],),
+                ).fetchone()
+            if run is None or not run["actor_id"] or not run["tenant_id"]:
+                report.append(dict(item))
+                continue
+            decision = self.get_recovery_decision(
+                item["run_id"],
+                actor_id=run["actor_id"],
+                tenant_id=run["tenant_id"],
+            )
+            self._record_recovery_decision(decision, source="startup")
+            report.append({**item, "decision": decision.to_safe_dict()})
+        return report
+
+    def _record_recovery_decision(
+        self,
+        decision: RecoveryDecision,
+        *,
+        source: str,
+    ) -> None:
+        with self.state_store.connect() as connection:
+            run = connection.execute(
+                "SELECT actor_id, tenant_id FROM runs WHERE id=?",
+                (decision.run_id,),
+            ).fetchone()
+        if run is None:
+            return
+        self.state_store.record_audit_event(
+            actor_id=run["actor_id"],
+            tenant_id=run["tenant_id"],
+            action="run.recovery_decision",
+            resource=f"run:{decision.run_id}",
+            decision=decision.action.value,
+            details={"source": source, **decision.to_safe_dict()},
+        )
+
+    def get_recovery_decision(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str = "default",
+    ) -> RecoveryDecision:
+        return self.recovery_planner.decide(
+            run_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+
+    def reserve_stream_event_sequence(
+        self,
+        *,
+        actor_id: str,
+        tenant_id: str,
+        **fields,
+    ) -> int:
+        return self.state_store.reserve_run_event_sequence(
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+            **fields,
+        )
+
+    def _stream_sequence(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str,
+    ) -> int:
+        return self.state_store.get_run_event_sequence(
+            run_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+
+    def bind_terminal_replay_stream(
+        self,
+        stream_writer,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str,
+    ) -> None:
+        run = self.state_store.get_run_status(
+            run_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+        if run is None or run["status"] not in {"completed", "failed", "interrupted"}:
+            raise RuntimeError("terminal replay stream requires a terminal run")
+        stream_writer.bind(
+            session_id=run["session_id"],
+            fencing_token=0,
+            sequence_start=self._stream_sequence(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            ),
+            terminal_replay=True,
+        )
+
+    def _execution_policy(self) -> ExecutionPolicy:
+        return ExecutionPolicy(
+            require_write_approval=self.config.security.require_write_approval,
+            allow_local_code_execution=(
+                self.code_execution_provider is not None
+                and self.config.code_execution.enabled
+            ),
+            enforce_roles=True,
+            approval_ttl_seconds=self.config.transaction.approval_ttl_seconds,
+        )
+
+    def _assert_recovery_runtime_identity(
+        self,
+        context: RunContext,
+        decision: RecoveryDecision,
+    ) -> None:
+        if decision.tool_manifest_hash is None:
+            return
+        tools = _select_tools(
+            self.tools_provider,
+            context,
+            self._execution_policy(),
+        )
+        if tool_manifest_hash(tools) != decision.tool_manifest_hash:
+            raise RunJournalIdentityError(
+                "run tool manifest changed before recovery",
+                run_id=context.run_id,
+            )
+        route = RedactionPolicy().redact(frozen_route_shape(self.engine))
+        if json.dumps(route, sort_keys=True, separators=(",", ":"), default=str) != json.dumps(
+            decision.frozen_provider_route,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ):
+            raise RunJournalIdentityError(
+                "run provider route changed before recovery",
+                run_id=context.run_id,
+            )
+        budget = decision.budget_snapshot or {}
+        for field in (
+            "model_calls",
+            "max_model_calls",
+            "tool_calls",
+            "max_tool_calls",
+        ):
+            setattr(context.budget, field, int(budget[field]))
 
     @property
     def teaching_delegation(self):
@@ -223,6 +391,11 @@ class EduAgentService:
                 stream_writer.bind(
                     session_id=session_id,
                     fencing_token=claim.fencing_token if claim is not None else 0,
+                    sequence_start=self._stream_sequence(
+                        context.run_id,
+                        actor_id=actor_id,
+                        tenant_id=tenant_id,
+                    ),
                 )
                 stream_writer.publish(
                     RunEventType.RUN_PHASE,
@@ -558,15 +731,7 @@ class EduAgentService:
             omitted_messages=snapshot.omitted_messages,
             context=context,
         )
-        policy = ExecutionPolicy(
-            require_write_approval=self.config.security.require_write_approval,
-            allow_local_code_execution=(
-                self.code_execution_provider is not None
-                and self.config.code_execution.enabled
-            ),
-            enforce_roles=True,
-            approval_ttl_seconds=self.config.transaction.approval_ttl_seconds,
-        )
+        policy = self._execution_policy()
         executor = PolicyToolExecutor(
             self.tools_provider,
             policy=policy,
@@ -719,6 +884,31 @@ class EduAgentService:
         cancellation_token: CancellationToken | None = None,
         stream_writer=None,
     ) -> ChatResult:
+        decision = self.get_recovery_decision(
+            run_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+        self._record_recovery_decision(decision, source="resume")
+        if decision.action is RecoveryAction.MANUAL_REVIEW:
+            raise RecoveryManualReviewRequired(decision)
+        if decision.action is RecoveryAction.TERMINAL_REPLAY:
+            if stream_writer is not None:
+                self.bind_terminal_replay_stream(
+                    stream_writer,
+                    run_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                )
+                stream_writer.publish(
+                    RunEventType.RUN_PHASE,
+                    {"phase": "accepted", "status": "replaying"},
+                )
+            return self.recover_chat_result(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            )
         try:
             record = self.state_store.prepare_run_resume(
                 run_id,
@@ -756,6 +946,7 @@ class EduAgentService:
             max_tool_calls=self.config.runtime.max_tool_calls,
             cancellation_token=cancellation_token,
         )
+        self._assert_recovery_runtime_identity(context, decision)
         if stream_writer is not None:
             context.bind_event_sinks(
                 run_event_sink=stream_writer.publish,
@@ -773,6 +964,11 @@ class EduAgentService:
                 stream_writer.bind(
                     session_id=context.session_id,
                     fencing_token=claim.fencing_token if claim is not None else 0,
+                    sequence_start=self._stream_sequence(
+                        run_id,
+                        actor_id=actor_id,
+                        tenant_id=tenant_id,
+                    ),
                 )
                 stream_writer.publish(
                     RunEventType.RUN_PHASE,
@@ -1042,6 +1238,15 @@ class EduAgentService:
         record = self.state_store.get_run_status(run_id, actor_id=actor_id, tenant_id=tenant_id)
         if record is None:
             raise KeyError(f"run 不存在：{run_id}")
+        decision = self.get_recovery_decision(
+            run_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+        if record["status"] != "abandoned":
+            self._record_recovery_decision(decision, source="api-resume")
+        if decision.action is RecoveryAction.MANUAL_REVIEW:
+            raise RecoveryManualReviewRequired(decision)
         if record["status"] == "abandoned":
             return self.resume_run(
                 run_id,
@@ -1053,9 +1258,11 @@ class EduAgentService:
         if record["status"] != "queued":
             if record["status"] in {"completed", "failed", "interrupted"}:
                 if stream_writer is not None:
-                    stream_writer.bind(
-                        session_id=record["session_id"],
-                        fencing_token=0,
+                    self.bind_terminal_replay_stream(
+                        stream_writer,
+                        run_id,
+                        actor_id=actor_id,
+                        tenant_id=tenant_id,
                     )
                     stream_writer.publish(
                         RunEventType.RUN_PHASE,
@@ -1095,6 +1302,7 @@ class EduAgentService:
             max_tool_calls=self.config.runtime.max_tool_calls,
             cancellation_token=cancellation_token,
         )
+        self._assert_recovery_runtime_identity(context, decision)
         if stream_writer is not None:
             context.bind_event_sinks(
                 run_event_sink=stream_writer.publish,
@@ -1112,6 +1320,11 @@ class EduAgentService:
                 stream_writer.bind(
                     session_id=context.session_id,
                     fencing_token=claim.fencing_token if claim is not None else 0,
+                    sequence_start=self._stream_sequence(
+                        run_id,
+                        actor_id=actor_id,
+                        tenant_id=tenant_id,
+                    ),
                 )
                 stream_writer.publish(
                     RunEventType.RUN_PHASE,

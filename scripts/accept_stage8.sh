@@ -68,6 +68,11 @@ acceptance_uv_run python scripts/benchmark_trace_scaling.py \
   --events 10000 --page-size 100 \
   --output "$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/trace-scaling.json"
 
+# R2 is an internal recovery boundary. The complete suite still runs once below.
+r2_args=(--from-stage8)
+[[ $acceptance_dry_run == 1 ]] && r2_args+=(--dry-run)
+acceptance_run_internal zsh scripts/accept_r2.sh "${r2_args[@]}"
+
 # Highest-stage acceptance explicitly includes the preceding regression boundary.
 stage7_args=(--from-stage8)
 [[ $acceptance_dry_run == 1 ]] && stage7_args+=(--dry-run)

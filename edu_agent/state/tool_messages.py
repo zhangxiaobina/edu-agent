@@ -354,10 +354,18 @@ def _update_journal(
         else current.references.last_tool_event_id
     )
     now = store.now_iso()
+    stream_row = connection.execute(
+        "SELECT stream_event_sequence FROM runs WHERE id=?",
+        (context.run_id,),
+    ).fetchone()
+    event_sequence = max(
+        current.event_sequence,
+        int(stream_row["stream_event_sequence"] or 0),
+    ) + 1
     cursor = connection.execute(
         """
         UPDATE run_journals
-        SET phase=?, loop_cursor=?, event_sequence=event_sequence+1,
+        SET phase=?, loop_cursor=?, event_sequence=?,
             budget_snapshot_json=?, stable_boundary=?, operation_id=?,
             last_tool_event_id=?, writer_id=?, fencing_token=?,
             revision=revision+1, updated_at=?
@@ -368,6 +376,7 @@ def _update_journal(
         (
             phase.value,
             loop_cursor,
+            event_sequence,
             _json(dict(budget_snapshot) if budget_snapshot is not None else context.budget.usage()),
             boundary.value,
             operation,

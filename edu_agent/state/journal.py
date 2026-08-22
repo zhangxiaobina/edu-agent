@@ -895,6 +895,11 @@ def initialize_run_journal(
             actor_id=context.actor_id,
             tenant_id=context.tenant_id,
         )
+        stream_sequence_row = connection.execute(
+            "SELECT stream_event_sequence FROM runs WHERE id=?",
+            (context.run_id,),
+        ).fetchone()
+        stream_sequence = int(stream_sequence_row["stream_event_sequence"] or 0)
         try:
             connection.execute(
                 """
@@ -904,7 +909,7 @@ def initialize_run_journal(
                     tool_manifest_hash, provider_route_json, budget_snapshot_json,
                     stable_boundary, context_checkpoint_id, writer_id,
                     fencing_token, revision, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'accepted', 0, 0, 0, ?, ?, ?,
+                ) VALUES (?, ?, ?, ?, ?, 'accepted', 0, 0, ?, ?, ?, ?,
                           'accepted', ?, ?, ?, 1, ?, ?)
                 """,
                 (
@@ -913,6 +918,7 @@ def initialize_run_journal(
                     context.session_id,
                     context.actor_id,
                     context.tenant_id,
+                    stream_sequence,
                     tool_manifest_hash,
                     route_json,
                     budget_json,
@@ -1106,6 +1112,15 @@ def compare_and_set_run_journal(
                 current_phase=current.phase.value,
                 next_phase=next_phase.value,
             )
+        stream_sequence = int(
+            connection.execute(
+                "SELECT stream_event_sequence FROM runs WHERE id=?",
+                (context.run_id,),
+            ).fetchone()["stream_event_sequence"]
+            or 0
+        )
+        if stream_sequence >= current.event_sequence:
+            event_sequence = max(event_sequence, stream_sequence + 1)
         if next_phase is not current.phase:
             validate_phase_transition(current.phase, next_phase)
         counters = {

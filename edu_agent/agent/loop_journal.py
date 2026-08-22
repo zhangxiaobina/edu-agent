@@ -94,6 +94,31 @@ class AgentLoopJournal:
                 "run provider route changed after journal initialization",
                 run_id=self.context.run_id,
             )
+        budget = snapshot.budget_snapshot
+        for field in (
+            "model_calls",
+            "max_model_calls",
+            "tool_calls",
+            "max_tool_calls",
+        ):
+            value = budget.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RunJournalIdentityError(
+                    "run budget snapshot is invalid",
+                    run_id=self.context.run_id,
+                    field=field,
+                )
+            setattr(self.context.budget, field, value)
+        if (
+            self.context.budget.model_calls > self.context.budget.max_model_calls
+            or self.context.budget.tool_calls > self.context.budget.max_tool_calls
+            or self.context.budget.max_model_calls == 0
+            or self.context.budget.max_tool_calls == 0
+        ):
+            raise RunJournalIdentityError(
+                "run budget snapshot counters are inconsistent",
+                run_id=self.context.run_id,
+            )
         return snapshot
 
     def _cas(
@@ -187,6 +212,9 @@ class AgentLoopJournal:
         self.snapshot = committed.journal
         self.faults.hit("after_assistant_envelope_commit")
         return committed.message
+
+    def model_returned(self) -> None:
+        self.faults.hit("after_model_response")
 
     def call_record(self, tool_call_id: str) -> dict | None:
         if not self.active:

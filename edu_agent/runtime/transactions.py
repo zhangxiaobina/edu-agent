@@ -94,6 +94,10 @@ class InjectedFault(RuntimeError):
     pass
 
 
+class SimulatedProcessCrash(BaseException):
+    """Fault fixture that bypasses in-process exception finalization."""
+
+
 class FaultInjector:
     def hit(self, point: str, operation: dict | None = None) -> None:
         return None
@@ -107,6 +111,16 @@ class NamedFaultInjector(FaultInjector):
         if point in self.points:
             self.points.remove(point)
             raise InjectedFault(point)
+
+
+class ProcessCrashFaultInjector(FaultInjector):
+    def __init__(self, *points: str):
+        self.points = set(points)
+
+    def hit(self, point: str, operation: dict | None = None) -> None:
+        if point in self.points:
+            self.points.remove(point)
+            raise SimulatedProcessCrash(point)
 
 
 @dataclass(frozen=True)

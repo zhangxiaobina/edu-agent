@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R2.6
-- next_prompt: R2.7
+- last_completed_prompt: R2.7
+- next_prompt: R3.1
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
-- stage_gate: in_progress
-- stage_gate_reason: R0 与 R1 门禁已通过，R2.1-R2.6 已完成 typed RunEvent、RunJournal、工具消息增量提交、幂等 TurnFinalizer、Provider/SSE 真流、统一取消与 writer fence；R2 总门禁仍待 R2.7 五崩溃窗恢复与独立验收
+- stage_gate: passed
+- stage_gate_reason: R0-R2 门禁已通过；R2 的真实 Provider/Agent delta、统一取消、增量 journal、幂等 finalizer、稳定 cursor 决策、五个进程重开窗口、持久 sequence/fence、两种 wire mode、真实 socket/API replay 和独立 R2 门禁均已验证
 
 ## Baseline Reproduction
 
@@ -693,3 +693,48 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   独立总门禁留给 R2.7；工具仍顺序执行。
 - gate: `R2.6 passed`；R2 总门禁保持 `in_progress`，不得把本阶段描述成已完成五崩溃窗恢复。
 - next: R2.7，基于 R2.1-R2.6 交接完成五崩溃窗、进程重开恢复决策、演示与 R2 独立门禁；不得开始工具并发。
+
+### R2.7 - 2026-08-23
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `658237e33e46fde4ffe6d40d0f11bcbc460ac4d6` 开始；本次未创建本地提交或推送。Stage 8 生成的本机时间、
+  性能和 dirty-HEAD development artifact 已恢复为会话开始版本，未把瞬时数据保留为发布证据。
+- recovery decisions: 新增 `RunRecoveryPlanner`、`RecoveryDecision` 与穷尽 `RunStableBoundary` 的
+  `continue/replay-read/reuse-operation/manual-review/terminal-replay` 表。非终态 run 缺 journal、损坏/未知
+  boundary、非法预算、无法分类的 effect 或未知 operation 状态均 fail closed；未配对只读结果可重放，写调用
+  只查询已有 operation。`prepared/approved/failed` 沿原幂等事务恢复，`committed` 只复用回执，
+  `executing/compensating/compensated/manual_review` 禁止自动执行。startup、普通 resume 和 API resume 均记录
+  中心脱敏决策 Trace。
+- frozen recovery identity: resume 前重新计算当前工具面与脱敏 Provider route，必须与 journal 的冻结
+  manifest hash/route 一致；model/tool 计数及两个上限从持久预算 snapshot 恢复，非法或超限 snapshot 进入
+  `manual-review`，不会用新 Service 默认配置归零。terminal finalizer 重建兼容 `ChatResult`，API request 仍按
+  原 response hash 字节重放。
+- process/fence: 新增 `runs.stream_event_sequence` 持久高水位；`RunStreamWriter` 在事件可见前原子预留
+  sequence，每次 publish 都重新验证 run scope、当前 lease 和 fence。新进程从 stream/journal 最大高水位继续，
+  旧进程内 writer 在接管后下一次发布被拒绝；terminal replay 只为已终态 run 使用 token `0` 生成新 envelope，
+  EventBus 仍不保存历史 delta。
+- five crash windows: `SimulatedProcessCrash(BaseException)` 绕过进程内异常收尾，分别注入模型返回后、assistant
+  envelope 后、只读 result 后、写 operation commit 后和 final message 后。每个 fixture 都关闭第一个 Service，
+  推进 lease 时钟，再用同一持久 SQLite 构造新 Service；验证 call/result 完整配对、final 唯一、event sequence/
+  cursor 单调、route/manifest/budget 不漂移、旧 writer/fence 失效、写副作用唯一和 terminal replay 等价。
+- migration/scripts/docs: 新增幂等 `012_r2_recovery` 并将 SQLite `PRAGMA user_version` 提升到 12；旧库列探测与
+  migration marker 可重入，未来 schema 继续拒绝降级。新增只使用 Service 决策/resume/run status/Trace API 的
+  `scripts/r2_recovery_demo.py`，输出中心脱敏决策、invariants 和 Trace，不查询内部表解释结果。新增内部
+  `scripts/accept_r2.sh`，由唯一公开完整入口 `accept_stage8.sh` 调用；同步 RunJournal、architecture、production
+  runtime、roadmap、README 和现场演示，只将已验证能力改成当前实现。
+- verification: 全仓 `uv run --frozen --offline ruff check .` 通过；RunJournal/工具消息/finalizer/事务/五窗故障组
+  `88 passed`；Chat Completions 与 Responses 两种真实 SDK wire fixture `2 passed`；显式清空模型/平台凭据、
+  禁用外部 pytest plugin 的全量离线回归在获准回环环境 `420 passed (24.95s)`；真实 SSE/API socket 专项
+  `22 passed (7.31s)`；最终独立 R2 gate 为 `141 passed (11.02s)` 且恢复 demo 全部 invariants 为 true。
+  `zsh scripts/accept_stage8.sh` 最终通过：前置 lineage/acceptance/API recovery 组 `31 passed`、内嵌 R2 gate
+  `141 passed`、observability 边界 `11 passed`、最终全量 `420 passed (23.85s)`，lineage 与两次敏感边界审计
+  均无 finding；临时状态成功清理。
+- not_verified: 未访问公网或真实 Provider/model，未运行 GitHub-hosted CI；Stage 8 未发现已启动的真实
+  Docker/Jobe 后端，按既有合同记录 `sandbox=not_verified`。两种锁定 SDK/wire fixture 和真实本机 socket 已
+  通过；真实 Provider 网络流本来就不是 R2 离线门禁，未被写成 verified。
+- residual_risks: EventBus 仍是单进程 future-only transport，不提供 `Last-Event-ID` payload 历史或跨主机
+  协调；同步 SDK 只能协作取消并依赖 timeout，迟到提交由 token/fence 阻止。当前工具调用仍严格顺序执行，
+  未实现 R3 的不可变 ToolManifest 元数据扩展、参数规范化或安全并发。
+- gate: `R2 passed`；R0-R2 顶层 stage gate 为 `passed`。
+- next: R3.1，读取本交接、工具 registry/schema/插件/MCP、Plan 工具裁剪与 RunJournal manifest hash，冻结 run 级
+  `ToolManifest`；保持工具顺序执行，不提前开始 R3.5 并发。

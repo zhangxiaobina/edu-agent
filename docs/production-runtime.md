@@ -175,7 +175,8 @@ fencing guard，避免“检查后 lease 转移、随后旧 worker 仍提交业�
 
 `EduAgentService` 启动时扫描 heartbeat 超时的 `running/cancel_requested` run。安全恢复保留原 run id、
 Plan、Artifact 和幂等 ToolOperation；已 committed 写入只返回原结果，不重复副作用。崩溃时仍为
-`executing` 的不确定写转入 `manual_review`，不会自动重放。
+`executing` 的不确定写转入 `manual_review`，不会自动重放。扫描后由 `RunRecoveryPlanner` 联合 journal、
+tool call/result、operation 和 finalizer 真相产生脱敏决策并写入 Trace；resume 只执行该稳定 cursor 的动作。
 
 | 崩溃/中断点 | 持久结果 | 恢复建议 | 自动行为 |
 |---|---|---|---|
@@ -185,6 +186,10 @@ Plan、Artifact 和幂等 ToolOperation；已 committed 写入只返回原结果
 | cancel_requested，worker 仍响应 | `interrupted` | `none` | 在最近协作边界停止且不提交返回结果 |
 | cancel_requested，worker 已失联 | `interrupted` | `resume_from_persistent_plan` | 保留现场，不自动重放 |
 | committed 写后进程崩溃 | operation 仍为 `committed` | `resume_from_persistent_plan` | 同幂等键返回原结果 |
+| envelope 后、只读 result 前崩溃 | pending 只读 call，无 result | `replay-read` | 只读 handler 可重放，result 仍按 call id 唯一配对 |
+| envelope 后、写 operation 为 `prepared/approved/failed` | 同一幂等 operation 未越过不确定边界 | `continue` | 沿既有事务合同恢复同一 operation |
+| envelope 后、写 operation 为 `committed` | 持久 operation 回执 | `reuse-operation` | 不调用 handler，只配对原回执 |
+| envelope 后、写 operation 状态不确定/未知 | `executing/compensating/compensated/manual_review` 或未知 | `manual-review` | 禁止自动恢复，由人工对账 |
 | finalizer 子步骤后崩溃 | run 保持非终态 + 持久 cursor | `resume_finalizer` | lease 到期后从 cursor 继续，已完成步骤不重做 |
 | terminal 后、API response 前崩溃 | terminal finalizer + 唯一最终消息 | `terminal_replay` | 重建同形状 `ChatResult` 后提交 request response |
 | lease 过期且旧 worker 恢复 | 旧 run `abandoned` | `resume_from_persistent_plan` 或 `manual_review` | 新 owner 获得更高 token，旧 token 所有提交被拒绝 |
@@ -292,7 +297,7 @@ tenant/actor/session 分目录，读取必须匹配 owner 并通过路径与 has
 `StateStore` 使用 SQLite WAL、`busy_timeout` 和显式写事务，保存：
 
 - sessions / messages
-- runs（状态、owner/token、heartbeat、取消、恢复原因和建议）
+- runs（状态、owner/token、heartbeat、取消、恢复原因/建议和持久 stream sequence 高水位）
 - run_journals（phase、loop cursor、model attempt、event sequence、冻结 route/预算、稳定边界和真相表引用）
 - turn_finalizers / turn_finalizer_hooks（收尾 cursor、唯一最终消息、usage/budget、终态和后处理 claim）
 - session_leases（当前 owner、单调 fencing token、active run、heartbeat 和 expiry）
@@ -328,7 +333,12 @@ Responses adapter 产生带 route/attempt/provider event id 的真实 text/tool/
 `RunStreamWriter` 输出 accepted、text/tool/plan/usage 和 completed/error，handler 是唯一 socket writer；
 keepalive 只在事件空闲时保活。有界订阅队列隔离慢消费者，断流、显式 cancel 与 deadline 取消同一个
 `CancellationToken`，并传播到 Provider、Agent、工具、子 Agent 和代码执行。同步 SDK 若不能强杀，返回后仍由
-token/fence 拒绝迟到提交；EventBus 不承担跨进程 replay，五崩溃窗恢复仍留给 R2.7。
+token/fence 拒绝迟到提交；EventBus 不承担跨进程 payload replay。
+R2.7 的 `012_r2_recovery` 将 schema version 提升到 12，增加 `runs.stream_event_sequence`；可见事件先持久
+预留 sequence 并复验当前 lease/fence。`RunRecoveryPlanner` 从稳定 cursor 选择
+`continue/replay-read/reuse-operation/manual-review/terminal-replay`，resume 前复验冻结 manifest/route 并恢复
+预算 snapshot。五个 fault fixture 都关闭崩溃 Service、推进 lease 时钟，再以同一 SQLite 文件构造新 Service；
+EventBus 仍不保存历史 delta，工具仍顺序执行。
 
 ## 可插拔扩展
 
@@ -398,6 +408,8 @@ uv run --frozen python scripts/rag_runtime_demo.py
 uv run --frozen python scripts/eval_retrieval.py
 uv run --frozen python scripts/transactional_tools_demo.py
 uv run --frozen python scripts/runtime_recovery_demo.py
+uv run --frozen --offline python scripts/r2_recovery_demo.py
+zsh scripts/accept_r2.sh
 uv run --frozen python scripts/code_sandbox_demo.py --provider docker --e2e --require-all
 uv run --frozen python scripts/eval_plan_ablation.py --engine oracle
 ```

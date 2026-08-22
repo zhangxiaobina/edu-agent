@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from ..runtime.cancellation import Cancellation, CancellationToken
@@ -50,12 +50,14 @@ class RunStreamWriter:
         attempt: int,
         cancellation_token: CancellationToken,
         writer_id: str | None = None,
+        sequence_reserver: Callable[..., int] | None = None,
     ):
         self.bus = bus
         self.run_id = run_id
         self.attempt = int(attempt)
         self.cancellation_token = cancellation_token
         self.writer_id = writer_id or uuid.uuid4().hex
+        self._sequence_reserver = sequence_reserver
         self._lock = threading.RLock()
         self._publisher: RunEventPublisher | None = None
         self._session_id: str | None = None
@@ -67,6 +69,7 @@ class RunStreamWriter:
         self._provider_visible = False
         self._provider_route: Any = None
         self._pending_cancellation: Cancellation | None = None
+        self._terminal_replay = False
         self._unregister_cancel = cancellation_token.register(self.cancel)
 
     @property
@@ -84,7 +87,14 @@ class RunStreamWriter:
         with self._lock:
             return self._fencing_token if self._fencing_token >= 0 else None
 
-    def bind(self, *, session_id: str, fencing_token: int) -> None:
+    def bind(
+        self,
+        *,
+        session_id: str,
+        fencing_token: int,
+        sequence_start: int | None = None,
+        terminal_replay: bool = False,
+    ) -> None:
         pending: Cancellation | None = None
         with self._lock:
             if self._aborted:
@@ -96,18 +106,36 @@ class RunStreamWriter:
             if fencing_token < self._fencing_token:
                 raise RunEventWriterRejected("stream writer fencing token moved backwards")
             if self._publisher is not None and fencing_token == self._fencing_token:
+                if terminal_replay != self._terminal_replay:
+                    raise RunEventWriterRejected("stream writer cannot change replay mode")
                 return
+            sequence_allocator = None
+            if self._sequence_reserver is not None:
+                def reserve_sequence(current, event_type):
+                    return self._sequence_reserver(
+                        run_id=self.run_id,
+                        session_id=session_id,
+                        fencing_token=fencing_token,
+                        current_sequence=current,
+                        event_type=event_type.value,
+                        terminal_replay=terminal_replay,
+                    )
+
+                sequence_allocator = reserve_sequence
             publisher = self.bus.publisher(
                 run_id=self.run_id,
                 session_id=session_id,
                 attempt=self.attempt,
                 writer_id=self.writer_id,
                 fencing_token=fencing_token,
+                sequence_start=sequence_start,
+                sequence_allocator=sequence_allocator,
             )
             previous = self._publisher
             self._publisher = publisher
             self._session_id = session_id
             self._fencing_token = fencing_token
+            self._terminal_replay = terminal_replay
             if previous is not None:
                 previous.close()
             pending = self._pending_cancellation
@@ -297,6 +325,7 @@ class RunStreamWriterRegistry:
         attempt: int,
         writer_id: str,
         cancellation_token: CancellationToken,
+        sequence_reserver: Callable[..., int] | None = None,
     ) -> RunStreamWriter:
         replaced: RunStreamWriter | None = None
         with self._lock:
@@ -315,6 +344,7 @@ class RunStreamWriterRegistry:
                 attempt=attempt,
                 writer_id=writer_id,
                 cancellation_token=cancellation_token,
+                sequence_reserver=sequence_reserver,
             )
             self._writers[run_id] = writer
             self._attempts[run_id] = attempt

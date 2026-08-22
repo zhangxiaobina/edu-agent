@@ -465,6 +465,64 @@ def _cas_cursor(
     ).fetchone()
 
 
+def _mark_final_message_journal_boundary(
+    connection: sqlite3.Connection,
+    store,
+    context,
+    *,
+    required: bool,
+) -> None:
+    from .journal import RunPhase, RunStableBoundary
+
+    journal = connection.execute(
+        "SELECT * FROM run_journals WHERE run_id=?",
+        (context.run_id,),
+    ).fetchone()
+    if journal is None:
+        return
+    if journal["stable_boundary"] == RunStableBoundary.FINAL_MESSAGE_COMMITTED.value:
+        return
+    if journal["phase"] != RunPhase.FINALIZING.value:
+        if not required:
+            return
+        raise RuntimeError(
+            "final message cannot commit before the run journal enters finalizing"
+        )
+    stream_sequence = int(
+        connection.execute(
+            "SELECT stream_event_sequence FROM runs WHERE id=?",
+            (context.run_id,),
+        ).fetchone()["stream_event_sequence"]
+        or 0
+    )
+    event_sequence = max(int(journal["event_sequence"]), stream_sequence) + 1
+    updated = connection.execute(
+        """
+        UPDATE run_journals
+        SET stable_boundary=?, event_sequence=?, writer_id=?, fencing_token=?,
+            revision=revision+1, updated_at=?
+        WHERE run_id=? AND revision=? AND phase=? AND fencing_token=?
+        """,
+        (
+            RunStableBoundary.FINAL_MESSAGE_COMMITTED.value,
+            event_sequence,
+            getattr(context, "lease_owner", None) or journal["writer_id"],
+            (
+                getattr(context, "fencing_token", None)
+                if getattr(context, "fencing_token", None) is not None
+                else journal["fencing_token"]
+            ),
+            store.now_iso(),
+            context.run_id,
+            journal["revision"],
+            RunPhase.FINALIZING.value,
+            journal["fencing_token"],
+        ),
+    )
+    if updated.rowcount != 1:
+        raise RuntimeError("run journal final-message compare-and-set lost a race")
+
+
 def advance_turn_finalizer(
     store,
     context,
@@ -549,6 +607,12 @@ def commit_final_message(
                 next_cursor=3,
                 fields=fields,
             )
+            _mark_final_message_journal_boundary(
+                connection,
+                store,
+                context,
+                required=False,
+            )
             return _decode(updated)
         safe = redact_sensitive(dict(message))
         if safe.get("role") != "assistant" or safe.get("tool_calls"):
@@ -619,6 +683,12 @@ def commit_final_message(
             expected_cursor=expected_cursor,
             next_cursor=3,
             fields=fields,
+        )
+        _mark_final_message_journal_boundary(
+            connection,
+            store,
+            context,
+            required=True,
         )
         return _decode(updated)
 
@@ -743,6 +813,10 @@ def mark_terminal(store, context, *, expected_cursor: int):
             )
             if needs_finalizing:
                 validate_phase_transition(current_phase, RunPhase.FINALIZING)
+                next_event_sequence = max(
+                    int(journal["event_sequence"]),
+                    int(run["stream_event_sequence"] or 0),
+                ) + 1
                 writer_id = getattr(context, "lease_owner", None) or journal["writer_id"]
                 fencing_token = (
                     getattr(context, "fencing_token", None)
@@ -752,7 +826,7 @@ def mark_terminal(store, context, *, expected_cursor: int):
                 connection.execute(
                     """
                     UPDATE run_journals
-                    SET phase=?, stable_boundary=?, event_sequence=event_sequence+1,
+                    SET phase=?, stable_boundary=?, event_sequence=?,
                         writer_id=?, fencing_token=?, budget_snapshot_json=?,
                         revision=revision+1, updated_at=?
                     WHERE run_id=? AND revision=? AND phase=? AND fencing_token=?
@@ -760,6 +834,7 @@ def mark_terminal(store, context, *, expected_cursor: int):
                     (
                         RunPhase.FINALIZING.value,
                         RunStableBoundary.VERIFICATION_COMMITTED.value,
+                        next_event_sequence,
                         writer_id,
                         fencing_token,
                         row["budget_json"],
@@ -777,10 +852,14 @@ def mark_terminal(store, context, *, expected_cursor: int):
                 ).fetchone()
             if not needs_finalizing:
                 validate_phase_transition(journal["phase"], target_phase)
+            next_event_sequence = max(
+                int(journal["event_sequence"]),
+                int(run["stream_event_sequence"] or 0),
+            ) + 1
             connection.execute(
                 """
                 UPDATE run_journals
-                SET phase=?, stable_boundary=?, event_sequence=event_sequence+1,
+                SET phase=?, stable_boundary=?, event_sequence=?,
                     writer_id=?, fencing_token=?, budget_snapshot_json=?,
                     revision=revision+1, updated_at=?
                 WHERE run_id=? AND revision=? AND phase=? AND fencing_token=?
@@ -788,6 +867,7 @@ def mark_terminal(store, context, *, expected_cursor: int):
                 (
                     target_phase.value,
                     target_boundary.value,
+                    next_event_sequence,
                     getattr(context, "lease_owner", None) or journal["writer_id"],
                     getattr(context, "fencing_token", None)
                     if getattr(context, "fencing_token", None) is not None

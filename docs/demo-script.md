@@ -28,10 +28,13 @@ uv run --frozen python scripts/plan_runtime_demo.py
 ```bash
 uv run --frozen python scripts/transactional_tools_demo.py
 uv run --frozen python scripts/runtime_recovery_demo.py
+uv run --frozen --offline python scripts/r2_recovery_demo.py
 ```
 
 展示 Scheduler 在“业务提交后进程失败”场景重试仍只有一个考试；outbox 重投但消费者只产生一次副作用；
-再展示 session 争抢、旧 fencing token 被拒、取消和 stale run 恢复。强调范围是单 SQLite 文件。
+再展示 session 争抢、旧 fencing token 被拒、取消和 stale run 恢复；第三条命令关闭崩溃 Service，用同一
+SQLite 文件构造新 Service，并从公开 API 输出脱敏 `replay-read -> terminal-replay` 决策与 Trace。强调范围是
+单 SQLite 文件，EventBus 不保存历史 delta。
 
 ## 5:00-6:30：受限子 Agent 与代码执行边界
 

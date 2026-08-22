@@ -234,9 +234,11 @@ class EduAgentApi:
                     tenant_id=principal.tenant_id,
                 )
                 if stream_writer is not None and terminal is not None:
-                    stream_writer.bind(
-                        session_id=terminal["session_id"],
-                        fencing_token=0,
+                    self.service.bind_terminal_replay_stream(
+                        stream_writer,
+                        run_id,
+                        actor_id=principal.actor_id,
+                        tenant_id=principal.tenant_id,
                     )
                     stream_writer.publish(
                         RunEventType.RUN_PHASE,
@@ -300,10 +302,16 @@ class EduAgentApi:
                         actor_id=principal.actor_id,
                         tenant_id=principal.tenant_id,
                     )
-                    if failed_run is not None:
-                        stream_writer.bind(
-                            session_id=failed_run["session_id"],
-                            fencing_token=0,
+                    if failed_run is not None and failed_run["status"] in {
+                        "completed",
+                        "failed",
+                        "interrupted",
+                    }:
+                        self.service.bind_terminal_replay_stream(
+                            stream_writer,
+                            run_id,
+                            actor_id=principal.actor_id,
+                            tenant_id=principal.tenant_id,
                         )
                 except (KeyError, PermissionError, RunEventWriterRejected):
                     pass
@@ -531,6 +539,11 @@ class EduAgentApi:
             attempt=attempt,
             writer_id=f"api:{owner_id}",
             cancellation_token=cancellation_token,
+            sequence_reserver=lambda **fields: self.service.reserve_stream_event_sequence(
+                actor_id=principal.actor_id,
+                tenant_id=principal.tenant_id,
+                **fields,
+            ),
         )
         subscription = self._run_events.subscribe(
             run_id=run_id,

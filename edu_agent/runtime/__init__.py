@@ -5,6 +5,13 @@ from .context_engine import CheckpointContextEngine, CompactionResult, ContextEn
 from .cancellation import Cancellation, CancellationRequested, CancellationToken
 from .models import IterationBudget, RunContext
 from .manager import ActiveRun, LeaseClaim, RuntimeManager
+from .recovery import (
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryManualReviewRequired,
+    RunRecoveryPlanner,
+    STABLE_CURSOR_DECISION_TABLE,
+)
 from .security import redact_sensitive
 from .tool_executor import (
     ApprovalRequest,
@@ -33,7 +40,12 @@ __all__ = [
     "LeaseClaim",
     "PolicyToolExecutor",
     "PlanningConfig",
+    "RecoveryAction",
+    "RecoveryDecision",
+    "RecoveryManualReviewRequired",
     "RunContext",
+    "RunRecoveryPlanner",
+    "STABLE_CURSOR_DECISION_TABLE",
     "RuntimeManager",
     "ToolOutcome",
     "ToolResultBudget",

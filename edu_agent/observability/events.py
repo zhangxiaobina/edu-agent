@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -19,6 +19,7 @@ from .redaction import RedactionPolicy
 SCHEMA_VERSION = "edu-agent.runtime-event.v1"
 RUNTIME_EVENT_SCHEMA_VERSION = SCHEMA_VERSION
 RUN_EVENT_SCHEMA_VERSION = "edu-agent.run-event.v2"
+_SEQUENCE_ALLOCATOR_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -279,6 +280,10 @@ class _RunEventStreamState:
     fencing_token: int
     sequence: int = 0
     terminal_event_type: RunEventType | None = None
+    sequence_allocator: Callable[[int, RunEventType], int] | None = field(
+        default=None,
+        repr=False,
+    )
 
 
 class RunEventSubscription(Iterator[RunEvent]):
@@ -491,6 +496,7 @@ class RunEventBus:
         writer_id: str,
         fencing_token: int,
         sequence_start: int | None = None,
+        sequence_allocator: Callable[[int, RunEventType], int] | None = None,
     ) -> RunEventPublisher:
         _non_empty_string(run_id, "run_id")
         _non_empty_string(session_id, "session_id")
@@ -512,6 +518,7 @@ class RunEventBus:
                 writer_id=writer_id,
                 fencing_token=fencing_token,
                 sequence_start=sequence_start,
+                sequence_allocator=sequence_allocator,
             )
         return RunEventPublisher(
             self,
@@ -559,6 +566,7 @@ class RunEventBus:
                 writer_id=writer_id,
                 fencing_token=fencing_token,
                 sequence_start=None,
+                sequence_allocator=_SEQUENCE_ALLOCATOR_UNSET,
             )
             if state.terminal_event_type is not None:
                 raise RunEventTerminalError(
@@ -566,12 +574,30 @@ class RunEventBus:
                     f"({state.terminal_event_type.value})"
                 )
             redacted_payload = self.redaction.redact(copy.deepcopy(dict(payload or {})))
+            sequence = state.sequence + 1
+            if state.sequence_allocator is not None:
+                try:
+                    sequence = state.sequence_allocator(state.sequence, typed_event)
+                except RunEventProtocolError:
+                    raise
+                except Exception as error:
+                    raise RunEventWriterRejected(
+                        "persistent stream sequence or fence allocation was rejected"
+                    ) from error
+                if (
+                    isinstance(sequence, bool)
+                    or not isinstance(sequence, int)
+                    or sequence <= state.sequence
+                ):
+                    raise RunEventValidationError(
+                        "persistent sequence allocator did not advance monotonically"
+                    )
             event = RunEvent(
                 event_type=typed_event,
                 run_id=run_id,
                 session_id=session_id,
                 attempt=attempt,
-                sequence=state.sequence + 1,
+                sequence=sequence,
                 timestamp=event_timestamp,
                 writer_id=writer_id,
                 fencing_token=fencing_token,
@@ -662,6 +688,7 @@ class RunEventBus:
         writer_id: str,
         fencing_token: int,
         sequence_start: int | None,
+        sequence_allocator: Callable[[int, RunEventType], int] | None | object,
     ) -> _RunEventStreamState:
         key = (run_id, attempt)
         state = self._streams.get(key)
@@ -675,6 +702,11 @@ class RunEventBus:
                 writer_id=writer_id,
                 fencing_token=fencing_token,
                 sequence=sequence_start or 0,
+                sequence_allocator=(
+                    None
+                    if sequence_allocator is _SEQUENCE_ALLOCATOR_UNSET
+                    else sequence_allocator
+                ),
             )
             self._streams[key] = state
             return state
@@ -699,6 +731,13 @@ class RunEventBus:
                 )
             state.fencing_token = fencing_token
             state.writer_id = writer_id
+            state.sequence_allocator = (
+                None
+                if sequence_allocator is _SEQUENCE_ALLOCATOR_UNSET
+                else sequence_allocator
+            )
+        elif sequence_allocator is not _SEQUENCE_ALLOCATOR_UNSET:
+            state.sequence_allocator = sequence_allocator
         return state
 
     @staticmethod

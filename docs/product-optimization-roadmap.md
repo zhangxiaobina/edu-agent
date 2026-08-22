@@ -150,10 +150,10 @@ private-contract/
 | 重试、限流与 fallback | `agent/retry_utils.py`、`agent/backend_identity.py` | 有错误分类、固定指数退避、熔断和一个 fallback | 增加 `Retry-After`、jitter、并发上限、按 deployment 的 breaker 和兼容性门禁 | R1 |
 | 凭据轮换 | `agent/credential_pool.py` | 主/备用 key 各一个环境变量，无 pool/quarantine | 秋招主线只做可选小型凭据集合；无多凭据需求时不实现 3000 行级通用池 | L1 |
 | 上下文超限与压缩 | `agent/context_engine.py`、`agent/context_compressor.py`、`docs/micro-compaction.md` | 有原子工具组、近似 token、可恢复确定性 checkpoint；Provider overflow 不会触发压缩重试 | 增加实际 token 口径、输出预留、反抖动、一次 overflow recovery 和摘要保真评测 | R4 |
-| 会话存储与恢复 | `hermes_state.py`、工具后的增量 flush | SQLite 已保存 session/run/Plan/Evidence/operation/lease；assistant/tool 消息主要在整轮结束时追加 | 增加 loop cursor 和每个稳定边界的增量提交，区分精确续跑与安全重放 | R2 |
+| 会话存储与恢复 | `hermes_state.py`、工具后的增量 flush | SQLite 已按稳定 cursor 增量提交 assistant/tool、finalizer、预算和冻结身份；五窗按显式决策重开 | EventBus 继续只做进程内传输；不把未知状态猜成可恢复 | R2 |
 | 父子 Agent 预算 | `agent/iteration_budget.py`、`tools/delegate_tool.py` | `delegation_roots` 已做 child 预算预留、聚合 usage、成本和 token 上限 | Hermes 子 Agent 实际使用独立新预算；保留 EduAgent 更严格的 root 治理，再把父级自身 usage 纳入统一 ledger | R4 |
 | 长期运行与安全停机 | `gateway/drain_control.py`、`gateway/shutdown_flush.py` | Scheduler、lease/heartbeat、stale recovery 已有；缺少进程级 drain/final flush/备份恢复演练 | 增加 readiness/draining、拒收新 turn、有界等待、未完成 run 标记和恢复演练 | R4 |
-| 结束持久化与后台复盘 | `agent/turn_finalizer.py`、`agent/background_review.py` | 主 turn 会落 run/messages/Trace；无统一 finalizer 和自动复盘 | 先统一持久化/usage/cleanup；后台只产 Memory/Skill candidate，主链失败不受影响 | R2/L2 |
+| 结束持久化与后台复盘 | `agent/turn_finalizer.py`、`agent/background_review.py` | 统一 finalizer 已完成唯一消息、usage/terminal、hooks/cleanup；尚无自动复盘 | 后台只产 Memory/Skill candidate，主链失败不受影响 | R2/L2 |
 | Memory/Skill 生命周期 | `agent/memory_provider.py`、`tools/skill_usage.py`、`agent/curator.py` | Memory 有 FTS5/scope/冲突/过期；无 Skill 实体和 usage/rollback | 先做人工创建、评测、审批和回滚，再考虑 Curator | L2 |
 | 验证、Artifact 与审计 | `agent/verification_evidence.py`、`tools/tool_result_storage.py`、`agent/trajectory.py` | 教学 Plan/Evidence、scoped Artifact、Trace index 和导出已更完整 | 保持当前设计，只补新事件类型和真实 Provider 故障 E2E | 持续 |
 | CI 与供应链 | `.github/workflows/`、精确依赖约束 | 已建立单平台 secret-free CI、真实 Git provenance 和 lock 漂移门禁；本地等价流程已通过，尚未观察托管 GitHub Actions 运行 | 保持凭据清空、冻结安装、离线评测和敏感数据审计门禁 | R0 |
@@ -162,14 +162,15 @@ private-contract/
 
 - **当前 HTTP 已消费真实 Provider/Agent 流。** `edu_agent/api.py::_stream_chat` 将 typed RunEvent 按单调
   sequence 映射为 SSE，逐步发送 text/tool/plan/usage 与 terminal；keepalive 只在空闲时保活。EventBus
-  future-only 且不跨进程，因此这不是持久断线回放；完整崩溃恢复仍由 R2.7 收口。
+  future-only 且不跨进程，因此这不是持久断线 payload 回放；恢复 writer 从持久 sequence 高水位继续。
 - **当前没有自动修复坏 JSON。** `parse_tool_arguments()` 对 malformed JSON 返回 `INVALID_JSON`；
   `_validate_value()` 会拒绝类型、范围和未知字段错误。模型下一轮可以自行修正，这是“校验 + 回灌”，不是修复器。
 - **当前工具批次是顺序执行。** `agent/graph.py::tools_node` 逐个执行 tool call。委派层的并发不能当作
   单回合工具并发，因为两者的事务、取消和结果配对边界不同。
-- **当前恢复已有稳定 cursor，但尚未完成五窗口总门禁。** assistant tool-call envelope、每个 tool result、
-  TurnFinalizer cursor 与 terminal 都已增量持久化；进程重开后的完整 continue/replay/manual-review 决策和
-  五个崩溃窗统一验收仍属于 R2.7，不能提前声称任意位置无损续跑。
+- **当前恢复从声明的稳定 cursor 继续。** assistant tool-call envelope、每个 tool result、TurnFinalizer cursor
+  与 terminal 都增量持久化；进程重开按 `continue/replay-read/reuse-operation/manual-review/terminal-replay`
+  决策，复验冻结 route/manifest/budget。五个进程重开窗口已通过；未知边界或不确定写仍 fail closed，不能
+  描述成任意机器指令位置无损续跑。
 - **当前 system prompt 稳定，但整个请求前缀不总是稳定。** Plan 模式会按 ready step 裁剪工具并改写
   tool description；如果将来依赖 Provider prompt cache，需要冻结 session tool manifest，或先量化接受缓存失效的成本。
 - **当前 Provider 容错仍是单 primary + 单 fallback。** 已有 Chat Completions/Responses 两种显式 API mode、
@@ -606,7 +607,7 @@ context overflow 不盲重试；fallback 不选择 capability 不兼容模型；
 |---|---|---|
 | 已实现 | 源码 + 专项测试 + 一键验收 | Plan/Evidence、事务工具、lease/fencing、Trace、受控委派 |
 | 已接入但未线上验证 | 协议/故障测试通过，真实环境报告明确 `not_run/not_verified` | 新 Provider adapter、外部数据 Adapter |
-| 计划中 | 只出现在本文，不写入 README “技术亮点” | 五崩溃窗恢复、ToolManifest、统一预算总账、Background Review |
+| 计划中 | 只出现在本文，不写入 README “技术亮点” | ToolManifest、统一预算总账、Background Review |
 
 ## 9. 当前下一步
 
@@ -617,8 +618,8 @@ R0-R5 拆成 33 个可独立验收和交接的提示词；前一编号未满足�
 
 1. 完成 R0：建立可追溯 Git/CI 基线，保持 Stage 8 单一公开验收入口，并修正 `commit="unavailable"`。
 2. R1 已完成：Provider Gateway 已跑通 Chat Completions/Responses mode、Retry-After 和兼容 fallback。
-3. R2.1-R2.6 已完成 RunEvent、RunJournal、增量工具消息、TurnFinalizer、Provider/SSE 真流、统一取消与
-   writer fence；下一步 R2.7 完成五崩溃窗恢复和 R2 独立门禁。
+3. R2 已完成：RunEvent、RunJournal、增量工具消息、TurnFinalizer、Provider/SSE 真流、统一取消、持久 writer
+   fence、五崩溃窗恢复和独立门禁均已通过；下一步 R3.1 冻结 ToolManifest，仍不提前并发工具。
 4. 完成 R3：冻结 ToolManifest，落地参数规范化和只读工具 segment 并发，再把 SQLite 工具收口为 SyntheticProvider。
 5. 完成 R4：补实际 token/overflow recovery、全树预算、drain 与 backup/restore。
 6. 完成 R5：跑一次固定真实模型独立 Test，更新演示、部署和运行手册，冻结秋招候选版。

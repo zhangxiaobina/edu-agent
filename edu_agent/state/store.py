@@ -47,7 +47,7 @@ from .turn_finalizer import (
 
 
 _UNSET = object()
-STATE_SCHEMA_VERSION = 11
+STATE_SCHEMA_VERSION = 12
 
 
 class SessionLeaseUnavailable(RuntimeError):
@@ -213,6 +213,7 @@ class StateStore:
                     cancel_requested_at TEXT,
                     recovery_reason TEXT,
                     recovery_recommendation TEXT,
+                    stream_event_sequence INTEGER NOT NULL DEFAULT 0,
                     finished_at TEXT
                 );
 
@@ -504,6 +505,7 @@ class StateStore:
                 "cancel_requested_at": "TEXT",
                 "recovery_reason": "TEXT",
                 "recovery_recommendation": "TEXT",
+                "stream_event_sequence": "INTEGER NOT NULL DEFAULT 0",
             }
             for column, declaration in run_migrations.items():
                 if column not in run_columns:
@@ -672,6 +674,13 @@ class StateStore:
                 VALUES (?, ?)
                 """,
                 (TURN_FINALIZER_SCHEMA, self.now_iso()),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO state_schema_migrations(version, applied_at)
+                VALUES ('012_r2_recovery', ?)
+                """,
+                (self.now_iso(),),
             )
             connection.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION}")
 
@@ -1439,6 +1448,112 @@ class StateStore:
                 ),
             )
             return cursor.rowcount == 1
+
+    def get_run_event_sequence(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str,
+    ) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT r.actor_id, r.tenant_id, r.stream_event_sequence,
+                       j.event_sequence AS journal_event_sequence
+                FROM runs r
+                LEFT JOIN run_journals j ON j.run_id=r.id
+                WHERE r.id=?
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"run does not exist: {run_id}")
+        if row["actor_id"] != actor_id or row["tenant_id"] != tenant_id:
+            raise PermissionError("run does not belong to actor/tenant")
+        return max(
+            int(row["stream_event_sequence"] or 0),
+            int(row["journal_event_sequence"] or 0),
+        )
+
+    def reserve_run_event_sequence(
+        self,
+        run_id: str,
+        *,
+        session_id: str,
+        actor_id: str,
+        tenant_id: str,
+        fencing_token: int,
+        current_sequence: int,
+        event_type: str,
+        terminal_replay: bool = False,
+    ) -> int:
+        """Persist a transport sequence before the event becomes observable."""
+        if (
+            isinstance(current_sequence, bool)
+            or not isinstance(current_sequence, int)
+            or current_sequence < 0
+        ):
+            raise ValueError("current event sequence must be a non-negative integer")
+        if (
+            isinstance(fencing_token, bool)
+            or not isinstance(fencing_token, int)
+            or fencing_token < 0
+        ):
+            raise ValueError("stream fencing token must be a non-negative integer")
+        now = self.now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                "SELECT * FROM runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise KeyError(f"run does not exist: {run_id}")
+            if (
+                run["session_id"] != session_id
+                or run["actor_id"] != actor_id
+                or run["tenant_id"] != tenant_id
+            ):
+                raise PermissionError("stream writer scope does not match run")
+            terminal_event = event_type in {"completed", "error"}
+            terminal_status = run["status"] in {
+                "completed",
+                "failed",
+                "interrupted",
+            }
+            if terminal_replay:
+                if not terminal_status or fencing_token != 0:
+                    raise FencingTokenRejected(
+                        "terminal replay requires a terminal run and token 0"
+                    )
+            elif terminal_event and terminal_status:
+                if int(run["fencing_token"] or -1) != fencing_token:
+                    raise FencingTokenRejected(
+                        "terminal stream event has a stale fencing token"
+                    )
+            else:
+                lease = connection.execute(
+                    "SELECT * FROM session_leases WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if (
+                    run["status"] not in {"running", "cancel_requested"}
+                    or lease is None
+                    or lease["active_run_id"] != run_id
+                    or int(lease["fencing_token"]) != fencing_token
+                    or lease["expires_at"] <= now
+                ):
+                    raise FencingTokenRejected(
+                        "stream writer lease expired or fencing token is stale"
+                    )
+            persisted = int(run["stream_event_sequence"] or 0)
+            sequence = max(current_sequence, persisted) + 1
+            connection.execute(
+                "UPDATE runs SET stream_event_sequence=? WHERE id=?",
+                (sequence, run_id),
+            )
+            return sequence
 
     def append_messages(
         self,

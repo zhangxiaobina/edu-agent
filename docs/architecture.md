@@ -230,9 +230,10 @@ timestamp 规范化为 UTC，payload 在进入总线前经过中心脱敏并验�
 `context.compacted`、`fallback.activated`、`completed` 和 `error`。`RunPhase` 固定为
 `accepted -> planning -> model -> tools -> verifying -> finalizing -> terminal`。
 
-同一 `(run_id, attempt)` 的 sequence 在锁内分配；生产者完成时间和墙钟可以乱序，消费者只以 sequence
+同一 `(run_id, attempt)` 的 sequence 在锁内分配；绑定 Service 的 writer 还会在事件可见前把高水位持久化到
+`runs.stream_event_sequence` 并重新验证当前 lease/fence。生产者完成时间和墙钟可以乱序，消费者只以 sequence
 判断该 stream 的发布顺序。相同 fencing token 只能由同一 writer 使用；更高 token 可在 terminal 前接管并
-延续 sequence，旧 writer 随即被拒绝。`completed/error` 是唯一 terminal event，发布后拒绝包括 delta 在内的
+从 stream/journal 最大高水位延续 sequence，旧 writer 的下一次持久预留随即被拒绝。`completed/error` 是唯一 terminal event，发布后拒绝包括 delta 在内的
 任何后续事件，也拒绝新 writer 接管。attempt/fencing token 为非负整数：`0` 只保留给 attempt 前生命周期事件
 或尚未绑定持久 lease 的本地 producer，获得持久 lease 后使用其递增 token。
 
@@ -240,7 +241,7 @@ timestamp 规范化为 UTC，payload 在进入总线前经过中心脱敏并验�
 |---|---|---|
 | `RunEventBus` | 当前进程内 future-only 发布/订阅、sequence、writer fence、有界 fan-out | 落库、历史回放、断线恢复、跨进程传输 |
 | `TraceRepository` | 从现有业务/审计表只读投影并导出 `RuntimeEvent v1`；索引可重建 | 消费 EventBus 作为新真相源、保存 token delta |
-| `RunJournal`（R2.2） | 持久保存 phase、sequence/loop cursor、attempt、冻结 route、预算和最后稳定边界；CAS 校验 scope/fence | 替代 Plan/Evidence/ToolOperation/Artifact/Trace 真相 |
+| `RunJournal`（R2.2-R2.7） | 持久保存 phase、sequence/loop cursor、attempt、冻结 route、预算和最后稳定边界；恢复 planner 结合消息、operation/finalizer 真相选择动作 | 替代 Plan/Evidence/ToolOperation/Artifact/Trace 真相，保存历史 token delta |
 
 每个订阅 buffer、进程内 stream state 数和活跃订阅总数都有固定上限。达到 stream/subscription 上限时
 fail closed；buffer 满时只取消该慢消费者、清空不完整队列并显式返回 `SlowConsumerError`，生产者和其他
@@ -251,7 +252,8 @@ fail closed；buffer 满时只取消该慢消费者、清空不完整队列并�
 R2.1 只用 fake producer 验证 RunEvent 协议；R2.3 已把 assistant tool-call envelope 和逐个 tool result 移到
 Agent Loop 的稳定提交点。R2.5 已在 Provider Gateway 提供真实 delta 迭代器，并让同步 `chat()` 聚合同一流；
 R2.6 将 Provider/Agent 事件映射为 typed SSE，并用单 writer、attempt/fence、共享 CancellationToken、慢消费者
-隔离和有界清理约束 socket 生命周期。EventBus 仍是进程内 future-only transport，不提供断线历史回放。
+隔离和有界清理约束 socket 生命周期。R2.7 持久化 sequence 高水位并在每次 publish 复验 fence；EventBus 仍是
+进程内 future-only transport，不提供断线历史回放。
 
 ### RunJournal 持久恢复边界（R2.2）
 
@@ -263,7 +265,8 @@ Plan、Evidence、ToolOperation、Artifact、context checkpoint 和 tool event �
 每次 CAS 在一个 SQLite `BEGIN IMMEDIATE` 中复验 run/session/actor/tenant、期望 revision/phase/cursor、当前
 lease fencing token 与 writer；旧 worker、重复/跳跃 phase、游标回退和终态重入返回结构化 `RunJournal*` 错误。
 `009_run_journal` migration 可重复执行，SQLite `user_version` 高于当前代码时拒绝启动，未知 phase/损坏 JSON
-在只读 snapshot 中直接失败，不用默认值猜恢复位置。
+在只读 snapshot 中直接失败，不用默认值猜恢复位置。R2.7 的 `012_r2_recovery` 增加 run 级 stream sequence
+高水位；恢复决策表详见 [docs/run-journal.md](run-journal.md)。
 
 ### Agent 工具消息稳定边界（R2.3）
 
@@ -279,7 +282,9 @@ envelope 的消息行、全部 call 行和 `model -> tools` journal 更新在同
 提升到 11。R2.4 `TurnFinalizer` 以持久 cursor、CAS 和 `final-assistant:<run_id>` 唯一键统一最终消息、
 Plan/Evidence 复验、usage/budget、run terminal、后处理与有界 cleanup。API request completion 和 lease
 release 都位于可证明的 terminal 之后；terminal 后恢复仍会完成未结束的 hooks/cleanup。Provider streaming 已
-由 R2.5 完成；HTTP SSE 事件映射与统一取消由 R2.6 完成。并发工具和五崩溃窗恢复仍未实现。
+由 R2.5 完成；HTTP SSE 事件映射与统一取消由 R2.6 完成。R2.7 的 `RunRecoveryPlanner` 只从声明 boundary
+选择 `continue/replay-read/reuse-operation/manual-review/terminal-replay`，并在新 Service 上通过五个进程重开
+窗口验证消息配对、唯一 final、冻结身份/预算、旧 fence 和副作用幂等。工具调用仍保持顺序执行，并发属于 R3。
 
 ## 安全边界
 
@@ -304,12 +309,14 @@ flowchart TD
     P -->|写操作状态不确定| Manual[manual_review，禁止盲重放]
     P -->|Outbox ack 前| Replay[至少一次重投 + 消费去重]
     P -->|Client disconnect| Cancel[协作取消，过期结果丢弃]
+    P -->|稳定 cursor 重开| Decide[恢复决策表 + 冻结身份复验]
     Retry --> Trace[provider/runtime event]
     Lease --> Trace
     Rollback --> Trace
     Manual --> Trace
     Replay --> Trace
     Cancel --> Trace
+    Decide --> Trace
 ```
 
 ## 验证口径
@@ -325,4 +332,5 @@ dirty worktree。离线 oracle 只证明 Test harness 与契约，真实模型�
 Docker/Jobe 报告时 sandbox 项为 `not_verified`。完整一键门禁见
 `zsh scripts/accept_stage8.sh`。该入口自动按 `.python-version` 和 `uv.lock` 准备环境，清空真实 Provider
 凭据，把合成库及中间状态限制在有界清理的私有临时目录，并在 artifact 生成后再次执行敏感数据审计；
-`--dry-run` 只验证调用图，不构成后端通过证据。
+内部 `scripts/accept_r2.sh` 由该入口调用，集中验证两种 wire mode、五窗、SSE/socket、API replay、journal/
+finalizer/operation 和脱敏恢复演示；`--dry-run` 只验证调用图，不构成后端通过证据。

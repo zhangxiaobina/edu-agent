@@ -159,6 +159,8 @@ def build_agent(
             event_sink=context.emit_provider_event if context.streams_events else None,
         )
         context.check_control("model.after_call")
+        if loop_journal is not None:
+            loop_journal.model_returned()
         usage = [response.usage] if response.usage else []
         assistant_message = response.to_assistant_message()
         if assistant_message.get("tool_calls") and loop_journal is not None:
