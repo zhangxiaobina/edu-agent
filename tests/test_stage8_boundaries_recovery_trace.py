@@ -317,6 +317,20 @@ def test_completed_run_without_response_recovers_then_replays_identically(tmp_pa
 def test_api_stale_owner_commit_rejected_and_gc_is_owner_scoped(tmp_path):
     clock = MutableClock()
     state = StateStore(tmp_path / "state.db", clock=clock)
+    run_context = RunContext.create(
+        session_id="stale-session",
+        run_id="run",
+        actor_id="alice",
+        tenant_id="school-a",
+        role="teacher",
+    )
+    state.ensure_session(
+        run_context.session_id,
+        actor_id=run_context.actor_id,
+        tenant_id=run_context.tenant_id,
+        role=run_context.role,
+    )
+    state.enqueue_run(run_context, request_text="stale request")
     first = state.begin_api_request(
         actor_id="alice", tenant_id="school-a", request_id="stale",
         request_hash="hash", run_id="run", owner_id="old", lease_seconds=1,
@@ -340,6 +354,7 @@ def test_api_stale_owner_commit_rejected_and_gc_is_owner_scoped(tmp_path):
         actor_id="alice", tenant_id="school-a", request_id="stale",
         owner_id="new", attempt=second["attempt"],
     )
+    state.finish_run("run", status="failed", budget={})
     state.finish_api_request(
         actor_id="alice", tenant_id="school-a", request_id="stale",
         status="failed", error={"code": "NO_RUN"}, owner_id="new",

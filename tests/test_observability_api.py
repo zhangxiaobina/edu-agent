@@ -187,6 +187,7 @@ def test_canary_secret_absent_from_sqlite_trace_log_and_artifact_preview(tmp_pat
         tenant_id="school-a",
         request_id="canary-request",
         request_hash="canary-hash",
+        run_id=result.run_id,
     )
     service.state_store.finish_api_request(
         actor_id="alice",

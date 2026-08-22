@@ -191,6 +191,7 @@ def _reliability_report(directory: Path) -> dict:
     start = time.perf_counter()
     cancelled = state.cancel_run("lease-a", actor_id="teacher", tenant_id="school")
     cancel_latency_ms = (time.perf_counter() - start) * 1000
+    state.finish_run("lease-a", status="interrupted", budget={})
     state.release_session_lease(session_id="lease-session", run_id="lease-a", owner_id="a", fencing_token=claim["fencing_token"])
     recovered = state.acquire_session_lease(session_id="lease-session", run_id="lease-b", owner_id="b", actor_id="teacher", tenant_id="school", lease_seconds=20)
     return {

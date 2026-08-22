@@ -178,7 +178,7 @@ def test_new_database_has_minimal_journal_schema_and_strict_snapshot(tmp_path):
             "SELECT COUNT(*) FROM state_schema_migrations WHERE version=?",
             (RUN_JOURNAL_MIGRATION,),
         ).fetchone()[0]
-    assert user_version == 10 and migration_count == 1
+    assert user_version == 11 and migration_count == 1
     assert not {
         "plan_json",
         "evidence_json",
@@ -635,7 +635,7 @@ def test_old_database_migration_is_idempotent_and_recovers_missing_marker(tmp_pa
         ).fetchone()[0]
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert marker_count == table_count == 1
-    assert user_version == 10
+    assert user_version == 11
     assert reopened.get_messages("legacy") == [{"role": "user", "content": "preserve-me"}]
     assert reopened.get_run_journal_snapshot(
         interrupted_context.run_id,
@@ -648,12 +648,12 @@ def test_old_database_migration_is_idempotent_and_recovers_missing_marker(tmp_pa
 def test_newer_database_schema_is_never_downgraded(tmp_path):
     path = tmp_path / "future.db"
     with sqlite3.connect(path) as connection:
-        connection.execute("PRAGMA user_version = 11")
+        connection.execute("PRAGMA user_version = 12")
 
     with pytest.raises(StateSchemaVersionError, match="newer than supported"):
         StateStore(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
     with pytest.raises(StateSchemaVersionError, match="newer than supported"):
         StateStore(path, read_only=True)
 
@@ -664,10 +664,10 @@ def test_newer_database_schema_is_never_downgraded(tmp_path):
             CREATE TABLE state_schema_migrations(
                 version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
             );
-            INSERT INTO state_schema_migrations VALUES ('011_future', 't0');
+            INSERT INTO state_schema_migrations VALUES ('012_future', 't0');
             """
         )
-    with pytest.raises(StateSchemaVersionError, match="011_future"):
+    with pytest.raises(StateSchemaVersionError, match="012_future"):
         StateStore(marker_path)
 
 

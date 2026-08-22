@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -414,7 +415,8 @@ def test_duplicate_or_orphan_call_and_cross_run_result_are_rejected(tmp_path):
 
 
 def test_stale_fence_cannot_commit_tool_result(tmp_path):
-    store = StateStore(tmp_path / "state.db")
+    current_time = [datetime(2026, 8, 22, tzinfo=UTC)]
+    store = StateStore(tmp_path / "state.db", clock=lambda: current_time[0])
     stale = _active_context(store)
     provider = ReadProvider()
     journal = _journal(store, stale, provider, OneToolEngine())
@@ -424,12 +426,13 @@ def test_stale_fence_cannot_commit_tool_result(tmp_path):
         _envelope("fenced-call"),
         model_attempt=attempt,
     )
-    assert store.release_session_lease(
+    assert not store.release_session_lease(
         session_id=stale.session_id,
         run_id=stale.run_id,
         owner_id=stale.lease_owner,
         fencing_token=stale.fencing_token,
     )
+    current_time[0] += timedelta(seconds=61)
     current = RunContext.create(
         session_id=stale.session_id,
         run_id=stale.run_id,
@@ -930,7 +933,7 @@ def test_legacy_database_gets_r23_schema_without_losing_messages(tmp_path):
             )
         }
         assert {"agent_tool_envelopes", "agent_tool_calls"} <= tables
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
         assert connection.execute(
             "SELECT COUNT(*) FROM state_schema_migrations WHERE version=?",
             (AGENT_TOOL_MESSAGES_MIGRATION,),

@@ -87,9 +87,10 @@ sequenceDiagram
     T->>T: role/course/approval/budget check
     T->>DB: tool event / operation / outbox / artifact index
     G-->>S: answer + budget + plan
-    S->>DB: fenced message/run commit
+    S->>DB: TurnFinalizer cursor -> unique final + usage + terminal
     S-->>A: ChatResult
     A->>S: finish_api_request(response)
+    S->>R: release terminal run lease
     A-->>C: JSON or SSE completed
 ```
 
@@ -135,8 +136,8 @@ stateDiagram-v2
     uncertain --> [*]: manual review
 ```
 
-崩溃窗口：claim 后未启动时复用预分配 run；运行中且 session lease 有效时返回可重试的 in-progress；run
-已完成但 response 未提交时从持久消息/run 重建并提交；response 已提交但客户端未收到时直接重放同一
+崩溃窗口：claim 后未启动时复用预分配 run；运行中且 session lease 有效时返回可重试的 in-progress；finalizer
+未到 terminal 时从持久 cursor 续跑且不完成 API request；run 已完成但 response 未提交时从 finalizer 重建并提交；response 已提交但客户端未收到时直接重放同一
 响应。若存在状态不确定的写 operation，则进入 `uncertain`，返回 manual-review 语义而不是盲重放。
 `expire_api_request_leases` 和 `gc_api_requests` 都要求 actor/tenant scope、有限 batch 并写审计；GC 只删
 过期 completed/failed envelope，不删除 run 或 ToolOperation，也不清理仍需恢复/人工审查的记录。
@@ -261,8 +262,11 @@ cursor 关联；后者按原 call 顺序保存 pending/completed 配对、结果
 envelope 的消息行、全部 call 行和 `model -> tools` journal 更新在同一 `BEGIN IMMEDIATE` 中完成后才允许执行
 第一个工具。每个 result 单独与 call 配对，并与 cursor/event sequence 更新同事务提交；恢复时已完成 result
 直接复用，未证明完成的只读调用可重放，`committed` 写 operation 只读取既有回执，`executing/manual_review`
-不会再次进入 handler。service 只再追加最后的普通 assistant 消息，不重复批量追加 tool 协议消息。最终消息的
-唯一提交与 run 终态一致性仍属于 R2.4，Provider streaming、HTTP SSE 和并发工具也不在本切片中。
+不会再次进入 handler。service 不重复批量追加 tool 协议消息；`011_turn_finalizer` 将 SQLite schema version
+提升到 11。R2.4 `TurnFinalizer` 以持久 cursor、CAS 和 `final-assistant:<run_id>` 唯一键统一最终消息、
+Plan/Evidence 复验、usage/budget、run terminal、后处理与有界 cleanup。API request completion 和 lease
+release 都位于可证明的 terminal 之后；terminal 后恢复仍会完成未结束的 hooks/cleanup。Provider streaming、
+HTTP SSE 和并发工具仍未实现。
 
 ## 安全边界
 

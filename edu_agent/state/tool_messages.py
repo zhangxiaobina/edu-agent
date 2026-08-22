@@ -343,6 +343,7 @@ def _update_journal(
     loop_cursor: int,
     operation_id: str | None = None,
     last_tool_event_id: int | None = None,
+    budget_snapshot: Mapping[str, Any] | None = None,
 ) -> RunJournalSnapshot:
     writer = str(context.lease_owner)
     token = int(context.fencing_token)
@@ -367,7 +368,7 @@ def _update_journal(
         (
             phase.value,
             loop_cursor,
-            _json(context.budget.usage()),
+            _json(dict(budget_snapshot) if budget_snapshot is not None else context.budget.usage()),
             boundary.value,
             operation,
             tool_event,
@@ -646,6 +647,7 @@ def append_tool_result(
     operation_id: str | None = None,
     tool_event_id: int | None = None,
     allow_cancelled: bool = False,
+    budget_snapshot: Mapping[str, Any] | None = None,
 ) -> ToolMessageCommit:
     _validate_model_attempt(model_attempt)
     call_id, name, content = _validate_tool_result(message)
@@ -824,6 +826,7 @@ def append_tool_result(
             loop_cursor=next_cursor,
             operation_id=operation_id if journal_operation else None,
             last_tool_event_id=tool_event_id,
+            budget_snapshot=budget_snapshot,
         )
         connection.execute(
             "UPDATE sessions SET updated_at=? WHERE id=?",
@@ -833,11 +836,23 @@ def append_tool_result(
         return ToolMessageCommit(_message_from_row(persisted), updated, False)
 
 
-def complete_tool_batch(store, context, *, model_attempt: int) -> RunJournalSnapshot:
+def complete_tool_batch(
+    store,
+    context,
+    *,
+    model_attempt: int,
+    allow_cancelled: bool = False,
+    budget_snapshot: Mapping[str, Any] | None = None,
+) -> RunJournalSnapshot:
     _validate_model_attempt(model_attempt)
     with store.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        store._assert_fence(connection, context, boundary="tool.batch.complete")
+        store._assert_fence(
+            connection,
+            context,
+            boundary="tool.batch.complete",
+            allow_cancelled=allow_cancelled,
+        )
         current = _load_journal(connection, context)
         envelope = connection.execute(
             """
@@ -881,6 +896,7 @@ def complete_tool_batch(store, context, *, model_attempt: int) -> RunJournalSnap
             phase=RunPhase.VERIFYING,
             boundary=RunStableBoundary.TOOL_RESULT_COMMITTED,
             loop_cursor=current.loop_cursor + 1,
+            budget_snapshot=budget_snapshot,
         )
 
 

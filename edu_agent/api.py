@@ -153,6 +153,17 @@ class EduAgentApi:
                     session_id=payload.get("session_id"),
                     run_id=run_id,
                 )
+            terminal = self.service.get_run_status(
+                run_id,
+                actor_id=principal.actor_id,
+                tenant_id=principal.tenant_id,
+            )
+            if terminal is None or terminal.get("status") not in {
+                "completed",
+                "failed",
+                "interrupted",
+            }:
+                raise RuntimeError("API request cannot complete before the run is terminal")
             response = self.redaction.redact(_serialize_result(result))
             record = self.service.finish_api_request(
                 actor_id=principal.actor_id,
@@ -170,6 +181,32 @@ class EduAgentApi:
             return record["response"]
         except Exception as error:
             try:
+                terminal = self.service.get_run_status(
+                    run_id,
+                    actor_id=principal.actor_id,
+                    tenant_id=principal.tenant_id,
+                )
+                if terminal and terminal.get("status") == "completed":
+                    recovered = self.service.recover_chat_result(
+                        run_id,
+                        actor_id=principal.actor_id,
+                        tenant_id=principal.tenant_id,
+                    )
+                    response = self.redaction.redact(_serialize_result(recovered))
+                    record = self.service.finish_api_request(
+                        actor_id=principal.actor_id,
+                        tenant_id=principal.tenant_id,
+                        request_id=request_id,
+                        status="completed",
+                        run_id=run_id,
+                        response=response,
+                        owner_id=owner_id,
+                        attempt=attempt,
+                        response_status=200,
+                        response_content_type="application/json; charset=utf-8",
+                        retention_seconds=self._request_retention_seconds(success=True),
+                    )
+                    return record["response"]
                 self.service.finish_api_request(
                     actor_id=principal.actor_id,
                     tenant_id=principal.tenant_id,
@@ -292,22 +329,10 @@ class EduAgentApi:
                 run_id, actor_id=principal.actor_id, tenant_id=principal.tenant_id
             )
             raise ApiError(504, "TIMEOUT", "chat exceeded its cooperative timeout", retryable=True) from error
-        except Exception as error:
-            try:
-                self.service.finish_api_request(
-                    actor_id=principal.actor_id,
-                    tenant_id=principal.tenant_id,
-                    request_id=request_id,
-                    status="failed",
-                    run_id=run_id,
-                    error={"type": type(error).__name__, "message": str(error)},
-                    owner_id=owner_id,
-                    attempt=attempt,
-                    response_status=500,
-                    retention_seconds=self._request_retention_seconds(success=False),
-                )
-            except RuntimeError:
-                pass
+        except Exception:
+            # ``_run_chat`` is the single request-finalization owner.  A
+            # second completion attempt here could turn a recovered successful
+            # run into a completed API envelope with no response body.
             raise
         return ApiResponse(200, response)
 

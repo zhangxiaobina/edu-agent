@@ -116,12 +116,41 @@ class RuntimeManager:
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=max(1.0, self.heartbeat_seconds * 2))
             if claim is not None:
-                self.state_store.release_session_lease(
-                    session_id=claim.session_id,
-                    run_id=claim.run_id,
-                    owner_id=claim.owner_id,
-                    fencing_token=claim.fencing_token,
-                )
+                # A worker may release its session lease only after the
+                # durable run terminal is visible.  If a finalizer crashed
+                # before that point, leave the lease to expire so a recovery
+                # worker can acquire a higher fencing token without an
+                # uncommitted run being falsely declared free.
+                terminal = False
+                try:
+                    status = self.state_store.get_run_status(
+                        claim.run_id,
+                        actor_id=actor_id,
+                        tenant_id=tenant_id,
+                    )
+                    terminal = bool(status and status.get("status") in {
+                        "completed",
+                        "failed",
+                        "interrupted",
+                        "abandoned",
+                    })
+                    finalizer = self.state_store.get_turn_finalizer(
+                        claim.run_id,
+                        session_id=claim.session_id,
+                        actor_id=actor_id,
+                        tenant_id=tenant_id,
+                    )
+                    if finalizer is not None:
+                        terminal = finalizer.terminal
+                except Exception:
+                    terminal = False
+                if terminal:
+                    self.state_store.release_session_lease(
+                        session_id=claim.session_id,
+                        run_id=claim.run_id,
+                        owner_id=claim.owner_id,
+                        fencing_token=claim.fencing_token,
+                    )
             with self._guard:
                 self._active.pop(run_id, None)
             lock.release()

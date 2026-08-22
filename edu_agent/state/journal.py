@@ -55,16 +55,16 @@ TERMINAL_RUN_PHASES = frozenset(
 
 RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
     RunPhase.ACCEPTED: frozenset(
-        {RunPhase.PLANNING, RunPhase.CANCELLED, RunPhase.FAILED}
+        {RunPhase.PLANNING, RunPhase.FINALIZING, RunPhase.CANCELLED, RunPhase.FAILED}
     ),
     RunPhase.PLANNING: frozenset(
-        {RunPhase.MODEL, RunPhase.CANCELLED, RunPhase.FAILED}
+        {RunPhase.MODEL, RunPhase.FINALIZING, RunPhase.CANCELLED, RunPhase.FAILED}
     ),
     RunPhase.MODEL: frozenset(
-        {RunPhase.TOOLS, RunPhase.CANCELLED, RunPhase.FAILED}
+        {RunPhase.TOOLS, RunPhase.FINALIZING, RunPhase.CANCELLED, RunPhase.FAILED}
     ),
     RunPhase.TOOLS: frozenset(
-        {RunPhase.VERIFYING, RunPhase.CANCELLED, RunPhase.FAILED}
+        {RunPhase.VERIFYING, RunPhase.FINALIZING, RunPhase.CANCELLED, RunPhase.FAILED}
     ),
     RunPhase.VERIFYING: frozenset(
         {

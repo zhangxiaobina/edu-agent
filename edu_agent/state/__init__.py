@@ -3,6 +3,7 @@ from .store import (
     FencingTokenRejected,
     RunCancelled,
     SessionLeaseUnavailable,
+    TurnFinalizerPending,
     STATE_SCHEMA_VERSION,
     StateSchemaVersionError,
     StateStore,
@@ -40,6 +41,11 @@ from .tool_messages import (
     ToolMessagePairingError,
     ToolMessageSchemaError,
 )
+from .turn_finalizer import (
+    FINALIZER_CURSOR,
+    TURN_FINALIZER_SCHEMA,
+    TurnFinalizerRecord,
+)
 
 __all__ = [
     "FencingTokenRejected",
@@ -48,6 +54,7 @@ __all__ = [
     "MemorySnapshot",
     "RunCancelled",
     "SessionLeaseUnavailable",
+    "TurnFinalizerPending",
     "STATE_SCHEMA_VERSION",
     "StateSchemaVersionError",
     "StateStore",
@@ -80,4 +87,7 @@ __all__ = [
     "ToolMessageOperationError",
     "ToolMessagePairingError",
     "ToolMessageSchemaError",
+    "FINALIZER_CURSOR",
+    "TURN_FINALIZER_SCHEMA",
+    "TurnFinalizerRecord",
 ]

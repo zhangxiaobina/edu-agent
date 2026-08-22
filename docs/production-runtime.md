@@ -146,6 +146,9 @@ tie-break；`hybrid_rerank` 当前只有确定性词项重叠重排。未配置�
 领取在 SQLite `BEGIN IMMEDIATE` 事务内完成；同一 session 只有一个未过期 owner，不同 session
 可以并行。owner id 由 hostname 和随机实例 UUID 组成，不依赖 PID。每次 lease 转移都会生成更高的
 fencing token，heartbeat 在 run 活跃时续期，释放只接受当前 owner/run/token 三者完全匹配。
+`RuntimeManager` 退出 scope 时还会读取 durable terminal；`TurnFinalizer` 未到 `terminal` cursor 时不释放
+session lease，而是让其到期后由恢复 worker 以更高 token 接管。API request completion 同样在状态库事务内
+复验 run/finalizer terminal，因此外层异常路径不能提前固化响应。
 
 ```mermaid
 stateDiagram-v2
@@ -182,6 +185,8 @@ Plan、Artifact 和幂等 ToolOperation；已 committed 写入只返回原结果
 | cancel_requested，worker 仍响应 | `interrupted` | `none` | 在最近协作边界停止且不提交返回结果 |
 | cancel_requested，worker 已失联 | `interrupted` | `resume_from_persistent_plan` | 保留现场，不自动重放 |
 | committed 写后进程崩溃 | operation 仍为 `committed` | `resume_from_persistent_plan` | 同幂等键返回原结果 |
+| finalizer 子步骤后崩溃 | run 保持非终态 + 持久 cursor | `resume_finalizer` | lease 到期后从 cursor 继续，已完成步骤不重做 |
+| terminal 后、API response 前崩溃 | terminal finalizer + 唯一最终消息 | `terminal_replay` | 重建同形状 `ChatResult` 后提交 request response |
 | lease 过期且旧 worker 恢复 | 旧 run `abandoned` | `resume_from_persistent_plan` 或 `manual_review` | 新 owner 获得更高 token，旧 token 所有提交被拒绝 |
 
 run/session 查询要求 actor 与 tenant 同时匹配。`get_run_status()` 返回状态、owner、最后 heartbeat、
@@ -289,6 +294,7 @@ tenant/actor/session 分目录，读取必须匹配 owner 并通过路径与 has
 - sessions / messages
 - runs（状态、owner/token、heartbeat、取消、恢复原因和建议）
 - run_journals（phase、loop cursor、model attempt、event sequence、冻结 route/预算、稳定边界和真相表引用）
+- turn_finalizers / turn_finalizer_hooks（收尾 cursor、唯一最终消息、usage/budget、终态和后处理 claim）
 - session_leases（当前 owner、单调 fencing token、active run、heartbeat 和 expiry）
 - tool_events（tool call / operation 关联、参数、结果、耗时）
 - tool_operation_refs（operation owner、调用关联和当前状态）
@@ -312,8 +318,11 @@ SQLite、不保留历史，也不提供恢复游标。
 持久边界保持不变：`TraceRepository` 继续只从上述业务/审计表投影 `RuntimeEvent v1`，EventBus 不是第二套
 Trace 真相；恢复 sequence/loop cursor 由 `RunJournal` 承担。R2.3 已把 assistant tool-call envelope 和逐个
 tool result 接入 Agent Loop：消息、call 配对和 journal cursor 在同一 SQLite 事务提交，旧 fence、孤立 result、
-重复 call id 与跨 run 配对会被拒绝。工具仍严格顺序执行；最终 assistant 仍由 service 的兼容路径追加，等待
-R2.4 的幂等 finalizer。当前 Provider 仍同步，SSE 仍为 `accepted/keepalive/completed`。
+重复 call id 与跨 run 配对会被拒绝。工具仍严格顺序执行；R2.4 的 `011_turn_finalizer` 将 SQLite schema
+version 提升到 11，并由唯一 `TurnFinalizer` 按固定 cursor 完成未配对 call 关闭、Plan/Evidence 复验、唯一
+最终 assistant、usage/budget、terminal、后处理和有界 cleanup。失败路径会合并已选 Provider 事件与异常携带的
+usage；terminal 后恢复继续未完成的 hooks/cleanup，再重建兼容 `ChatResult`。当前 Provider 仍同步，SSE 仍为
+`accepted/keepalive/completed`。
 
 ## 可插拔扩展
 

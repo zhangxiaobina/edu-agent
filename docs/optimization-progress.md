@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R2.3
-- next_prompt: R2.4
+- last_completed_prompt: R2.4
+- next_prompt: R2.5
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent、R2.2 RunJournal 与 R2.3 工具消息增量提交已完成；R2.4 finalizer、真流式、统一取消与完整恢复门禁仍未完成
+- stage_gate_reason: R0 与 R1 门禁已通过，R2.1 typed RunEvent、R2.2 RunJournal、R2.3 工具消息增量提交与 R2.4 幂等 TurnFinalizer 已完成；Provider 真流式、统一取消与完整恢复门禁仍待 R2.5-R2.7
 
 ## Baseline Reproduction
 
@@ -570,3 +570,49 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R2.3 passed`；R2 总门禁保持 `in_progress`。
 - next: R2.4，沿 service `try/except/finally`、Plan verifier、`finish_run` 和 lease 边界实现唯一幂等
   `TurnFinalizer`；不得提前实现 Provider streaming、HTTP SSE 或并发工具。
+
+### R2.4 - 2026-08-22
+
+- commit/evidence: 会话从与 `origin/main` 同步的 R2.3 提交
+  `c59f67521cd6c66a9bdd222ddf259915df7bca22`（`feat: persist agent tool messages incrementally`）开始；
+  R2.4 当前仅在工作区实现，未创建本地提交或推送。普通切片不以 development artifact 作为发布证据，误跑
+  Stage 8 产生的时间、性能和 dirty-HEAD 噪声未保留。
+- path inventory: 旧成功路径由 service 先追加普通 assistant、再 `finish_run(completed)`；Plan 非完成由相同
+  路径写 failed；取消在 `_chat_turn` 与 `_chat_turn_impl` 各有一套 `finish_run(interrupted)`；setup/model 异常
+  另写 `finish_run(failed)`；恢复发现已提交 assistant 时再次直接 finish；RuntimeManager finally 无条件释放 lease；
+  API 正常、异常和外层 future 异常均可调用 request completion。这些入口现统一到 durable finalizer，legacy
+  `finish_run`/terminal `append_messages` 在 finalizer 存在时拒绝旁路。
+- finalizer: 新增每 run 唯一的 `turn_finalizers` 与单调 cursor：`tools_closed -> plan_verified ->
+  final_message_committed -> usage_settled -> terminal -> hooks_done -> cleanup_done`。每步使用 SQLite
+  `BEGIN IMMEDIATE`、revision/cursor CAS 和当前 lease fence；最终 assistant 使用
+  `final-assistant:<run_id>` 唯一键。重复调用读取首个持久 candidate，恢复 worker 从 cursor 继续，旧 worker
+  在更高 fencing token 接管后不能提交。
+- outcomes: 仅 `completed` 写最终 assistant；无最终消息的伪成功 fail closed 为 `model_failed`。取消稳定映射为
+  `interrupted`，预算耗尽为 `budget_exceeded`，Provider/模型异常为 `model_failed`，不确定写或 verifier 不可用为
+  `manual_review`。terminal 事务同时提交 journal、runs 和 finalizer；若取消/不确定写在消息提交后获胜，消息
+  原子标为 inactive。Provider usage、budget、Trace、Plan 与 context payload 由首个 finalizer candidate 持久化。
+- recovery/order: pending finalizer 不被 stalled/API lease recovery 改写为 abandoned；lease 只在 durable terminal
+  后释放，API request completion 以 request 已绑定 run 为准复验 run/finalizer terminal，拒绝省略 run id 绕过和
+  run 绑定漂移。terminal 后 response 提交前崩溃可由 `recover_chat_result` 从 finalizer 重建兼容 `ChatResult`。
+  后处理与 cleanup 使用持久唯一 claim；失败/超时只写脱敏审计，不反转主 turn。
+- coverage: `tests/test_turn_finalizer.py` 覆盖重复调用、每个 cursor 后崩溃、首 candidate ownership、legacy bypass、
+  verifier 异常、取消/预算/模型/manual-review、同 token 竞争、更高 token 接管、最终消息后取消、lease/API
+  顺序、request 绑定、后台钩子失败、cleanup 超时/竞争和 service setup/model failure。
+- schema/config: 增加 `011_turn_finalizer` migration、`turn_finalizers`/`turn_finalizer_hooks` 表和
+  `runs.usage_json/stop_reason` 列；正式提升 `PRAGMA user_version=11`，使 R2.3 旧二进制明确拒绝新库。旧库可重复
+  初始化且未来数字 schema 仍拒绝降级。无依赖、lockfile、环境变量或配置项变化。
+- documentation: README、architecture、production runtime 和 RunJournal 合同已更新为 R2.4 现状；明确当前
+  Provider 仍同步聚合，HTTP SSE 仍只有 `accepted/keepalive/completed`，没有提前实现流式或并发工具。
+- verification: `tests/test_turn_finalizer.py` 为 `33 passed (1.36s)`；journal/tool-message/Plan/runtime/distributed
+  组合为 `81 passed (2.40s)`；observability/API recovery/真实回环 HTTP 组合为 `24 passed (4.12s)`。显式清空
+  模型与平台凭据、禁用外部 pytest plugin 的完整离线回归为 `377 passed (18.22s)`。`uv lock --check`、
+  `uv pip check`、全仓 ruff 与 `git diff --check` 均通过。按普通切片协议未重跑阶段收口入口
+  `zsh scripts/accept_stage8.sh`。
+- not_verified: 未访问真实 Provider/model、Docker/Jobe、GitHub-hosted CI 或真实 token stream；这些能力没有因
+  R2.4 的同步 finalizer 被误标为已验证。
+- residual_risks: post-hook/cleanup 的 durable claim 提供 at-most-once 调用选择；若外部副作用完成后、完成记录前
+  进程崩溃，系统不会自动重放，需由钩子自身的业务幂等/对账处理。R2.4 只验证持久 SQLite cursor 重入；完整
+  五崩溃窗、事件 sequence 与进程重开决策总门禁仍属于 R2.7。
+- gate: `R2.4 passed`；R2 总门禁保持 `in_progress`。
+- next: R2.5，在 Provider Gateway 增加真实流事件迭代器，并让同步 `chat()` 聚合该流保持兼容；不得修改 HTTP
+  SSE 或提前实现完整 CancellationToken 传播。

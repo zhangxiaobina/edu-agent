@@ -30,10 +30,24 @@ from .tool_messages import (
     initialize_agent_tool_message_schema,
     list_tool_call_records,
 )
+from .turn_finalizer import (
+    TURN_FINALIZER_SCHEMA,
+    advance_turn_finalizer,
+    claim_hook,
+    commit_final_message,
+    complete_hook,
+    ensure_turn_finalizer,
+    finish_cleanup,
+    finish_hooks,
+    get_turn_finalizer,
+    initialize_turn_finalizer_schema,
+    mark_terminal,
+    settle_usage,
+)
 
 
 _UNSET = object()
-STATE_SCHEMA_VERSION = 10
+STATE_SCHEMA_VERSION = 11
 
 
 class SessionLeaseUnavailable(RuntimeError):
@@ -45,6 +59,12 @@ class FencingTokenRejected(RuntimeError):
 
 
 class RunCancelled(RuntimeError):
+    pass
+
+
+class TurnFinalizerPending(RuntimeError):
+    """The run is owned by a durable finalizer cursor, not the agent loop."""
+
     pass
 
 
@@ -645,6 +665,14 @@ class StateStore:
             initialize_trace_index(connection)
             initialize_run_journal_schema(connection, now=self.now_iso())
             initialize_agent_tool_message_schema(connection, now=self.now_iso())
+            initialize_turn_finalizer_schema(connection, now=self.now_iso())
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO state_schema_migrations(version, applied_at)
+                VALUES (?, ?)
+                """,
+                (TURN_FINALIZER_SCHEMA, self.now_iso()),
+            )
             connection.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION}")
 
     @staticmethod
@@ -775,9 +803,12 @@ class StateStore:
         *,
         boundary: str,
         allow_cancelled: bool = False,
+        require_lease: bool = False,
     ) -> None:
         fence = self._context_fence(context)
         if fence is None:
+            if require_lease:
+                raise FencingTokenRejected(f"{boundary}: run lease identity is required")
             return
         run_id, owner_id, fencing_token = fence
         row = connection.execute(
@@ -803,12 +834,31 @@ class StateStore:
             raise PermissionError(f"{boundary}: run 不属于当前 actor/tenant")
         if row["status"] == "cancel_requested" and not allow_cancelled:
             raise RunCancelled(f"{boundary}: run 已请求取消")
+        if row["status"] == "queued" and boundary.startswith("turn_finalizer."):
+            # Setup failures (for example an over-budget context snapshot)
+            # can occur before ``start_run`` flips the compatibility row to
+            # running.  The durable finalizer is still allowed to close that
+            # queued run under its valid lease.
+            return
         if row["status"] not in {"running", "cancel_requested"}:
             raise FencingTokenRejected(f"{boundary}: run 状态 {row['status']} 不可写")
 
-    def assert_run_writable(self, context, *, boundary: str) -> None:
+    def assert_run_writable(
+        self,
+        context,
+        *,
+        boundary: str,
+        allow_cancelled: bool = False,
+        require_lease: bool = False,
+    ) -> None:
         with self.connect() as connection:
-            self._assert_fence(connection, context, boundary=boundary)
+            self._assert_fence(
+                connection,
+                context,
+                boundary=boundary,
+                allow_cancelled=allow_cancelled,
+                require_lease=require_lease,
+            )
 
     @contextmanager
     def fenced_section(self, context, *, boundary: str):
@@ -1057,6 +1107,14 @@ class StateStore:
             if row["actor_id"] != actor_id or row["tenant_id"] != tenant_id:
                 raise PermissionError("run 不属于当前 actor/tenant")
             if row["status"] != "abandoned":
+                pending_finalizer = connection.execute(
+                    "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
+                if pending_finalizer is not None and int(pending_finalizer["cursor"]) < 5:
+                    raise TurnFinalizerPending(
+                        f"run {run_id} has pending finalizer cursor {pending_finalizer['cursor']}"
+                    )
                 raise RuntimeError(f"只有 abandoned run 可以恢复，当前为 {row['status']}")
             uncertain = connection.execute(
                 """
@@ -1076,6 +1134,64 @@ class StateStore:
                 WHERE id=? AND status='abandoned'
                 """,
                 (run_id,),
+            )
+            return dict(connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone())
+
+    def prepare_turn_finalizer_resume(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str,
+    ) -> dict:
+        """Requeue a run whose durable finalizer still has work.
+
+        This is deliberately separate from ordinary Plan recovery: an
+        expired worker may have left the compatibility run row as ``running``
+        while the finalizer cursor is already persisted.  Only an expired
+        session lease can be reclaimed here; a live owner remains protected.
+        """
+        now = self.now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+            if run is None:
+                raise KeyError(f"run 不存在：{run_id}")
+            if run["actor_id"] != actor_id or run["tenant_id"] != tenant_id:
+                raise PermissionError("run 不属于当前 actor/tenant")
+            finalizer = connection.execute(
+                "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if finalizer is None:
+                raise RuntimeError("run 没有可恢复的 turn finalizer")
+            if int(finalizer["cursor"]) >= 5 or finalizer["status"] == "terminal":
+                return dict(run)
+            lease = connection.execute(
+                "SELECT * FROM session_leases WHERE active_run_id=?",
+                (run_id,),
+            ).fetchone()
+            if lease is not None and lease["lease_owner"] is not None and lease["expires_at"] > now:
+                raise SessionLeaseUnavailable(f"session {run['session_id']} 仍由 {lease['lease_owner']} 执行")
+            if lease is not None:
+                connection.execute(
+                    """
+                    UPDATE session_leases
+                    SET lease_owner=NULL, active_run_id=NULL, heartbeat_at=?, expires_at=?
+                    WHERE session_id=? AND active_run_id=? AND expires_at<=?
+                    """,
+                    (now, now, run["session_id"], run_id, now),
+                )
+            resume_status = "cancel_requested" if run["status"] == "cancel_requested" else "queued"
+            connection.execute(
+                """
+                UPDATE runs
+                SET status=?, owner_id=NULL, fencing_token=NULL,
+                    recovery_reason='turn_finalizer_resume',
+                    recovery_recommendation='resume_finalizer', finished_at=NULL
+                WHERE id=? AND status IN ('running', 'abandoned', 'queued', 'cancel_requested')
+                """,
+                (resume_status, run_id),
             )
             return dict(connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone())
 
@@ -1127,39 +1243,69 @@ class StateStore:
                     (previous_run_id,),
                 ).fetchone()
                 if previous and previous["status"] in {"running", "cancel_requested"}:
-                    terminal = (
-                        "interrupted"
-                        if previous["status"] == "cancel_requested"
-                        else "abandoned"
-                    )
-                    uncertain = connection.execute(
-                        """
-                        SELECT 1 FROM tool_operation_refs
-                        WHERE run_id=? AND status='executing' LIMIT 1
-                        """,
+                    pending_finalizer = connection.execute(
+                        "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
                         (previous_run_id,),
                     ).fetchone()
-                    recommendation = (
-                        "manual_review" if uncertain else "resume_from_persistent_plan"
-                    )
-                    if uncertain:
+                    if pending_finalizer is not None and int(pending_finalizer["cursor"]) < 5:
+                        if previous_run_id != run_id:
+                            raise SessionLeaseUnavailable(
+                                f"session {session_id} has pending finalizer for {previous_run_id}"
+                            )
+                        # A lease hand-off must not manufacture an abandoned
+                        # terminal run while its finalizer cursor is still
+                        # resumable.  Leave it queued (or cancellation
+                        # requested) for a later recovery owner.
+                        pending_status = (
+                            "cancel_requested"
+                            if previous["status"] == "cancel_requested"
+                            else "queued"
+                        )
                         connection.execute(
                             """
-                            UPDATE tool_operation_refs
-                            SET status='manual_review', updated_at=?
-                            WHERE run_id=? AND status='executing'
+                            UPDATE runs
+                            SET status=?, owner_id=NULL, fencing_token=NULL,
+                                recovery_reason='turn_finalizer_pending',
+                                recovery_recommendation='resume_finalizer',
+                                finished_at=NULL
+                            WHERE id=? AND status IN ('running', 'cancel_requested')
                             """,
-                            (now_iso, previous_run_id),
+                            (pending_status, previous_run_id),
                         )
-                    connection.execute(
-                        """
-                        UPDATE runs
-                        SET status=?, finished_at=?, recovery_reason='session_lease_reclaimed',
-                            recovery_recommendation=?
-                        WHERE id=?
-                        """,
-                        (terminal, now_iso, recommendation, previous_run_id),
-                    )
+                    else:
+                        terminal = (
+                            "interrupted"
+                            if previous["status"] == "cancel_requested"
+                            else "abandoned"
+                        )
+                        uncertain = connection.execute(
+                            """
+                            SELECT 1 FROM tool_operation_refs
+                            WHERE run_id=? AND status='executing' LIMIT 1
+                            """,
+                            (previous_run_id,),
+                        ).fetchone()
+                        recommendation = (
+                            "manual_review" if uncertain else "resume_from_persistent_plan"
+                        )
+                        if uncertain:
+                            connection.execute(
+                                """
+                                UPDATE tool_operation_refs
+                                SET status='manual_review', updated_at=?
+                                WHERE run_id=? AND status='executing'
+                                """,
+                                (now_iso, previous_run_id),
+                            )
+                        connection.execute(
+                            """
+                            UPDATE runs
+                            SET status=?, finished_at=?, recovery_reason='session_lease_reclaimed',
+                                recovery_recommendation=?
+                            WHERE id=?
+                            """,
+                            (terminal, now_iso, recommendation, previous_run_id),
+                        )
             fencing_token = int(lease["fencing_token"]) + 1 if lease else 1
             connection.execute(
                 """
@@ -1185,15 +1331,16 @@ class StateStore:
                     expires_at,
                 ),
             )
+            claimed_status = "cancel_requested" if run["status"] == "cancel_requested" else "running"
             connection.execute(
                 """
                 UPDATE runs
-                SET status='running', owner_id=?, fencing_token=?, started_at=?,
+                SET status=?, owner_id=?, fencing_token=?, started_at=?,
                     heartbeat_at=?, finished_at=NULL, recovery_reason=NULL,
                     recovery_recommendation=NULL
-                WHERE id=? AND status IN ('queued', 'running')
+                WHERE id=? AND status IN ('queued', 'running', 'cancel_requested')
                 """,
-                (owner_id, fencing_token, now_iso, now_iso, run_id),
+                (claimed_status, owner_id, fencing_token, now_iso, now_iso, run_id),
             )
             if connection.execute("SELECT changes()").fetchone()[0] != 1:
                 raise RuntimeError(f"run 状态不可领取：{run_id}")
@@ -1255,6 +1402,26 @@ class StateStore:
         fencing_token: int,
     ) -> bool:
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                "SELECT status FROM runs WHERE id=? AND session_id=?",
+                (run_id, session_id),
+            ).fetchone()
+            if run is None or run["status"] not in {
+                "completed",
+                "failed",
+                "interrupted",
+                "abandoned",
+            }:
+                return False
+            finalizer = connection.execute(
+                "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if finalizer is not None and (
+                int(finalizer["cursor"]) < 5 or finalizer["status"] != "terminal"
+            ):
+                return False
             cursor = connection.execute(
                 """
                 UPDATE session_leases
@@ -1286,6 +1453,18 @@ class StateStore:
             return
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            pending_finalizer = None
+            if context is not None and getattr(context, "run_id", None):
+                pending_finalizer = connection.execute(
+                    "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                    (context.run_id,),
+                ).fetchone()
+            if pending_finalizer is not None:
+                if int(pending_finalizer["cursor"]) < 5:
+                    raise RuntimeError(
+                        "run has pending turn finalizer; terminal writes must use TurnFinalizer"
+                    )
+                return
             if context is not None:
                 self._assert_fence(connection, context, boundary="messages.commit")
                 has_journal = connection.execute(
@@ -1406,6 +1585,7 @@ class StateStore:
         operation_id: str | None = None,
         tool_event_id: int | None = None,
         allow_cancelled: bool = False,
+        budget_snapshot: dict | None = None,
     ):
         return append_tool_result(
             self,
@@ -1415,10 +1595,24 @@ class StateStore:
             operation_id=operation_id,
             tool_event_id=tool_event_id,
             allow_cancelled=allow_cancelled,
+            budget_snapshot=budget_snapshot,
         )
 
-    def complete_tool_batch(self, context, *, model_attempt: int):
-        return complete_tool_batch(self, context, model_attempt=model_attempt)
+    def complete_tool_batch(
+        self,
+        context,
+        *,
+        model_attempt: int,
+        allow_cancelled: bool = False,
+        budget_snapshot: dict | None = None,
+    ):
+        return complete_tool_batch(
+            self,
+            context,
+            model_attempt=model_attempt,
+            allow_cancelled=allow_cancelled,
+            budget_snapshot=budget_snapshot,
+        )
 
     def get_tool_call_record(
         self,
@@ -1729,6 +1923,42 @@ class StateStore:
                 ),
             )
 
+    def get_selected_provider_usage(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str,
+    ) -> list[dict]:
+        """Return usage from provider results durably selected before a failure."""
+        with self.connect() as connection:
+            run = connection.execute(
+                "SELECT actor_id, tenant_id FROM runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                return []
+            if run["actor_id"] != actor_id or run["tenant_id"] != tenant_id:
+                raise PermissionError("run does not belong to actor/tenant")
+            rows = connection.execute(
+                """
+                SELECT details_json FROM provider_events
+                WHERE run_id=? AND event='provider_result_selected'
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        usage: list[dict] = []
+        for row in rows:
+            try:
+                details = json.loads(row["details_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                raise RuntimeError("provider event contains invalid JSON") from error
+            item = details.get("usage") if isinstance(details, dict) else None
+            if isinstance(item, dict) and item:
+                usage.append(item)
+        return usage
+
     def start_run(
         self,
         *,
@@ -1798,6 +2028,14 @@ class StateStore:
         )
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            pending_finalizer = connection.execute(
+                "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if pending_finalizer is not None:
+                raise TurnFinalizerPending(
+                    f"run {run_id} is owned by TurnFinalizer cursor {pending_finalizer['cursor']}"
+                )
             if context is not None:
                 self._assert_fence(
                     connection,
@@ -1822,6 +2060,52 @@ class StateStore:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError(f"run {run_id} 不能从当前状态结束")
+
+    # R2.4 compatibility facade.  All new terminal writes go through these
+    # methods; keeping them on StateStore makes the SQLite transaction boundary
+    # explicit to callers and avoids a second persistence object.
+    def get_turn_finalizer(
+        self,
+        run_id: str,
+        *,
+        session_id: str,
+        actor_id: str,
+        tenant_id: str,
+    ):
+        return get_turn_finalizer(
+            self,
+            run_id=run_id,
+            session_id=session_id,
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+
+    def ensure_turn_finalizer(self, context, **kwargs):
+        return ensure_turn_finalizer(self, context, **kwargs)
+
+    def advance_turn_finalizer(self, context, **kwargs):
+        return advance_turn_finalizer(self, context, **kwargs)
+
+    def commit_final_message(self, context, **kwargs):
+        return commit_final_message(self, context, **kwargs)
+
+    def settle_turn_usage(self, context, **kwargs):
+        return settle_usage(self, context, **kwargs)
+
+    def mark_turn_terminal(self, context, **kwargs):
+        return mark_terminal(self, context, **kwargs)
+
+    def claim_turn_finalizer_hook(self, context, **kwargs):
+        return claim_hook(self, context, **kwargs)
+
+    def complete_turn_finalizer_hook(self, context, **kwargs):
+        return complete_hook(self, context, **kwargs)
+
+    def finish_turn_finalizer_hooks(self, context, **kwargs):
+        return finish_hooks(self, context, **kwargs)
+
+    def finish_turn_finalizer_cleanup(self, context, **kwargs):
+        return finish_cleanup(self, context, **kwargs)
 
     def cancel_run(self, run_id: str, *, actor_id: str, tenant_id: str) -> bool:
         now = self.now_iso()
@@ -1948,6 +2232,29 @@ class StateStore:
                 (cutoff,),
             ).fetchall()
             for row in rows:
+                pending_finalizer = connection.execute(
+                    "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                    (row["id"],),
+                ).fetchone()
+                if pending_finalizer is not None and int(pending_finalizer["cursor"]) < 5:
+                    # Do not turn a partially finalized run into a terminal
+                    # compatibility status or release its lease.  The lease
+                    # expiry itself is the hand-off boundary; the replacement
+                    # worker will resume the persisted cursor.
+                    connection.execute(
+                        "UPDATE runs SET recovery_reason='turn_finalizer_pending', recovery_recommendation='resume_finalizer' WHERE id=?",
+                        (row["id"],),
+                    )
+                    recovered.append(
+                        {
+                            "run_id": row["id"],
+                            "status": row["status"],
+                            "recovery_reason": "turn_finalizer_pending",
+                            "recovery_recommendation": "resume_finalizer",
+                            "finalizer_cursor": int(pending_finalizer["cursor"]),
+                        }
+                    )
+                    continue
                 terminal = "interrupted" if row["status"] == "cancel_requested" else "abandoned"
                 reason = (
                     "cancel_requested_before_worker_stall"
@@ -3070,16 +3377,40 @@ class StateStore:
                         ).fetchone()
                         return self._decode_api_request(current)
                     elif run["status"] in {"running", "cancel_requested"}:
-                        terminal = "interrupted" if run["status"] == "cancel_requested" else "abandoned"
-                        connection.execute(
-                            """
-                            UPDATE runs
-                            SET status=?, finished_at=?, recovery_reason='api_request_lease_expired',
-                                recovery_recommendation='resume_from_persistent_plan'
-                            WHERE id=? AND status IN ('running', 'cancel_requested')
-                            """,
-                            (terminal, now, run["id"]),
-                        )
+                        pending_finalizer = connection.execute(
+                            "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                            (run["id"],),
+                        ).fetchone()
+                        if pending_finalizer is not None and int(pending_finalizer["cursor"]) < 5:
+                            # The API request lease can expire while the
+                            # worker is in a finalizer fault window.  Keep
+                            # cancellation visible and let the durable cursor
+                            # finish instead of manufacturing an abandoned
+                            # terminal run here.
+                            connection.execute(
+                                """
+                                UPDATE runs
+                                SET recovery_reason='turn_finalizer_pending',
+                                    recovery_recommendation='resume_finalizer'
+                                WHERE id=? AND status IN ('running', 'cancel_requested')
+                                """,
+                                (run["id"],),
+                            )
+                        else:
+                            terminal = (
+                                "interrupted"
+                                if run["status"] == "cancel_requested"
+                                else "abandoned"
+                            )
+                            connection.execute(
+                                """
+                                UPDATE runs
+                                SET status=?, finished_at=?, recovery_reason='api_request_lease_expired',
+                                    recovery_recommendation='resume_from_persistent_plan'
+                                WHERE id=? AND status IN ('running', 'cancel_requested')
+                                """,
+                                (terminal, now, run["id"]),
+                            )
                         connection.execute(
                             """
                             UPDATE session_leases
@@ -3306,6 +3637,49 @@ class StateStore:
             parameters.extend((owner_id, attempt))
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            request = connection.execute(
+                """
+                SELECT run_id, status, owner_id, attempt FROM api_requests
+                WHERE actor_id=? AND tenant_id=? AND request_id=?
+                """,
+                (actor_id, tenant_id, request_id),
+            ).fetchone()
+            if request is None:
+                raise RuntimeError("API request does not exist")
+            if request["status"] not in {"claimed", "in_progress"} or (
+                owner_id is not None
+                and (
+                    request["owner_id"] != owner_id
+                    or int(request["attempt"]) != int(attempt)
+                )
+            ):
+                raise RuntimeError("api request owner lease is stale or request is not active")
+            bound_run_id = request["run_id"]
+            if run_id is not None and bound_run_id is not None and run_id != bound_run_id:
+                raise RuntimeError("API request is already bound to another run")
+            effective_run_id = run_id or bound_run_id
+            if effective_run_id is not None:
+                linked_run = connection.execute(
+                    "SELECT status FROM runs WHERE id=?",
+                    (effective_run_id,),
+                ).fetchone()
+                if linked_run is None:
+                    raise RuntimeError("API request references a missing run")
+                if linked_run["status"] not in {
+                    "completed",
+                    "failed",
+                    "interrupted",
+                }:
+                    raise RuntimeError("API request cannot complete before run terminal")
+                linked_finalizer = connection.execute(
+                    "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                    (effective_run_id,),
+                ).fetchone()
+                if linked_finalizer is not None and (
+                    int(linked_finalizer["cursor"]) < 5
+                    or linked_finalizer["status"] != "terminal"
+                ):
+                    raise RuntimeError("API request cannot complete before finalizer terminal")
             cursor = connection.execute(
                 f"""
                 UPDATE api_requests
@@ -3349,7 +3723,7 @@ class StateStore:
                 tenant_id=tenant_id,
                 request_id=request_id,
                 decision=status,
-                details={"run_id": run_id, "response_hash": (
+                details={"run_id": effective_run_id, "response_hash": (
                     hashlib.sha256(canonical_response.encode()).hexdigest()
                     if canonical_response is not None else None
                 )},
@@ -3502,6 +3876,8 @@ class StateStore:
             "run_journals",
             "agent_tool_envelopes",
             "agent_tool_calls",
+            "turn_finalizers",
+            "turn_finalizer_hooks",
         }
         if table not in allowed:
             raise ValueError(f"不允许统计表：{table}")

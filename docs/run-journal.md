@@ -1,4 +1,4 @@
-# RunJournal 恢复合同（R2.2 schema / R2.3 loop integration）
+# RunJournal 与 TurnFinalizer 恢复合同（R2.2-R2.4）
 
 `RunJournal` 是运行恢复的最小持久游标，不是 Plan、Evidence、ToolOperation、Artifact 或 Trace
 的替代品。它只保存这些对象的 ID 引用，以及下一次恢复所需的确定性边界。
@@ -10,10 +10,10 @@
 
 | 当前 phase | 允许的下一 phase | 恢复含义 |
 |---|---|---|
-| `accepted` | `planning`, `cancelled`, `failed` | 请求已接受；尚未声明计划或模型工作已完成 |
-| `planning` | `model`, `cancelled`, `failed` | Plan 由 `plan_id` 引用；只能从已保存的 loop cursor 继续 |
-| `model` | `tools`, `cancelled`, `failed` | 当前模型 attempt 和冻结 route 已保存；迟到结果必须先过 fence |
-| `tools` | `verifying`, `cancelled`, `failed` | 工具边界由 tool event / operation ID 引用；不确定写操作不能盲重放 |
+| `accepted` | `planning`, `finalizing`, `cancelled`, `failed` | 请求已接受；setup 失败可直接进入统一收尾 |
+| `planning` | `model`, `finalizing`, `cancelled`, `failed` | Plan 由 `plan_id` 引用；失败收尾不再另写终态 |
+| `model` | `tools`, `finalizing`, `cancelled`, `failed` | 当前模型 attempt 和冻结 route 已保存；迟到结果必须先过 fence |
+| `tools` | `verifying`, `finalizing`, `cancelled`, `failed` | finalizer 先关闭未配对 call；不确定写操作不能盲重放 |
 | `verifying` | `model`, `finalizing`, `cancelled`, `failed` | Evidence/Artifact 只通过 ID 复验；需要下一轮时回到 `model` 并推进 cursor |
 | `finalizing` | `terminal`, `cancelled`, `failed` | 只允许完成已声明的收尾边界；重复收尾必须被 CAS 拒绝 |
 | `terminal` | 无 | 成功终态；不可重新进入执行态 |
@@ -74,11 +74,39 @@ Agent Loop 的稳定顺序为：模型返回完整 tool calls，原子写入 env
 一个工具；每个工具返回、超时、取消或结构化拒绝后立即原子写入一个 result 并推进 cursor。任何 result 必须
 在同一 run/attempt 找到未完成 call，且按 call index 提交；旧 fencing token、孤立 result、重复 call id、跨
 run 配对和写 operation 引用不一致均结构化失败。取消会为已经声明且尚未执行的同 envelope calls 写入配对
-取消结果，但不会提前实现最终 assistant 或 terminal finalizer。
+取消结果；最终 assistant 和 terminal 由下述 R2.4 finalizer 独占。
 
 重入时，已提交 result 不再执行工具；未提交的只读结果可以重放。写调用先查询既有 `ToolOperation`：
 `committed` 只复用原回执，`executing/manual_review` 返回不可用且不会调用业务 handler。带显式 replay scope 的
 跨 run 幂等 operation 可以被新 call 引用，但 call/result 自身始终在各自 run 内配对。
+
+## R2.4 统一收尾协议
+
+`011_turn_finalizer` 将 SQLite `user_version` 提升到 11。每个 run 最多一行 `turn_finalizers`；主键、
+`revision` 与单调 `cursor` 共同控制恢复，固定步骤为：
+
+```text
+open -> tools_closed -> plan_verified -> final_message_committed
+     -> usage_settled -> terminal -> hooks_done -> cleanup_done
+```
+
+`tools_closed` 为所有 pending call 写确定性的配对关闭结果；`plan_verified` 复验持久 Plan/Evidence，验证器不可用
+或结果不确定时转为 `manual_review`。只有 `completed` 分支可在
+`messages(run_id, idempotency_key='final-assistant:<run_id>')` 提交最终 assistant；随后才将 Provider usage 与
+预算快照结算到 run。失败路径从已持久的胜出 Provider 事件和异常 usage 恢复结算输入，不因重启归零。
+`terminal` 在同一个 SQLite 事务中提交 journal 的 `terminal/cancelled/failed`、
+`runs.status/stop_reason` 与 finalizer terminal。稳定原因包括 `completed`、`interrupted`、
+`budget_exceeded`、`model_failed` 和 `manual_review`。
+
+finalizer 在任一步骤后崩溃时，恢复 worker 取得更高 fencing token 后从已提交 cursor 继续；旧 worker 的下一次
+写入被 lease fence 拒绝。取消或不确定写若在最终消息提交后获胜，terminal 事务会将该消息标为 inactive，避免
+失败分支暴露成功回答。`turn_finalizer_hooks` 的唯一键用于 claim 后处理和 cleanup；钩子失败只写审计，不反转
+主 turn。cleanup 有调用时限，超时也只记录审计并完成收尾 cursor。
+
+API request completion 与 session lease release 都要求先观察到 finalizer/run terminal。finalizer cursor 小于
+`terminal` 时，request lease 过期和 stalled-run 扫描只标记 `resume_finalizer`，不会伪造 `abandoned` 终态；
+API response 尚未提交时先继续未完成的 hooks/cleanup，再从 terminal finalizer 重建原 `ChatResult`；已提交时
+继续按原 response hash 重放。
 
 ## 不变量
 

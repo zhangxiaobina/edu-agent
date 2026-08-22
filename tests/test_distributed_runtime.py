@@ -258,6 +258,7 @@ def test_cancel_while_model_inflight_discards_response(tmp_path):
 
     assert errors == []
     assert results[0].stop_reason == "interrupted"
+    assert results[0].context["estimated_tokens"] > 0
     assert "must-be-discarded" not in str(service.state_store.get_messages(results[0].session_id))
 
 

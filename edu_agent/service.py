@@ -3,27 +3,30 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
 from .agent.graph import run_agent
 from .agent.prompts import SYSTEM_PROMPT
+from .agent.turn_finalizer import FinalizationResult, TurnFinalizer
 from .code_execution import build_code_execution_provider
 from .engine import Engine, get_engine
 from .knowledge import KnowledgeToolProvider, SQLiteKnowledgeProvider
 from .observability import RedactionPolicy, TraceRepository
 from .planning.runtime import PlanningOptions
+from .planning.runtime import PlanCoordinator
+from .planning.verifier import EvidenceVerifier
 from .runtime.config import AppConfig, load_config
-from .runtime.context import ContextManager
+from .runtime.context import ContextBudgetExceeded, ContextManager
 from .runtime.artifacts import ArtifactStore, ToolResultBudget
 from .runtime.context_engine import CheckpointContextEngine, ContextEngine
-from .runtime.models import RunContext
+from .runtime.models import BudgetExceeded, RunContext
 from .runtime.manager import RuntimeManager
 from .runtime.tool_executor import ApprovalRequest, ExecutionPolicy, PolicyToolExecutor
 from .scheduler import JobStore, Scheduler
 from .state import MemoryManager, MemoryProvider, StateStore
-from .state.store import FencingTokenRejected, RunCancelled
+from .state.store import FencingTokenRejected, RunCancelled, TurnFinalizerPending
 from .tools import registry
 
 
@@ -55,6 +58,9 @@ class EduAgentService:
         context_engine: ContextEngine | None = None,
         plan_generator=None,
         loop_fault_injector=None,
+        finalizer_fault_injector=None,
+        post_process_hooks=None,
+        finalizer_cleanup=None,
     ):
         self.config = config or AppConfig()
         self.engine = engine
@@ -107,6 +113,9 @@ class EduAgentService:
         )
         self.plan_generator = plan_generator
         self.loop_fault_injector = loop_fault_injector
+        self.finalizer_fault_injector = finalizer_fault_injector
+        self.post_process_hooks = post_process_hooks
+        self.finalizer_cleanup = finalizer_cleanup
         self.artifact_store = ArtifactStore(self.config.artifact_path, self.state_store)
         self.trace_repository = TraceRepository(
             self.state_store,
@@ -202,6 +211,155 @@ class EduAgentService:
             self.runtime_manager.bind_context(context, claim)
             return self._chat_turn(message, context=context, db_conn=db_conn)
 
+    @staticmethod
+    def _default_turn_context() -> dict:
+        return {
+            "estimated_tokens": 0,
+            "omitted_messages": 0,
+            "memory_ids": [],
+            "checkpoint_id": None,
+            "compacted_messages": 0,
+        }
+
+    def _plan_finalizer_components(self, context: RunContext):
+        """Load the persisted Plan/Evidence verifiers for the final re-check."""
+        try:
+            coordinator = PlanCoordinator(
+                self.state_store,
+                context,
+                options=PlanningOptions(
+                    enabled=self.config.planning.enabled,
+                    max_steps=self.config.planning.max_steps,
+                    max_step_retries=self.config.planning.max_step_retries,
+                    max_iterations=self.config.planning.max_iterations,
+                ),
+            )
+            if coordinator.plan is None:
+                return None, None, None
+            verifier = EvidenceVerifier(
+                self.state_store,
+                context,
+                max_step_retries=self.config.planning.max_step_retries,
+                citation_verifier=getattr(self.tools_provider, "verify_citation", None),
+                citation_claim_verifier=getattr(self.tools_provider, "verify_claim", None),
+            )
+            return coordinator, verifier, None
+        except Exception as error:
+            # A missing plan is handled above.  Once a plan is persisted,
+            # inability to reload it is an uncertain completion boundary and
+            # must be recorded by the finalizer rather than treated as a
+            # plain, unplanned answer.
+            return None, None, f"{type(error).__name__}: {error}"
+
+    def _finalize_turn(
+        self,
+        context: RunContext,
+        *,
+        result: dict | None = None,
+        final_message: dict | None = None,
+        stop_reason: str | None = None,
+        error: str | None = None,
+        context_payload: dict | None = None,
+    ) -> FinalizationResult:
+        result = result or {}
+        coordinator, verifier, plan_verification_error = self._plan_finalizer_components(context)
+        finalizer = TurnFinalizer(
+            self.state_store,
+            context,
+            result=result,
+            final_message=final_message,
+            stop_reason=stop_reason,
+            error=error,
+            plan=result.get("plan"),
+            plan_coordinator=coordinator,
+            evidence_verifier=verifier,
+            plan_verification_error=plan_verification_error,
+            hooks=self.post_process_hooks,
+            cleanup=self.finalizer_cleanup,
+            fault_injector=self.finalizer_fault_injector,
+            context_payload=context_payload,
+        )
+        return finalizer.finalize()
+
+    def _chat_result_from_finalization(
+        self,
+        finalization: FinalizationResult,
+        *,
+        context_payload: dict | None = None,
+    ) -> ChatResult:
+        return ChatResult(
+            session_id=finalization.session_id,
+            run_id=finalization.run_id,
+            final_answer=finalization.final_answer,
+            trace=finalization.trace,
+            budget=finalization.budget,
+            usage=finalization.usage,
+            context=(
+                context_payload
+                or finalization.context
+                or self._default_turn_context()
+            ),
+            stop_reason=finalization.stop_reason,
+            plan=finalization.plan,
+        )
+
+    @staticmethod
+    def _failure_stop_reason(error: Exception) -> str:
+        text = f"{type(error).__name__}: {error}".lower()
+        if isinstance(error, (BudgetExceeded, ContextBudgetExceeded)):
+            return "budget_exceeded"
+        if "budget" in text or "quota" in text:
+            return "budget_exceeded"
+        if "manual_review" in text or "uncertain" in text:
+            return "manual_review"
+        return "model_failed"
+
+    def _persisted_failure_usage(
+        self,
+        context: RunContext,
+        error: Exception,
+    ) -> list[dict]:
+        usage = self.state_store.get_selected_provider_usage(
+            context.run_id,
+            actor_id=context.actor_id,
+            tenant_id=context.tenant_id,
+        )
+        error_usage = getattr(error, "usage", None)
+        if isinstance(error_usage, Mapping) and error_usage:
+            usage.append(dict(error_usage))
+        return usage
+
+    def _finalize_failure(
+        self,
+        context: RunContext,
+        error: Exception,
+        *,
+        context_payload: dict | None = None,
+    ) -> None:
+        existing_finalizer = self.state_store.get_turn_finalizer(
+            context.run_id,
+            session_id=context.session_id,
+            actor_id=context.actor_id,
+            tenant_id=context.tenant_id,
+        )
+        if existing_finalizer is not None:
+            return
+        error_text = f"{type(error).__name__}: {error}"
+        self._finalize_turn(
+            context,
+            result={
+                "final_answer": None,
+                "trace": [],
+                "usage": self._persisted_failure_usage(context, error),
+                "budget": context.budget.usage(),
+                "stop_reason": self._failure_stop_reason(error),
+                "plan": None,
+            },
+            stop_reason=self._failure_stop_reason(error),
+            error=error_text,
+            context_payload=context_payload,
+        )
+
     def _chat_turn(
         self,
         message: str,
@@ -224,30 +382,25 @@ class EduAgentService:
                     resume=resume,
                 )
         except RunCancelled as error:
-            self.state_store.finish_run(
-                context.run_id,
-                status="interrupted",
-                budget=context.budget.usage(),
-                recovery_reason=str(error),
-                context=context,
-            )
-            return ChatResult(
-                session_id=context.session_id,
-                run_id=context.run_id,
-                final_answer=None,
-                trace=[],
-                budget=context.budget.usage(),
-                usage=[],
-                context={
-                    "estimated_tokens": 0,
-                    "omitted_messages": 0,
-                    "memory_ids": [],
-                    "checkpoint_id": None,
-                    "compacted_messages": 0,
+            finalization = self._finalize_turn(
+                context,
+                result={
+                    "final_answer": None,
+                    "trace": [],
+                    "usage": self._persisted_failure_usage(context, error),
+                    "budget": context.budget.usage(),
+                    "stop_reason": "interrupted",
+                    "plan": None,
                 },
                 stop_reason="interrupted",
-                plan=None,
+                error=str(error),
             )
+            return self._chat_result_from_finalization(finalization)
+        except FencingTokenRejected:
+            raise
+        except Exception as error:
+            self._finalize_failure(context, error)
+            raise
 
     def _chat_turn_impl(
         self,
@@ -281,6 +434,16 @@ class EduAgentService:
         )
         run_messages = self.state_store.get_run_messages(context.run_id) if resume else []
         resumed_protocol_messages: list[dict] = []
+        if resume:
+            persisted_finalizer = self.state_store.get_turn_finalizer(
+                context.run_id,
+                session_id=context.session_id,
+                actor_id=context.actor_id,
+                tenant_id=context.tenant_id,
+            )
+            if persisted_finalizer is not None:
+                finalization = self._finalize_turn(context)
+                return self._chat_result_from_finalization(finalization)
         if resume and run_messages:
             recovered_answer = next(
                 (
@@ -291,30 +454,19 @@ class EduAgentService:
                 None,
             )
             if recovered_answer is not None:
-                self.state_store.finish_run(
-                    context.run_id,
-                    status="completed",
-                    budget=context.budget.usage(),
-                    recovery_reason="recovered_committed_messages",
-                    context=context,
-                )
-                return ChatResult(
-                    session_id=session_id,
-                    run_id=context.run_id,
-                    final_answer=recovered_answer,
-                    trace=[],
-                    budget=context.budget.usage(),
-                    usage=[],
-                    context={
-                        "estimated_tokens": 0,
-                        "omitted_messages": 0,
-                        "memory_ids": [],
-                        "checkpoint_id": None,
-                        "compacted_messages": 0,
+                finalization = self._finalize_turn(
+                    context,
+                    result={
+                        "final_answer": recovered_answer,
+                        "trace": [],
+                        "usage": [],
+                        "budget": context.budget.usage(),
+                        "stop_reason": "completed",
+                        "plan": None,
                     },
-                    stop_reason="completed",
-                    plan=None,
+                    final_message={"role": "assistant", "content": recovered_answer},
                 )
+                return self._chat_result_from_finalization(finalization)
             if len(history) >= len(run_messages) and history[-len(run_messages) :] == run_messages:
                 history = history[: -len(run_messages)]
             else:
@@ -398,6 +550,13 @@ class EduAgentService:
             state_store=self.state_store,
             result_budget=self.result_budget,
         )
+        context_payload = {
+            "estimated_tokens": snapshot.estimated_tokens,
+            "omitted_messages": snapshot.omitted_messages,
+            "memory_ids": memory_snapshot.ids if memory_snapshot else [],
+            "checkpoint_id": compaction.checkpoint_id if compaction else None,
+            "compacted_messages": compaction.compacted_messages if compaction else 0,
+        }
         try:
             result = run_agent(
                 message,
@@ -435,76 +594,55 @@ class EduAgentService:
                 ),
                 None,
             )
-            if final_message is not None:
-                self.state_store.append_messages(
-                    session_id,
-                    [final_message],
-                    context=context,
-                )
-            self.state_store.finish_run(
-                context.run_id,
-                status=("completed" if result.get("stop_reason") in {None, "completed"} else "failed"),
-                budget=context.budget.usage(),
-                error=(
-                    None
-                    if result.get("stop_reason") in {None, "completed"}
-                    else f"stop_reason={result['stop_reason']}"
-                ),
-                context=context,
+            finalization = self._finalize_turn(
+                context,
+                result=result,
+                final_message=final_message,
+                context_payload=context_payload,
+            )
+            return self._chat_result_from_finalization(
+                finalization,
+                context_payload=context_payload,
             )
         except RunCancelled as error:
-            self.state_store.finish_run(
-                context.run_id,
-                status="interrupted",
-                budget=context.budget.usage(),
-                recovery_reason=str(error),
-                context=context,
-            )
-            return ChatResult(
-                session_id=session_id,
-                run_id=context.run_id,
-                final_answer=None,
-                trace=[],
-                budget=context.budget.usage(),
-                usage=[],
-                context={
-                    "estimated_tokens": snapshot.estimated_tokens,
-                    "omitted_messages": snapshot.omitted_messages,
-                    "memory_ids": memory_snapshot.ids if memory_snapshot else [],
-                    "checkpoint_id": compaction.checkpoint_id if compaction else None,
-                    "compacted_messages": compaction.compacted_messages if compaction else 0,
+            finalization = self._finalize_turn(
+                context,
+                result={
+                    "final_answer": None,
+                    "trace": [],
+                    "usage": self._persisted_failure_usage(context, error),
+                    "budget": context.budget.usage(),
+                    "stop_reason": "interrupted",
+                    "plan": None,
                 },
                 stop_reason="interrupted",
-                plan=None,
+                error=str(error),
+                context_payload=context_payload,
+            )
+            return self._chat_result_from_finalization(
+                finalization,
+                context_payload=context_payload,
             )
         except FencingTokenRejected:
             raise
         except Exception as error:
-            self.state_store.finish_run(
+            # A failure raised by a finalizer step is a deliberate recovery
+            # boundary.  Do not immediately start a second finalizer from
+            # this worker; the persisted cursor is for the next owner.
+            existing_finalizer = self.state_store.get_turn_finalizer(
                 context.run_id,
-                status="failed",
-                budget=context.budget.usage(),
-                error=f"{type(error).__name__}: {error}",
-                context=context,
+                session_id=context.session_id,
+                actor_id=context.actor_id,
+                tenant_id=context.tenant_id,
+            )
+            if existing_finalizer is not None:
+                raise
+            self._finalize_failure(
+                context,
+                error,
+                context_payload=context_payload,
             )
             raise
-        return ChatResult(
-            session_id=session_id,
-            run_id=context.run_id,
-            final_answer=result["final_answer"],
-            trace=result["trace"],
-            budget=result["budget"],
-            usage=result["usage"],
-            context={
-                "estimated_tokens": snapshot.estimated_tokens,
-                "omitted_messages": snapshot.omitted_messages,
-                "memory_ids": memory_snapshot.ids if memory_snapshot else [],
-                "checkpoint_id": compaction.checkpoint_id if compaction else None,
-                "compacted_messages": compaction.compacted_messages if compaction else 0,
-            },
-            stop_reason=result.get("stop_reason"),
-            plan=result.get("plan"),
-        )
 
     def cancel_run(
         self,
@@ -527,11 +665,20 @@ class EduAgentService:
         tenant_id: str = "default",
         db_conn=None,
     ) -> ChatResult:
-        record = self.state_store.prepare_run_resume(
-            run_id,
-            actor_id=actor_id,
-            tenant_id=tenant_id,
-        )
+        try:
+            record = self.state_store.prepare_run_resume(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            )
+        except TurnFinalizerPending:
+            # A finalizer crash can leave the run in ``running`` until its
+            # lease expires.  Requeue only that durable-cursor case.
+            record = self.state_store.prepare_turn_finalizer_resume(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            )
         session = self.state_store.get_session_status(
             record["session_id"],
             actor_id=actor_id,
@@ -561,6 +708,16 @@ class EduAgentService:
             tenant_id=tenant_id,
         ) as claim:
             self.runtime_manager.bind_context(context, claim)
+            pending_finalizer = self.state_store.get_turn_finalizer(
+                run_id,
+                session_id=context.session_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            )
+            if pending_finalizer is not None:
+                return self._chat_result_from_finalization(
+                    self._finalize_turn(context),
+                )
             return self._chat_turn(
                 record["request_text"],
                 context=context,
@@ -742,6 +899,35 @@ class EduAgentService:
             raise KeyError(f"run 不存在：{run_id}")
         if record["status"] not in {"completed", "failed", "interrupted"}:
             raise RuntimeError(f"run 尚未进入可恢复终态：{record['status']}")
+        finalizer = self.state_store.get_turn_finalizer(
+            run_id,
+            session_id=record["session_id"],
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+        )
+        if finalizer is not None and finalizer.terminal:
+            if finalizer.cursor < 7:
+                with self.state_store.connect() as connection:
+                    session = connection.execute(
+                        "SELECT role, course_ids_json FROM sessions WHERE id=?",
+                        (record["session_id"],),
+                    ).fetchone()
+                if session is None:
+                    raise RuntimeError("run session does not exist")
+                context = RunContext.create(
+                    session_id=record["session_id"],
+                    run_id=run_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                    role=record["role"] or session["role"] or self.config.security.default_role,
+                    course_ids=set(json.loads(session["course_ids_json"] or "[]")),
+                    max_model_calls=self.config.runtime.max_model_calls,
+                    max_tool_calls=self.config.runtime.max_tool_calls,
+                )
+                return self._chat_result_from_finalization(self._finalize_turn(context))
+            return self._chat_result_from_finalization(
+                finalization=FinalizationResult.from_record(finalizer)
+            )
         messages = self.state_store.get_run_messages(run_id)
         answer = next(
             (
@@ -752,14 +938,16 @@ class EduAgentService:
             None,
         )
         budget = json.loads(record.get("budget_json") or "{}")
-        stop_reason = "completed" if record["status"] == "completed" else record["status"]
+        stop_reason = record.get("stop_reason") or (
+            "completed" if record["status"] == "completed" else record["status"]
+        )
         return ChatResult(
             session_id=record["session_id"],
             run_id=run_id,
             final_answer=answer,
             trace=[],
             budget=budget,
-            usage=[],
+            usage=json.loads(record.get("usage_json") or "[]"),
             context={
                 "estimated_tokens": record.get("context_tokens", 0),
                 "omitted_messages": record.get("omitted_messages", 0),
@@ -787,6 +975,14 @@ class EduAgentService:
         if record["status"] != "queued":
             if record["status"] in {"completed", "failed", "interrupted"}:
                 return self.recover_chat_result(run_id, actor_id=actor_id, tenant_id=tenant_id)
+            pending_finalizer = self.state_store.get_turn_finalizer(
+                run_id,
+                session_id=record["session_id"],
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            )
+            if pending_finalizer is not None and not pending_finalizer.terminal:
+                return self.resume_run(run_id, actor_id=actor_id, tenant_id=tenant_id)
             raise RuntimeError(f"run 不能从当前状态恢复：{record['status']}")
         with self.state_store.connect() as connection:
             session = connection.execute(
