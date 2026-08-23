@@ -26,6 +26,7 @@ from ..tools.manifest import (
     ToolManifest,
     ToolManifestMismatch,
     canonical_schema_hash,
+    is_scope_narrowed_schema,
     manifest_from_tools,
     validate_function_schema,
 )
@@ -137,7 +138,12 @@ def _validate_tool_schema_subset(
             raise ToolManifestMismatch(
                 f"传入的 tool_schemas 含无效 schema {name!r}: {error}"
             ) from error
-        if canonical_schema_hash(normalized) != entry.canonical_schema_hash:
+        if canonical_schema_hash(normalized) != entry.canonical_schema_hash and not is_scope_narrowed_schema(
+            normalized,
+            entry.schema,
+            course_ids=manifest.course_ids,
+            role=manifest.role,
+        ):
             raise ToolManifestMismatch(
                 f"传入的 tool_schemas 修改了冻结工具 {name} 的 schema"
             )

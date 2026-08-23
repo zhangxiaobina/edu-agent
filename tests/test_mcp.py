@@ -19,6 +19,7 @@ from edu_agent.agent.demo_policy import demo_policy  # noqa: E402
 from edu_agent.data import generate  # noqa: E402
 from edu_agent.engine.mock import MockEngine  # noqa: E402
 from edu_agent.mcp import MCPToolProvider  # noqa: E402
+from edu_agent.runtime.models import RunContext  # noqa: E402
 from edu_agent.tools import registry  # noqa: E402
 
 DB_PATH = os.path.join(tempfile.gettempdir(), "edu_agent_mcp_test.db")
@@ -54,32 +55,50 @@ def test_mcp_lists_all_tools(provider):
 def test_mcp_dispatch_matches_registry(provider):
     """同一工具、同参数，经 MCP 往返的结果与本地直调一致。"""
     args = {"class_id": 3, "course_id": 1}
-    assert provider.dispatch("list_exams", args) == _norm(registry.dispatch("list_exams", args))
+    context = RunContext.create(
+        session_id="mcp-test",
+        run_id="mcp-run",
+        actor_id="teacher-1",
+        tenant_id="school-1",
+        role="teacher",
+        course_ids={1},
+    )
+    manifest = registry.build_tool_manifest(context=context)
+    assert provider.dispatch("list_exams", args, context=context, manifest=manifest) == _norm(
+        registry.dispatch("list_exams", args, context=context)
+    )
     paper_args = {"question_bank_id": 1, "total_questions": 2}
-    assert provider.dispatch("generate_paper", paper_args) == _norm(
-        registry.dispatch("generate_paper", paper_args)
+    assert provider.dispatch("generate_paper", paper_args, context=context, manifest=manifest) == _norm(
+        registry.dispatch("generate_paper", paper_args, context=context)
     )
     question_args = {"course_id": 1, "knowledge_point": "递归", "count": 1}
-    assert provider.dispatch("generate_questions", question_args) == _norm(
-        registry.dispatch("generate_questions", question_args)
+    assert provider.dispatch("generate_questions", question_args, context=context, manifest=manifest) == _norm(
+        registry.dispatch("generate_questions", question_args, context=context)
     )
 
 
 def test_mcp_unknown_tool_returns_error(provider):
     """未知工具经 MCP 返回结构化错误（与 registry 同口径），不抛异常。"""
-    assert "error" in provider.dispatch("no_such_tool", {})
+    context = RunContext.create(session_id="mcp-test", actor_id="teacher-1", tenant_id="school-1", role="teacher", course_ids={1})
+    manifest = registry.build_tool_manifest(context=context)
+    assert "error" in provider.dispatch("no_such_tool", {}, context=context, manifest=manifest)
 
 
 def test_mcp_write_cannot_bypass_transaction_runtime(provider):
+    context = RunContext.create(session_id="mcp-test", actor_id="teacher-1", tenant_id="school-1", role="teacher", course_ids={1})
+    manifest = registry.build_tool_manifest(context=context)
     result = provider.dispatch(
         "create_exam",
         {"exam_name": "不应创建", "class_id": 3, "course_id": 1},
+        context=context,
+        manifest=manifest,
     )
     assert result["error"] == "MCP_WRITE_REQUIRES_TRANSACTIONAL_ADAPTER"
     assert "message" in result
     local = registry.dispatch(
         "create_exam",
         {"exam_name": "不应创建", "class_id": 3, "course_id": 1},
+        context=context,
     )
     assert local["code"] == "TRANSACTIONAL_EXECUTOR_REQUIRED"
     assert "error" in local and "message" in local

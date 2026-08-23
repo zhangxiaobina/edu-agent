@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R3.5
-- next_prompt: R3.6
+- last_completed_prompt: R3.6
+- next_prompt: R4.1
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
-- stage_gate: in_progress
-- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1-R3.5 的 Manifest、Canonical Provider、16 工具契约、参数治理和安全有界只读并发已通过，R3 总门禁仍需 R3.6 插件/MCP 安全边界与公开文档收口
+- stage_gate: passed
+- stage_gate_reason: R0-R3 顶层门禁均 passed；16 工具契约、冻结 Manifest、Canonical Provider、参数 corpus、安全有界只读并发以及 plugin/MCP 信任与断线边界均通过专项、全量回归、MCP demo 和完整 Stage 8 验收
 
 ## Baseline Reproduction
 
@@ -933,3 +933,47 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R3.5 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
 - next: R3.6，验证 plugin/MCP 在冻结 Manifest、参数、ACL、超时/取消、结果预算和并发合同下的安全边界，运行完整
   R3 门禁并同步架构/演示/README；不得提前开始 R4 上下文压缩。
+
+### R3.6 - 2026-08-23
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `2c483a7bdab4bbc59652d0af5711f247a0303a02` 开始；本次未创建本地提交或推送，未覆盖用户既有改动。
+  Stage 8 以 development 模式重新生成 `artifacts/system-eval.json` 和 `artifacts/trace-scaling.json`，报告保留真实
+  HEAD、`git.dirty=true` 和 `provenance_gate=not_enforced`，不冒充 candidate/release 证据。
+- plugin admission: entry point/module loader 冻结 `plugin:<name>` source，并以模块或发行包 version 建立身份；模块/
+  distribution version 冲突、重复/热加载、保留名称覆盖、缺 schema hash/effect/capability、unknown effect、裸写或代码
+  执行均拒绝。插件以一个 admission unit 加载，后续声明失败会回滚此前工具和 registry generation；动态非 builtin
+  source 也必须提供同样的可验证元数据，`parallel_safe` 不会由名称或 read effect 自动授予。
+- MCP boundary: discovery 以非空本地 trusted catalog 为信任根，原子校验 source/version/canonical schema hash/effect/
+  capability、完整 metadata、annotations、重名、名称抢占和 schema/身份 collision。调用在 client 与 stdio server
+  两侧执行有界 object 解析、schema-guided normalization、完整 JSON Schema、role/course ACL 和冻结 manifest/hash
+  复验；代码/写入不能绕过本地审批与事务适配器。远端结果必须是有界 JSON object，`isError`、非 JSON、scalar/list、
+  空载荷、敏感字段和超大结果均 fail closed；生产 executor 继续应用本地 `ToolResultBudget`/Artifact owner scope。
+- freeze/fence: run 绑定 Manifest 后，registry handler/metadata、插件热变化、MCP catalog generation、重连 drift 和连接
+  identity 均逐次复验。受控异步 fixture 明确覆盖 transport 已进入后断线、迟到结果释放、客户端取消和调用 timeout；
+  迟到值返回 `MCP_DISCONNECTED_LATE_RESULT` 或由 cancellation/timeout fence 拒绝，不能进入当前 run。恢复时 richer
+  Manifest hash 不一致继续走明确 identity error；未新增静默兼容路径。
+- authorization/concurrency evidence: 模型可见 `course_id` enum 按冻结 course scope 收窄，executor/Provider 返回值检查
+  再次验证 role/course/tenant/owner；恶意 Provider 的越权输入和越界输出均在到达模型前拒绝。串并行 fixture 保持原序
+  结果等价，连续 7 轮 P95 对照要求并行值小于串行值的 80%；安全指标断言并发写副作用、ACL 泄漏和孤立 tool result
+  均为 0。MCP 仅在 trusted entry 显式 read + parallel_safe 且 live identity 一致时 opt in；通用 plugin 仍为 barrier。
+- docs/migrations/config: README、architecture、demo 和 production runtime 只公开已经验证的 Manifest、参数规范化和
+  安全并发，并明确真实 `TeachingPlatformProvider` 仍未实现、属于 L1。无 SQLite migration、依赖、环境变量或
+  AppConfig 变化；未开始 R4 上下文压缩。
+- verification: 全部 R3 专项（16 工具矩阵、Manifest、26 条坏参数 corpus、batch、R3.6、MCP/plugin、Teaching
+  Provider、事务、Agent tool messages、RAG 与 code execution）`227 passed (10.96s)`；全量测试在受限环境为
+  `544 passed, 12 failed`，12 个堆栈全部止于 `127.0.0.1:0` 的 `socket.bind PermissionError`，获准回环环境同一
+  离线命令为 `556 passed (31.41s)`。独立 MCP demo 发现 15 个可用工具（无健康代码后端时隐藏 `run_code`），5 次
+  stdio 调用完成；全仓 Ruff、`uv lock --check`、`uv pip check` 和 `git diff --check` 通过。
+- stage8: `zsh scripts/accept_stage8.sh` 完整通过；R2 内门禁 `148 passed`、Stage 7 socket 专项 `11 passed`、最终
+  全量 `556 passed (30.29s)`，MCP demo 在 Stage 7 再次通过。lineage 为 73 样本、Train/Dev/Test=55/12/6、两次
+  生成 hash `40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b`；3 个 artifact 数据边界审计 0 findings，
+  临时 Stage 8 状态成功清理。
+- not_verified: 未访问公网、真实模型/Provider、真实教学平台/生产 ORM/API 或 GitHub-hosted CI；本机 Docker/Jobe
+  后端未启动，综合评测按合同保持 `sandbox=not_verified`。本地 stdio MCP 已验证，不等同于跨主机 catalog 发布、
+  远端身份签名或多主机共识。
+- residual_risks: Python 同步第三方调用仍只能协作取消；当前 fence 保证迟到候选不能提交，但底层只读调用可能继续到
+  Provider 自行返回。跨主机 plugin/MCP 包发布、签名和 trusted catalog 分发仍需部署治理；真实平台实体授权、API
+  幂等/outbox/补偿映射留给 L1 `TeachingPlatformProvider`。
+- gate: `R3 passed`；R0-R3 顶层 stage gate 为 `passed`。
+- next: R4.1，读取本交接并只实现可解释 Context Accounting；不得在本 R3.6 会话提前开始上下文压缩优化。

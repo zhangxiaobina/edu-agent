@@ -908,3 +908,54 @@ def test_repeatable_p95_fixture_shows_parallel_speedup_with_structural_concurren
     assert serial_max == 1
     assert parallel_max == 2
     assert parallel_p95 < serial_p95 * 0.8
+
+
+def test_r36_serial_parallel_security_report_has_zero_leaks_side_effects_and_orphans():
+    side_effects = []
+
+    def behavior(name, arguments, context, connection):
+        if name == "write":
+            side_effects.append(arguments)
+        return {
+            "course_id": 7,
+            "resource": arguments["resource"],
+        }
+
+    provider = ControlledProvider(
+        {
+            "read": _spec("read"),
+            "write": _spec(
+                "write",
+                effect=ToolEffect.WRITE,
+                parallel_safe=False,
+                mutating=True,
+                risk_level="high",
+            ),
+        },
+        behavior,
+    )
+    calls = [
+        ToolCall("read-1", "read", {"resource": "r1"}),
+        ToolCall("write-1", "write", {"resource": "w1"}),
+        ToolCall("read-2", "read", {"resource": "r2"}),
+    ]
+    result = _run(provider, calls, max_workers=2)
+    payloads = _tool_payloads(result)
+    assert len(payloads) == len(calls)
+    assert all(payload["meta"].get("tool_batch_parallel") is False for payload in payloads[1:2])
+    acl_leaks = sum(
+        1
+        for payload in payloads
+        if isinstance(payload.get("data"), dict)
+        and payload["data"].get("course_id") not in {None, 7, 8}
+    )
+    orphaned_tool_results = abs(len(payloads) - len(calls))
+    parallel_write_side_effects = sum(
+        1
+        for payload in payloads[1:2]
+        if payload["meta"].get("tool_batch_parallel")
+    )
+    assert side_effects == []
+    assert parallel_write_side_effects == 0
+    assert acl_leaks == 0
+    assert orphaned_tool_results == 0

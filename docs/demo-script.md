@@ -12,16 +12,20 @@ uv run --frozen python -m edu_agent.data.generate
 ```
 
 讲清主线：模型能调工具不等于运行可靠；演示重点是早停门禁、写入重放、恢复、Trace 和诚实评测。
+本演示只使用 `SyntheticProvider`；真实 `TeachingPlatformProvider` 尚未实现，仍是 L1，不能把合成/fake
+合同结果讲成真实平台集成证据。
 
 ## 1:00-3:00：正常多步链
 
 ```bash
 uv run --frozen python scripts/agent_demo.py
 uv run --frozen python scripts/plan_runtime_demo.py
+uv run --frozen python scripts/mcp_demo.py
 ```
 
 指出真实 user turn 只有一个，工具调用与结果原子配对；Plan 第一次无证据回答被拦截，真实 tool event
-绑定后才完成。
+绑定后才完成。MCP demo 的模型可见 schema 来自同一个冻结 Manifest；stdio server 的 discovery 必须与本地
+source/version/schema hash/effect/capability 目录一致，调用仍经过本地参数、角色/课程、timeout/cancel 和结果预算。
 
 ## 3:00-5:00：事务故障与恢复
 
@@ -105,13 +109,17 @@ uv run --frozen python -m pytest \
   tests/test_stage8_boundaries_recovery_trace.py -q
 uv run --frozen python scripts/benchmark_trace_scaling.py \
   --events 10000 --page-size 100 --output artifacts/trace-scaling.json
+uv run --frozen python -m pytest -p no:cacheprovider \
+  tests/test_builtin_tool_contract_matrix.py tests/test_tool_arguments.py \
+  tests/test_tool_batch.py tests/test_r36_boundaries.py tests/test_mcp.py -q
 ```
 
 讲解 73 条样本按模板族分成 Train 55 / Dev 12 / Test 6，Test 使用独立 seed/实体/意图而非随机行切分；
 lineage 审计会因跨 split 重复、族/等价语义重叠、缺 provenance、敏感字段或重复生成不一致而失败。数据
 审计报告只给分类/位置/计数、不回显秘密；API 测试经过 `127.0.0.1:0` 真 socket，包含 run 完成但
 response 未提交后的恢复与首次/重放字节一致；benchmark 证明每页读取不超过 page size+1，峰值内存不随
-总历史线性增长。不要把本机一次耗时写成容量承诺。
+总历史线性增长。R3 专项同时展示 16 工具契约、坏参数 corpus、冻结 Manifest、MCP/plugin 攻击面和连续 7 轮
+P95 串并行对照；报告断言写副作用、ACL 泄漏和孤立 tool result 均为 0。不要把本机一次耗时写成容量承诺。
 
 最后运行完整门禁：
 

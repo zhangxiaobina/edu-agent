@@ -323,7 +323,8 @@ SQLite、不保留历史，也不提供恢复游标。
 持久边界保持不变：`TraceRepository` 继续只从上述业务/审计表投影 `RuntimeEvent v1`，EventBus 不是第二套
 Trace 真相；恢复 sequence/loop cursor 由 `RunJournal` 承担。R2.3 已把 assistant tool-call envelope 和逐个
 tool result 接入 Agent Loop：消息、call 配对和 journal cursor 在同一 SQLite 事务提交，旧 fence、孤立 result、
-重复 call id 与跨 run 配对会被拒绝。工具仍严格顺序执行；R2.4 的 `011_turn_finalizer` 将 SQLite schema
+重复 call id 与跨 run 配对会被拒绝。R3 以后，只有连续、无冲突且显式 `effect=read + parallel_safe` 的调用可在
+有界 worker 中并发候选执行；所有 tool result/journal cursor 仍按原 call 顺序提交。R2.4 的 `011_turn_finalizer` 将 SQLite schema
 version 提升到 11，并由唯一 `TurnFinalizer` 按固定 cursor 完成未配对 call 关闭、Plan/Evidence 复验、唯一
 最终 assistant、usage/budget、terminal、后处理和有界 cleanup。失败路径会合并已选 Provider 事件与异常携带的
 usage；terminal 后恢复继续未完成的 hooks/cleanup，再重建兼容 `ChatResult`。R2.5 已让 Chat Completions 与
@@ -338,16 +339,19 @@ R2.7 的 `012_r2_recovery` 将 schema version 提升到 12，增加 `runs.stream
 预留 sequence 并复验当前 lease/fence。`RunRecoveryPlanner` 从稳定 cursor 选择
 `continue/replay-read/reuse-operation/manual-review/terminal-replay`，resume 前复验冻结 manifest/route 并恢复
 预算 snapshot。五个 fault fixture 都关闭崩溃 Service、推进 lease 时钟，再以同一 SQLite 文件构造新 Service；
-EventBus 仍不保存历史 delta，工具仍顺序执行。
+EventBus 仍不保存历史 delta，工具并发不改变原序消息和恢复游标。
 
 ## 可插拔扩展
 
 - 本地 registry、MCP provider 都实现 `ToolProvider` 契约，Agent 侧统一收到 `ToolResult`。
 - 10 个教学 query 和 5 个教学 command 经 canonical `TeachingDataProvider`；写 command 只能从 `PolicyToolExecutor -> registry.dispatch_transactional` 路径进入。
+- 当前实现是 `SyntheticProvider`；真实 `TeachingPlatformProvider` 和私有 API/ORM 映射仍属于 L1，未作为 R3 能力声明。
 - `run_code` 仅经健康、capability 完整且已审批的 `CodeExecutionProvider`，不创建教学库连接或 ToolOperation。
 - `PluginManager` 支持 Python entry point `edu_agent.plugins` 和显式模块加载。
-- 插件只能通过 `PluginContext.register_tool()` 注册工具，不需要修改 Agent Loop。
-- 重名工具默认拒绝，避免插件静默覆盖核心安全语义。
+- 插件只能通过 `PluginContext.register_tool()` 注册工具，并显式提供 source/version/schema hash/effect/capability；
+  缺失、冲突或部分加载默认整体拒绝，不需要修改 Agent Loop。
+- MCP discovery 同样校验本地 trusted catalog、annotations 和 schema identity；重名、名称抢占、catalog 漂移与
+  断线迟到结果 fail closed。远端调用仍经过本地参数、ACL/course、取消/timeout 与结果预算。
 
 插件包在 `pyproject.toml` 中声明：
 

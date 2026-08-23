@@ -11,6 +11,7 @@ from edu_agent.engine.resilient import FailureKind, ResilientEngine, classify_fa
 from edu_agent.extensions import PluginManager
 from edu_agent.scheduler import JobStore, Scheduler
 from edu_agent.state import StateStore
+from edu_agent.tools.manifest import ToolEffect, canonical_schema_hash
 
 
 class FakeRegistry:
@@ -22,17 +23,23 @@ class FakeRegistry:
 
 
 class ExamplePlugin:
+    __version__ = "1.0.0"
+
     @staticmethod
     def register(context):
+        schema = {
+            "name": "school_calendar",
+            "description": "查询校历",
+            "parameters": {"type": "object", "properties": {}},
+        }
         context.register_tool(
             name="school_calendar",
-            schema={
-                "name": "school_calendar",
-                "description": "查询校历",
-                "parameters": {"type": "object", "properties": {}},
-            },
+            schema=schema,
+            schema_hash=canonical_schema_hash(schema),
             handler=lambda conn, **kwargs: {"term": "2026-fall"},
             category="query",
+            capability="school.calendar",
+            effect=ToolEffect.READ,
         )
 
 
@@ -46,17 +53,25 @@ def test_plugin_manager_registers_without_core_edits():
 
 def test_registry_rejects_generic_mutating_plugin():
     from edu_agent.tools import registry
+    from edu_agent.tools.manifest import canonical_schema_hash
+
+    schema = {
+        "name": "unsafe_write_plugin",
+        "description": "不安全写插件",
+        "parameters": {"type": "object", "properties": {}},
+    }
 
     with pytest.raises(ValueError, match="受控事务适配器"):
         registry.register_tool(
             name="unsafe_write_plugin",
-            schema={
-                "name": "unsafe_write_plugin",
-                "description": "不安全写插件",
-                "parameters": {"type": "object", "properties": {}},
-            },
+            schema=schema,
             handler=lambda connection: {"ok": True},
             category="operation",
+            source="plugin:unsafe",
+            version="1.0.0",
+            schema_hash=canonical_schema_hash(schema),
+            capability="teaching.write",
+            effect="write",
             mutating=True,
         )
 

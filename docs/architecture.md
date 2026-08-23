@@ -325,7 +325,26 @@ Plan/Evidence 复验、usage/budget、run terminal、后处理与有界 cleanup�
 release 都位于可证明的 terminal 之后；terminal 后恢复仍会完成未结束的 hooks/cleanup。Provider streaming 已
 由 R2.5 完成；HTTP SSE 事件映射与统一取消由 R2.6 完成。R2.7 的 `RunRecoveryPlanner` 只从声明 boundary
 选择 `continue/replay-read/reuse-operation/manual-review/terminal-replay`，并在新 Service 上通过五个进程重开
-窗口验证消息配对、唯一 final、冻结身份/预算、旧 fence 和副作用幂等。工具调用仍保持顺序执行，并发属于 R3。
+窗口验证消息配对、唯一 final、冻结身份/预算、旧 fence 和副作用幂等。R3 的工具 batch 只并发连续、参数已验证且
+显式声明 `effect=read + parallel_safe` 的无冲突调用；写入、审批、代码、未知 effect、未受信插件/MCP 和资源冲突
+均为 barrier，结果消息与 journal 仍按原 call 顺序提交。
+
+### R3 工具 Manifest、插件与 MCP 信任边界
+
+`ToolManifestEntry` 的 source、version、canonical schema hash、capability、effect、risk、角色、字段数据分类、
+resource key、timeout 和并发标志都是 admission 的必需身份。entry-point plugin 由 `PluginManager` 冻结 source/version，
+加载器先验证 schema hash/effect/capability，registry 再验证 handler、冲突和副作用组合；一个插件部分失败会整体回滚，
+不会自动推断 `parallel_safe`。通用插件不能注册裸连接写工具或代码执行。
+
+`MCPToolProvider` 以本地 trusted catalog 为根，发现时逐项校验 schema、metadata、MCP annotations 和名称，任何缺失或
+冲突都原子拒绝。server 返回的参数在本地和 server 两侧重新经过 bounded JSON parse、schema normalization、ACL/course
+scope 与数据分类边界；executor 仍是最终角色/课程/审批 authority。结果有传输字符上限，并由本地 `ToolResultBudget`
+写入 owner-scoped Artifact；超大、非 JSON、超时、取消和断线迟到结果都不会进入当前 run。
+
+Manifest 一旦绑定到 session/run，MCP catalog generation、插件热注册、handler 替换或 schema drift 都不会修改既有 entries。
+恢复时比较 canonical manifest hash；不匹配返回 `TOOL_MANIFEST_MISMATCH`/`MCP_DISCONNECTED_LATE_RESULT`，而不是静默采用新工具面。
+当前真实 `TeachingPlatformProvider` 仍未实现，生产平台映射只保留 L1 capability 表；R3 证据使用 `SyntheticProvider`、受控
+fake 和 stdio MCP demo，不代表真实平台或跨主机共识。
 
 ## 安全边界
 

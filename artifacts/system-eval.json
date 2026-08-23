@@ -8,8 +8,8 @@
       "early_termination_rate": 0.0,
       "irrelevance": {},
       "latency_ms": {
-        "p50": 0.001833,
-        "p95": 0.003209
+        "p50": 0.002042,
+        "p95": 0.003375
       },
       "model_calls": {
         "p50": 2.0,
@@ -76,7 +76,7 @@
     "source": "offline_sqlite_crash_window_recovery",
     "status": "verified"
   },
-  "commit": "8c645099ce27b9a3f00c5ea755ab3108c8f67dad",
+  "commit": "2c483a7bdab4bbc59652d0af5711f247a0303a02",
   "config": {
     "agent_source": "offline_oracle",
     "input_hashes": {
@@ -90,10 +90,10 @@
       "edu_agent/eval/tasks.py": "af5769543b13e67de45564b19c2cda876f75f770f88156cc231a377203f77cef",
       "edu_agent/eval/tasks_derived.py": "8718976261858cd49b404e25b4d91ac6e2cf509e04c0e943bfbaad9519d9fb09",
       "edu_agent/eval/tasks_test.py": "5ad3d5cc31d4f7d7cd5c0650d7947a935d88cd3fd676f872b1b1d8218096ddb0",
-      "pyproject.toml": "79f0ecbba840c2c75725fb3fbcba030357fbfa3292fcbfd445467ba898640359",
+      "pyproject.toml": "c6e1c6fd141deba0b3d83514a6c34355a308b29b175c8945273c76b0ce2d6d09",
       "scripts/audit_eval_lineage.py": "e49e1639c19e40fe3c4633cb6b4a1a47e925f5a0b368a24e3f87fee5cabb34fd",
-      "scripts/eval_system.py": "996e3afa1494d084000d53ed9eed8b0093b8f4998df1f086a85975ea97cf6112",
-      "uv.lock": "532efde753958567081d3a4957302e3b2695cd69c0f7fbe97db27c9a42b3a65c"
+      "scripts/eval_system.py": "8f7ac8e17951289a07b12a37d7ff3e7b77e8cd8d807e0c70511270f7a560fc14",
+      "uv.lock": "48977aafec9e01daa735c7232c326f209555e858dad0c3fa5fb9e443771608aa"
     },
     "lineage_manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
     "model": {
@@ -110,7 +110,7 @@
     "test_seed": 314,
     "test_task_count": 6
   },
-  "config_hash": "494294e8d46fbd41f687b0c844126f68f63bb5bd6bc98573893e5fc9d6ea06f0",
+  "config_hash": "4c0ebe130bbf007fe1a9e877213539aae4584236b89bb4a4767a891bc0e16fa7",
   "environment": {
     "architecture": "arm64",
     "os": "Darwin",
@@ -132,7 +132,7 @@
   },
   "evidence_mode": "development",
   "failed_trajectories": null,
-  "generated_at": "2026-08-21T14:49:32.181464+00:00",
+  "generated_at": "2026-08-23T14:06:43.461517+00:00",
   "git": {
     "available": true,
     "dirty": true
@@ -251,9 +251,9 @@
   "multi_agent": {
     "metrics": {
       "hidden_cost_model_calls": 0,
-      "parallel_elapsed_seconds": 0.067778,
+      "parallel_elapsed_seconds": 0.074051,
       "permission_leak_rate": 0.0,
-      "scheduling_overhead_seconds": 0.037778,
+      "scheduling_overhead_seconds": 0.044051,
       "success_rate": 1.0
     },
     "source": "offline_teaching_delegation_runtime",
@@ -267,8 +267,8 @@
         "p95": 3.0
       },
       "model_latency_ms": {
-        "p50": 0.001833,
-        "p95": 0.003209
+        "p50": 0.002042,
+        "p95": 0.003375
       },
       "tokens": {
         "input": 0,
@@ -279,7 +279,7 @@
         "p50": 1.0,
         "p95": 2.0
       },
-      "wall_seconds": 0.567525
+      "wall_seconds": 0.80255
     },
     "real_model": {
       "metrics": null,
@@ -318,11 +318,11 @@
   },
   "reliability": {
     "metrics": {
-      "cancel_latency_ms": 1.020584,
+      "cancel_latency_ms": 0.879916,
       "cancel_requested": 1,
       "circuit_or_fallback_hit": 1,
       "lease_fencing_conflicts": 1,
-      "provider_events": 3,
+      "provider_events": 7,
       "provider_recovery_rate": 1.0,
       "recovery_success_rate": 1.0
     },
@@ -338,17 +338,17 @@
   "schema_version": "edu-agent.system-eval.v4",
   "seed": 42,
   "trace_scaling": {
-    "config_hash": "5813d7f4d78efdf0a3c707924a3458a5093c860b5754673e0d5470a8583160d9",
+    "config_hash": "68acadb184c6902728cf8b8530a71946d79a3add54712969271bbdef0b149910",
     "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
     "metrics": {
       "digest": "6cb9f01a5bfa291d3b38050fceba53d4ca0f9a8ebab6dae3158a466e4b000cb6",
-      "elapsed_seconds": 0.08129,
-      "events_per_second": 12313.938,
+      "elapsed_seconds": 0.081487,
+      "events_per_second": 12284.168,
       "exported_events": 1001,
       "indexed_events": 1000,
       "max_rows_loaded_per_page": 65,
       "pages": 16,
-      "peak_memory_bytes": 250625,
+      "peak_memory_bytes": 251113,
       "projected_events": 1001,
       "rows_loaded": 1016,
       "sql_queries": 33

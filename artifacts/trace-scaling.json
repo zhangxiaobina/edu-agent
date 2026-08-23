@@ -4,15 +4,15 @@
     "complete": true,
     "no_page_times_full_projection": true
   },
-  "commit": "8c645099ce27b9a3f00c5ea755ab3108c8f67dad",
+  "commit": "2c483a7bdab4bbc59652d0af5711f247a0303a02",
   "config": {
     "event_count": 10000,
     "input_hashes": {
-      "edu_agent/observability/trace.py": "84c423ea3e8e945d3e9a75de95acc3f46643d38720976511bda09370b8fb0fc2",
+      "edu_agent/observability/trace.py": "824f97f7b87a8049acbb73b3cabec8f88820121f3286a355caab12d0af6a933c",
       "edu_agent/state/trace_index.py": "0cb9795566f0a206cfb3442dff0c8e7733930873a8cee4739ebe178c7a1f52f2",
-      "pyproject.toml": "79f0ecbba840c2c75725fb3fbcba030357fbfa3292fcbfd445467ba898640359",
+      "pyproject.toml": "c6e1c6fd141deba0b3d83514a6c34355a308b29b175c8945273c76b0ce2d6d09",
       "scripts/benchmark_trace_scaling.py": "dd24991808678e2f909206198e47bc81517bcb92f52b1ccc41a1f6141f466ef9",
-      "uv.lock": "532efde753958567081d3a4957302e3b2695cd69c0f7fbe97db27c9a42b3a65c"
+      "uv.lock": "48977aafec9e01daa735c7232c326f209555e858dad0c3fa5fb9e443771608aa"
     },
     "model": {
       "mode": "offline_runtime_benchmark",
@@ -21,7 +21,7 @@
     "page_size": 100,
     "seed": 42
   },
-  "config_hash": "1f5ccacfeb68a5b695a2f7c76af5c37ce9e3a4381a20cfdcd50c3c32cc4a1bbc",
+  "config_hash": "1d941f8059f801d10dbade3db183cfec98d85564e911fb30902858a390e1fec0",
   "environment": {
     "architecture": "arm64",
     "os": "Darwin",
@@ -31,7 +31,7 @@
     "sqlite": "3.50.4"
   },
   "evidence_mode": "development",
-  "generated_at": "2026-08-21T14:49:27.151447+00:00",
+  "generated_at": "2026-08-23T14:06:24.185147+00:00",
   "git": {
     "available": true,
     "dirty": true
@@ -39,13 +39,13 @@
   "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
   "metrics": {
     "digest": "3d8820b4646b700465464c2521f5db647f2c1215817fdee0aa240ac3517f891d",
-    "elapsed_seconds": 0.788119,
-    "events_per_second": 12689.701,
+    "elapsed_seconds": 0.786883,
+    "events_per_second": 12709.643,
     "exported_events": 10001,
     "indexed_events": 10000,
     "max_rows_loaded_per_page": 101,
     "pages": 101,
-    "peak_memory_bytes": 386034,
+    "peak_memory_bytes": 386322,
     "projected_events": 10001,
     "rows_loaded": 10101,
     "sql_queries": 203

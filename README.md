@@ -12,7 +12,7 @@ HTTP / Scheduler / Demo
 
 核心不变量：system prompt 在会话内保持字节稳定；tool call/result 原子配对；权限、课程范围、审批、预算在执行层复验；同 session 由 SQLite lease 单飞并以 fencing token 拒绝旧 Worker；写入是“至少一次调度 + 幂等业务键/消费”，不宣称 exactly-once；trace 导出前再次执行 owner scope 与中心脱敏。
 
-技术亮点：16 个教学工具复用本地/MCP `ToolProvider -> ToolResult` 窄边界；10 个查询/分析/图谱切片和 5 个教学 command 共用 canonical `TeachingDataProvider`，替换契约 fake 不改 Agent 图或 ToolManifest；`run_code` 独立依赖 `CodeExecutionProvider`。PlanGraph 只接受真实工具事件、完整 Artifact 或验真的 citation；教学写入的业务变更、operation 和 outbox 在同一教学库事务提交；Trace Repository 只投影已有运行状态。
+技术亮点：16 个教学工具复用本地/MCP `ToolProvider -> ToolResult` 窄边界；每个 run 冻结带 source/version/schema hash/effect/capability 的 `ToolManifest`，模型可见面与 executor 二次鉴权使用同一快照；10 个查询/分析/图谱切片和 5 个教学 command 共用 canonical `TeachingDataProvider`，替换契约 fake 不改 Agent 图或 Manifest；`run_code` 独立依赖 `CodeExecutionProvider`。PlanGraph 只接受真实工具事件、完整 Artifact 或验真的 citation；教学写入的业务变更、operation 和 outbox 在同一教学库事务提交；Trace Repository 只投影已有运行状态。
 
 数据红线：仓库只使用固定 seed 的合成教学数据和公开材料；真实学生数据、业务代码、API key、cookie、审批秘密不进入仓库、trace 或 Artifact preview。代码执行默认关闭，只有同一真实后端完成健康、能力与 E2E attestation 后才暴露 `run_code`。
 
@@ -75,9 +75,10 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
 └──────────────────┘   └──────────────────┘   └──────────────────┘   └──────────────────┘
 ```
 
-- **教学领域 + 工具层**：`SyntheticProvider` 执行 10 个 canonical query 和 5 个 canonical command，handler 只映射 schema/context 与原 JSON。`create_exam`/`batch_grade`/`assign_homework` 以及保存题库的 `generate_questions` 只能由 executor 签发 `ToolOperation`，Provider 复验同库事务、payload/idempotency/scope 和未过期审批，不自行 commit。纯出题与 `generate_paper` 不建 operation；`run_code` 不经教学库抽象。
+- **教学领域 + 工具层**：`SyntheticProvider` 执行 10 个 canonical query 和 5 个 canonical command，handler 只映射 schema/context 与原 JSON。`create_exam`/`batch_grade`/`assign_homework` 以及保存题库的 `generate_questions` 只能由 executor 签发 `ToolOperation`，Provider 复验同库事务、payload/idempotency/scope 和未过期审批，不自行 commit。纯出题与 `generate_paper` 不建 operation；`run_code` 不经教学库抽象。真实 `TeachingPlatformProvider` 尚未实现，仍属于候选版后的 L1 私有平台接入。
 - **引擎层**：`EDU_AGENT_ENGINE` 环境变量切换（离线 mock / 通义千问 / 本地 vLLM / 算法仓 W4A16 端点），同一张图复用。
-- **工具来源可切换**：默认本地直调；同一批工具也可暴露为 **MCP server**（stdio 传输），Agent 经 **MCP 协议**往返调用（`MCPToolProvider` 与本地 registry 同契约，图 / 引擎均无需改动）。见 `edu_agent/mcp/` 与 `scripts/mcp_demo.py`。
+- **工具来源可切换**：默认本地直调；同一批工具也可暴露为 **MCP server**（stdio 传输），Agent 经 **MCP 协议**往返调用（`MCPToolProvider` 与本地 registry 同契约，图 / 引擎均无需改动）。MCP/entry-point plugin 的 discovery 必须通过 source/version/schema hash/effect/capability 信任目录；缺失、冲突、名称抢占或 schema 漂移 fail closed。每次远端调用仍在本地做参数规范化、ACL/course scope、超时/取消和结果预算检查。见 `edu_agent/mcp/` 与 `scripts/mcp_demo.py`。
+- **冻结 Manifest 与安全并发**：run/session 绑定 Manifest 后，插件热变更、MCP 重连或断线迟到结果不能扩大执行面；恢复 hash 不匹配返回明确错误。连续的、已验证的只读调用才可进入有界 worker segment，写入、审批、代码、未知 effect、插件/MCP 未明确 opt-in 或资源冲突调用保持 barrier，结果仍按原 call 顺序提交。
 - **可靠 Agent Runtime**：`EduAgentService` 统一管理身份/租户、模型与工具预算、短期会话、
   FTS5 长期记忆、上下文窗口、角色工具面、写操作审批、运行轨迹和审计；插件与 MCP 共用
   ToolProvider 契约，SQLite Scheduler 使用租约领取计划任务。详见
@@ -127,8 +128,9 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   强杀的同步调用返回后仍必须通过 token/fence 才能提交。R2 恢复 planner 只从持久稳定 cursor 选择
   `continue/replay-read/reuse-operation/manual-review/terminal-replay`；进程重开会复验冻结 route/manifest、恢复
   原预算，并让旧 writer 的每次 publish 重新经过持久 fence。模型返回、envelope、只读 result、写 commit 和
-  final message 五个窗口均用关闭旧 Service、重开同一 SQLite 的 fixture 验证。EventBus 仍不保存历史 delta，
-  工具仍顺序执行。OTLP 默认关闭；只有安装
+  final message 五个窗口均用关闭旧 Service、重开同一 SQLite 的 fixture 验证。EventBus 仍不保存历史 delta；工具
+  只对显式 `parallel_safe` 的无副作用只读 segment 使用有界并发，写/审批/代码和未知调用仍是 barrier，模型结果与
+  journal 按原顺序提交。OTLP 默认关闭；只有安装
   `otel` extra 并显式配置 endpoint 后才尝试导出，失败不击穿主路径。
 
 ## 目录结构

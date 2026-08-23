@@ -866,7 +866,8 @@ def register_tool(
     handler: Callable,
     category: str,
     source: str = "plugin:unknown",
-    version: str = "0.0.0",
+    version: str | None = None,
+    schema_hash: str | None = None,
     capability: str | Iterable[str] | None = None,
     risk: ToolRisk | str | None = None,
     risk_level: str | None = None,
@@ -896,6 +897,26 @@ def register_tool(
         raise ToolRegistrationError("插件 source 必须是字符串")
     if source == "builtin" or source.startswith("builtin:"):
         raise ToolRegistrationError("插件不能声明保留的 builtin source")
+    is_dynamic = not (source == "builtin" or source.startswith("builtin:"))
+    if source == "plugin:unknown":
+        raise ToolRegistrationError("插件必须提供可验证 source")
+    if is_dynamic:
+        missing = [
+            key
+            for key, value in (
+                ("version", version),
+                ("schema_hash", schema_hash),
+                ("capability", capability),
+                ("effect", effect),
+            )
+            if value in (None, "")
+        ]
+        if missing:
+            raise ToolRegistrationError(
+                "动态工具缺少必需的可验证元数据: " + ", ".join(missing)
+            )
+        if ToolEffect.parse(effect) is ToolEffect.UNKNOWN:
+            raise ToolRegistrationError("动态工具 effect=unknown 默认拒绝注册")
     if mutating or mutation_parameters:
         raise ToolRegistrationError("通用插件不能注册裸连接写工具；请实现受控事务适配器")
     if resource_keys is not None and resource_key_rules is not None:
@@ -934,7 +955,8 @@ def register_tool(
             _ALL_ROLES if allowed_roles is None else frozenset(allowed_roles)
         ),
         source=source,
-        version=version,
+        version=version or "0.0.0",
+        schema_hash=schema_hash,
         capability=capability,
         effect=effect,
         parallel_safe=parallel_safe,

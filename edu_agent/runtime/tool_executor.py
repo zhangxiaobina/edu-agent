@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -627,7 +628,10 @@ class PolicyToolExecutor:
                     frozen_manifest,
                 )
             context.check_control("tool.after_call")
-            if isinstance(result, dict) and isinstance(
+            scope_error = self._provider_result_scope_error(result, context)
+            if scope_error is not None:
+                outcome = ToolOutcome(False, error=scope_error)
+            elif isinstance(result, dict) and isinstance(
                 result.get("_teaching_provider_error"), dict
             ):
                 outcome = self._teaching_provider_error(
@@ -671,6 +675,98 @@ class PolicyToolExecutor:
             argument_meta=argument_meta,
             data_classification=data_classification,
         )
+
+    @staticmethod
+    def _provider_result_scope_error(result: Any, context: RunContext) -> dict | None:
+        """Reject a provider result that claims an identity outside the run scope.
+
+        A provider is an extension boundary, so input ACL checks alone are not
+        enough: a buggy or malicious adapter must not be able to return rows
+        tagged with another course/tenant and have them reach the model.
+        Error payloads are already converted to a typed failure and are not
+        scanned as business data.
+        """
+
+        if not isinstance(result, (dict, list, tuple)):
+            return None
+        if isinstance(result, dict) and "error" in result:
+            return None
+        role = getattr(context, "role", None)
+        course_ids = frozenset(getattr(context, "course_ids", ()) or ())
+        tenant_id = getattr(context, "tenant_id", None)
+        actor_id = getattr(context, "actor_id", None)
+        if role in {"admin", "system"}:
+            course_ids = frozenset()
+        nodes = 0
+
+        def as_int(value: Any) -> int | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                try:
+                    return int(value.strip())
+                except ValueError:
+                    return None
+            return None
+
+        def walk(value: Any, depth: int = 0) -> dict | None:
+            nonlocal nodes
+            nodes += 1
+            if nodes > 4096 or depth > 32:
+                return {
+                    "code": "PROVIDER_RESULT_LIMIT",
+                    "message": "Provider result exceeds scope inspection budget",
+                }
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    normalized = str(key).strip().lower().replace("-", "_")
+                    if normalized == "course_id" and course_ids:
+                        candidate = as_int(child)
+                        if candidate is not None and candidate not in course_ids:
+                            return {
+                                "code": "PROVIDER_SCOPE_VIOLATION",
+                                "message": "Provider result contains a course outside the run scope",
+                            }
+                    elif normalized in {"course_ids", "course_ids_json"} and course_ids:
+                        values = child
+                        if normalized == "course_ids_json" and isinstance(child, str):
+                            try:
+                                values = json.loads(child)
+                            except (TypeError, ValueError, json.JSONDecodeError):
+                                values = ()
+                        if isinstance(values, (list, tuple, set, frozenset)):
+                            for item in values:
+                                candidate = as_int(item)
+                                if candidate is not None and candidate not in course_ids:
+                                    return {
+                                        "code": "PROVIDER_SCOPE_VIOLATION",
+                                        "message": "Provider result contains a course outside the run scope",
+                                    }
+                    elif normalized in {"tenant_id", "owner_tenant_id"} and tenant_id is not None:
+                        if isinstance(child, str) and child != str(tenant_id):
+                            return {
+                                "code": "PROVIDER_SCOPE_VIOLATION",
+                                "message": "Provider result contains another tenant identity",
+                            }
+                    elif normalized in {"actor_id", "owner_id"} and actor_id is not None:
+                        if isinstance(child, str) and child != str(actor_id):
+                            return {
+                                "code": "PROVIDER_SCOPE_VIOLATION",
+                                "message": "Provider result contains another owner identity",
+                            }
+                    violation = walk(child, depth + 1)
+                    if violation is not None:
+                        return violation
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                for child in value:
+                    violation = walk(child, depth + 1)
+                    if violation is not None:
+                        return violation
+            return None
+
+        return walk(result)
 
     @staticmethod
     def _code_approval_arguments(arguments: dict) -> dict:

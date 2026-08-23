@@ -160,6 +160,7 @@ def test_registration_validates_schema_handler_conflict_and_metadata(monkeypatch
         category="query",
         source="plugin:test",
         version="1.0.0",
+        schema_hash=canonical_schema_hash(_schema(name)),
         capability="teaching.query",
         risk="low",
         effect=ToolEffect.READ,
@@ -181,24 +182,16 @@ def test_registration_validates_schema_handler_conflict_and_metadata(monkeypatch
         registry.TOOL_FUNCTIONS.pop(name, None)
 
 
-def test_unknown_plugin_defaults_highest_risk_nonparallel_and_hidden():
+def test_unknown_plugin_metadata_is_rejected_at_admission():
     name = "r31_unknown_plugin"
-    registry.register_tool(
-        name=name,
-        schema=_schema(name),
-        handler=_handler,
-        category="query",
-        source="plugin:unknown",
-    )
-    try:
-        spec = registry.get_spec(name)
-        assert spec.risk_level == "critical"
-        assert spec.parallel_safe is False
-        assert spec.capability is None
-        assert name not in {item["function"]["name"] for item in registry.openai_tools()}
-    finally:
-        registry.TOOL_SPECS.pop(name, None)
-        registry.TOOL_FUNCTIONS.pop(name, None)
+    with pytest.raises(ToolRegistrationError, match="可验证"):
+        registry.register_tool(
+            name=name,
+            schema=_schema(name),
+            handler=_handler,
+            category="query",
+            source="plugin:unknown",
+        )
 
 
 def test_effect_is_explicit_and_plugin_side_effects_fail_closed():
@@ -210,6 +203,8 @@ def test_effect_is_explicit_and_plugin_side_effects_fail_closed():
             handler=_handler,
             category="operation",
             source="plugin:effect",
+            version="1.0.0",
+            schema_hash=canonical_schema_hash(_schema(name)),
             capability="teaching.write",
             risk="high",
             effect=ToolEffect.WRITE,
@@ -222,6 +217,8 @@ def test_effect_is_explicit_and_plugin_side_effects_fail_closed():
             handler=_handler,
             category="execution",
             source="plugin:effect",
+            version="1.0.0",
+            schema_hash=canonical_schema_hash(_schema(name)),
             capability="code_execution",
             risk="critical",
             effect=ToolEffect.CODE_EXECUTION,

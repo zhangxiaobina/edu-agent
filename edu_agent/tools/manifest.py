@@ -146,7 +146,14 @@ def canonical_schema(schema: Mapping[str, Any]) -> str:
 
     if not isinstance(schema, Mapping):
         raise ToolRegistrationError("tool schema 必须是 object")
-    return canonical_json(dict(schema))
+    normalized = _thaw_json(schema)
+    parameters = normalized.get("parameters")
+    if isinstance(parameters, dict):
+        # Hash the same strict form used by admission/validation.  This makes
+        # an omitted default ``additionalProperties`` declaration deterministic
+        # instead of creating two identities for one effective schema.
+        strictify_object_schemas(parameters)
+    return canonical_json(normalized)
 
 
 def canonical_schema_hash(schema: Mapping[str, Any]) -> str:
@@ -922,7 +929,34 @@ class ToolManifest:
         )
 
     def to_openai_tools(self) -> list[dict[str, Any]]:
-        return [entry.to_openai_tool() for entry in self.entries]
+        tools: list[dict[str, Any]] = []
+        for entry in self.entries:
+            tool = entry.to_openai_tool()
+            # Keep the immutable registration schema/hash as the executor
+            # identity, while narrowing the model-facing course selectors to
+            # the run scope.  An empty scope retains the legacy unrestricted
+            # meaning; a concrete scope is always represented in the schema.
+            if (
+                self.course_ids
+                and self.role not in {"admin", "system"}
+            ):
+                parameters = tool["function"].get("parameters", {})
+                properties = parameters.get("properties", {})
+                course = properties.get("course_id") if isinstance(properties, Mapping) else None
+                if isinstance(course, Mapping):
+                    narrowed = dict(course)
+                    declared = narrowed.get("enum")
+                    allowed = sorted(self.course_ids)
+                    if isinstance(declared, list):
+                        allowed = [value for value in allowed if value in declared]
+                    narrowed["enum"] = allowed
+                    properties = dict(properties)
+                    properties["course_id"] = narrowed
+                    parameters = dict(parameters)
+                    parameters["properties"] = properties
+                    tool["function"]["parameters"] = parameters
+            tools.append(tool)
+        return tools
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -934,6 +968,41 @@ class ToolManifest:
             "entries": [entry.to_dict() for entry in self.entries],
         }
 
+
+def is_scope_narrowed_schema(
+    candidate: Mapping[str, Any],
+    base: Mapping[str, Any],
+    *,
+    course_ids: Iterable[int] = (),
+    role: str | None = None,
+) -> bool:
+    """Accept only the model-facing course enum narrowing of a base schema."""
+
+    if role in {"admin", "system"} or not course_ids:
+        return False
+    try:
+        candidate_copy = _thaw_json(candidate)
+        base_copy = _thaw_json(base)
+        candidate_parameters = candidate_copy["parameters"]
+        base_parameters = base_copy["parameters"]
+        candidate_properties = candidate_parameters["properties"]
+        base_properties = base_parameters["properties"]
+        course = candidate_properties.get("course_id")
+        base_course = base_properties.get("course_id")
+        if not isinstance(course, Mapping) or not isinstance(base_course, Mapping):
+            return False
+        allowed = sorted(int(item) for item in course_ids)
+        declared = base_course.get("enum")
+        if isinstance(declared, (list, tuple)):
+            allowed = [value for value in allowed if value in declared]
+        if course.get("enum") != allowed:
+            return False
+        candidate_properties["course_id"] = base_course
+        candidate_parameters["properties"] = candidate_properties
+        candidate_copy["parameters"] = candidate_parameters
+        return canonical_schema_hash(candidate_copy) == canonical_schema_hash(base_copy)
+    except (KeyError, TypeError, ValueError):
+        return False
 
 def manifest_from_tools(
     tools: Iterable[Mapping[str, Any]],
@@ -1041,6 +1110,7 @@ __all__ = [
     "manifest_entry_from_spec",
     "manifest_entry_matches",
     "normalize_capability",
+    "is_scope_narrowed_schema",
     "schema_hash",
     "validate_function_schema",
     "validate_handler_contract",
