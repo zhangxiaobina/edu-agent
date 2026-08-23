@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R3.2
-- next_prompt: R3.3
+- last_completed_prompt: R3.3
+- next_prompt: R3.4
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1 ToolManifest 与 R3.2 只读 TeachingDataProvider 切片已通过，R3 总门禁仍需 R3.3-R3.6 的写工具契约、参数治理、并发和插件/MCP 收口
+- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1 ToolManifest、R3.2 只读 TeachingDataProvider 与 R3.3 教学 command/16 工具契约矩阵已通过，R3 总门禁仍需 R3.4-R3.6 的参数治理、安全并发和插件/MCP 收口
 
 ## Baseline Reproduction
 
@@ -811,3 +811,40 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R3.2 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
 - next: R3.3，读取本交接和事务/写工具实现，为剩余教学工具建立 canonical command/receipt/error；保留审批、
   幂等、同库事务、outbox/补偿，不做参数修复或工具并发，也不把 `run_code` 塞入教学数据 Provider。
+
+### R3.3 - 2026-08-23
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `9f1dada6ba3fa1d27d0c2ad8378714c73641693f` 开始；本次未创建本地提交或推送，未覆盖用户既有改动。
+- canonical commands: 新增 `TeachingCommandKind/Effect`、`TeachingCommand`、executor 签发的
+  `TeachingOperationContext`、`TeachingReceipt/TeachingCommandResult` 和结构化 command 错误；
+  `create_exam`、`generate_paper`、`batch_grade`、`assign_homework`、`generate_questions` 的稳定 SQL 实现迁入
+  `SyntheticProvider`，原工具 handler 只保留 schema/context 到 canonical command/原 JSON 的薄映射，并删除
+  已被 Provider 取代的重复 SQL 调度与 `_resolve_kp_uid`。
+- write safety: 恒定写入和保存题库分支只能经 `PolicyToolExecutor -> dispatch_transactional`；Provider 在同一
+  教学库连接内复验 operation executing 状态、tool/payload hash、idempotency key、approval scope 和未过期审批，
+  自身不 commit。业务拒绝通过 typed error 穿过事务层并回滚；原 operation/outbox、commit 后回执重放、补偿和
+  `manual_review` 状态机保持不变。SyntheticProvider 与 contract fake 的直接写调用均无法绕过 executor。
+- effects/boundaries: 参数先经冻结 schema 校验，再由 `save_to_bank` 判定 `generate_questions` 是 pure 还是 write；
+  `generate_paper` 是不落库的 read command。`run_code` 保持独立 `CodeExecutionProvider` capability，不创建教学库
+  连接。新增正式 `ToolResult` 名称并保留 `ToolOutcome` 兼容别名，16 个内置工具均经统一
+  `ToolProvider -> ToolResult` 边界；替换教学 contract fake 不改变 Agent 图或 ToolManifest，MCP 本地/远端返回
+  形状与写入拒绝回执保持兼容。
+- contracts/docs: 新增 16 工具 capability/effect/boundary 矩阵，并覆盖成功、业务拒绝、缺审批、重复 request/
+  idempotency、commit 后崩溃恢复、`manual_review`、outbox 重投消费去重、直接与间接 course scope、fake Provider
+  安全门和 Agent 替换。架构文档记录未来 `TeachingPlatformProvider` 所需 query/analysis/knowledge/write/content
+  capability 映射，本阶段未实现真实连接。
+- migrations/config: 无数据库 migration、依赖、环境变量或 AppConfig 变更；未实现 R3.4 参数修复或 R3.5 并发。
+- verification: 最终工具、事务、MCP、Agent 工具消息、Plan/Evidence/RAG、Teaching Provider、16 工具矩阵、
+  代码执行与 ToolManifest 显式组合回归 `159 passed (9.20s)`；显式清空真实模型/平台凭据、禁用外部 pytest
+  plugin 的全量离线回归 `469 passed (28.81s)`。
+  `uv lock --check`、`uv run --frozen --offline uv pip check`、全仓 ruff 和 `git diff --check` 均通过；只读数据
+  边界审计扫描 3 个 artifact，`findings=[]`。
+- not_verified: 未访问公网、真实模型、真实教学平台/生产 ORM/API、Docker/Jobe 或 GitHub-hosted CI。R3.3 不是
+  阶段收口会话，按通用协议未运行完整 `zsh scripts/accept_stage8.sh`；不能把 synthetic/fake 合同测试写成真实
+  TeachingPlatform 集成已验证。
+- residual_risks: 未来平台适配仍需将业务 request/idempotency key、固定 receipt、实体级 scope、outbox/补偿能力
+  映射到真实 API，并明确不支持同库事务时的失败与恢复语义。当前工具仍严格顺序执行；参数规范化/repair audit、
+  并发资源冲突和远端插件/MCP 最终收口分别留给后续 R3 会话。
+- gate: `R3.3 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
+- next: R3.4，建立 schema-guided 参数规范化、单次 repair 与审计；保持工具顺序执行，不提前实现 R3.5 并发。

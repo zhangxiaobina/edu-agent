@@ -55,6 +55,14 @@ def test_mcp_dispatch_matches_registry(provider):
     """同一工具、同参数，经 MCP 往返的结果与本地直调一致。"""
     args = {"class_id": 3, "course_id": 1}
     assert provider.dispatch("list_exams", args) == _norm(registry.dispatch("list_exams", args))
+    paper_args = {"question_bank_id": 1, "total_questions": 2}
+    assert provider.dispatch("generate_paper", paper_args) == _norm(
+        registry.dispatch("generate_paper", paper_args)
+    )
+    question_args = {"course_id": 1, "knowledge_point": "递归", "count": 1}
+    assert provider.dispatch("generate_questions", question_args) == _norm(
+        registry.dispatch("generate_questions", question_args)
+    )
 
 
 def test_mcp_unknown_tool_returns_error(provider):
@@ -68,6 +76,13 @@ def test_mcp_write_cannot_bypass_transaction_runtime(provider):
         {"exam_name": "不应创建", "class_id": 3, "course_id": 1},
     )
     assert result["error"] == "MCP_WRITE_REQUIRES_TRANSACTIONAL_ADAPTER"
+    assert "message" in result
+    local = registry.dispatch(
+        "create_exam",
+        {"exam_name": "不应创建", "class_id": 3, "course_id": 1},
+    )
+    assert local["code"] == "TRANSACTIONAL_EXECUTOR_REQUIRED"
+    assert "error" in local and "message" in local
 
 
 def test_mcp_multistep_trajectory_matches_local(provider):

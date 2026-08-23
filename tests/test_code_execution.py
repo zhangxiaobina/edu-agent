@@ -141,6 +141,25 @@ def test_healthy_capable_provider_exposes_schema_and_approval_binds_request():
     assert approval.arguments["network_policy"] == "disabled"
 
 
+def test_run_code_does_not_open_the_teaching_database(monkeypatch):
+    provider = FakeProvider()
+    registry.configure_code_execution(provider)
+
+    def fail_if_opened(*args, **kwargs):
+        raise AssertionError("run_code must not open the teaching database")
+
+    monkeypatch.setattr(registry.db, "connect", fail_if_opened)
+    outcome = PolicyToolExecutor(
+        registry,
+        policy=ExecutionPolicy(
+            allow_local_code_execution=True,
+            require_code_execution_approval=False,
+        ),
+    ).execute("run_code", {"source_code": "print(2)"}, _context())
+    assert outcome.ok is True
+    assert len(provider.requests) == 1
+
+
 def test_changed_source_changes_approval_payload_hash():
     provider = FakeProvider()
     registry.configure_code_execution(provider)

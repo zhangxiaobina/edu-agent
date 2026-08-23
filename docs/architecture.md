@@ -12,7 +12,7 @@ flowchart LR
     API --> Service
     Service --> Engine[模型 Engine]
     Service --> Tools[本地 / MCP ToolProvider]
-    Tools --> Teaching[Canonical TeachingDataProvider]
+    Tools --> Teaching[Canonical Teaching Query / Command Provider]
     Teaching --> LMS[(合成教学 SQLite)]
     Tools --> Knowledge[课件 KnowledgeProvider]
     Tools --> Code[代码执行 Provider]
@@ -33,7 +33,8 @@ flowchart LR
 | `EduAgentService` | 组装上下文、运行与恢复、统一能力门面 | `runs/messages` | 绕过执行器直接 dispatch 写工具 |
 | `Agent Loop` | 模型/工具交替和 Plan 完成门 | Plan/Evidence、tool event | synthetic user reflect、把模型自述当证据 |
 | `PolicyToolExecutor` | 参数、角色、范围、审批、预算复验 | operation/outbox/artifact | 把 Prompt 当安全边界 |
-| `TeachingDataProvider` | 规范化教学查询、结果、错误和课程范围 | 当前为合成教学库只读切片 | 暴露表名/Row/生产 ORM、路由模型请求 |
+| `TeachingDataProvider` | 规范化 10 个 query、5 个 command、receipt/error 和课程范围 | 合成教学库；写入加入 executor 的同库事务 | 自行审批/commit、暴露表名/ORM、代码执行 |
+| `CodeExecutionProvider` | 隔离执行请求/结果、健康与安全 capability | Jobe / Docker adapter | 教学数据读写、ToolOperation |
 | `RuntimeManager` | session lease、heartbeat、fencing、取消 | `session_leases/runs` | 宣称跨主机共识 |
 | `TraceRepository` | owner-scoped keyset 查询与分页导出 | 可重建 `trace_event_index` | 修改业务状态、读取 Artifact 全文 |
 
@@ -77,21 +78,20 @@ primary/fallback route plan 在 turn 起点冻结；fallback 只允许连接、�
 旧 attempt 或旧 route 迟到的事件转成可审计 ignored，不进入聚合结果。R2.6 将胜出流映射为 HTTP SSE，
 Provider/Agent 失败统一结束为 typed error，terminal 后 writer 拒绝所有 delta。
 
-## 教学数据 Provider 防腐层
+## 教学 Provider 防腐层
 
-R3.2 的 `edu_agent.teaching` 是教学领域数据边界，不是上节 R1 的模型 `ProviderGateway`。三类现有
+R3.2-R3.3 的 `edu_agent.teaching` 是教学领域数据边界，不是上节 R1 的模型 `ProviderGateway`。三类现有
 Provider 的职责不能互换：
 
 | 边界 | 输入/输出 | 当前实现 | 不负责 |
 |---|---|---|---|
 | 模型 `ProviderGateway` | messages/tools -> 模型 stream/usage | Chat Completions / Responses adapter | 成绩、考试或课程数据 |
-| `TeachingDataProvider` | `TeachingQuery` -> `TeachingResult` / 稳定错误 | registry-backed `SyntheticProvider` | 模型路由、真实平台连接 |
+| `TeachingDataProvider` | `TeachingQuery/Command` -> `TeachingResult/Receipt` / 稳定错误 | registry-backed `SyntheticProvider` | 模型路由、代码执行、真实平台连接 |
 | 课件 `KnowledgeProvider` | tenant/course 检索 -> chunk/citation | SQLite FTS5 + 可选语义检索 | 教务关系查询、模型路由 |
 
-当前 canonical teaching contract 仅覆盖 10 个已迁移的查询/分析/知识图谱切片：成绩、考试、班级名单、
-题目、学习进度、错题、薄弱点、成绩分布、图查询和学习路径。`TeachingQueryKind` 固定业务动作，
+当前 canonical teaching contract 覆盖 10 个查询/分析/图谱切片，以及 `create_exam`、`generate_paper`、`batch_grade`、`assign_homework`、`generate_questions` 5 个 command。`TeachingQueryKind/TeachingCommandKind` 固定业务动作，
 `TeachingScope` 携带 actor/tenant/role/course 边界，`TeachingProviderErrorKind` 将失败归一为
-`invalid_query/not_found/scope_denied/unavailable/internal`。`TeachingResult` 在构造时复制并校验 JSON
+`invalid_query/invalid_command/not_found/business_rejected/scope_denied/approval_required/unsupported/unavailable/internal`。`TeachingResult/TeachingReceipt` 在构造时复制并校验 JSON
 基础类型，因此不会把 `sqlite3.Row`、表结构或未来生产 ORM 对象送到工具层。
 
 `query_tools`、`analysis_tools` 和 `kg_tools` 只做 schema/context -> canonical query -> 原工具 JSON 映射；
@@ -99,9 +99,21 @@ Agent 图、Plan/Evidence、ToolManifest 和 MCP 仍只看到原工具契约。r
 业务连接；`SyntheticProvider` 每次调用通过 connection factory 获取并关闭一个连接，MCP worker 因而不会
 跨线程共享 `sqlite3.Connection`。只有调用方已经拥有受控事务边界时才能显式传入连接，Provider 不关闭它。
 
-本阶段没有 `TeachingPlatformProvider`，没有生产数据库配置、私有 DDL 或真实数据 fixture；写工具、条件写入
-和只读 `generate_paper` 的统一 Provider 收口留在 R3.3。课件 RAG 继续使用独立 tenant/course ACL 和 citation
-解析，迁移教学关系查询不会改变 Evidence 的 citation 验证语义。
+`generate_questions` 的实际 effect 在 schema 校验后按 `save_to_bank` 派生：纯生成为 pure，保存题库为 write。写 command 只能由 `PolicyToolExecutor` 签发 operation；`SyntheticProvider` 在同一连接内复验 executing 状态、payload hash、idempotency key、scope 和未过期审批，不 commit。业务变更、committed receipt 和 outbox 仍由原 `TransactionalToolRuntime` 原子提交，原补偿/manual_review 状态机不变。
+
+`run_code` 始终是独立 `CodeExecutionProvider` capability，registry 不再为它打开教学库连接。16 个内置工具最终都由 executor 将 ToolProvider payload 归一为 `ToolResult`；契约 fake 替换后 Agent 图不变，fake 写入仍不能跳过 executor。
+
+### 未来 TeachingPlatform capability 映射
+
+| capability | canonical 动作 | 未来平台适配必须提供 |
+|---|---|---|
+| `teaching.query` | 成绩/考试/名单/题库/进度 + `generate_paper` | 分页、稳定排序、状态映射、实体级 scope |
+| `teaching.analysis` | 错题/薄弱点/成绩分布 | 可复现聚合口径与业务拒绝映射 |
+| `teaching.knowledge` | 图查询/学习路径 | 课程图 scope、节点 uid、确定性路径排序 |
+| `teaching.write` | 建考试/批量判分/布置作业 | 业务 API 的 request/idempotency key、固定 receipt、scope 和补偿能力声明 |
+| `teaching.content` | 纯出题/保存题库 | 按实际 effect 分流，保存分支的业务幂等键 |
+
+本阶段没有 `TeachingPlatformProvider`、生产配置、私有 DDL 或真实数据 fixture。课件 RAG 仍使用独立 tenant/course ACL 和 citation 解析。
 
 ## 请求数据流
 

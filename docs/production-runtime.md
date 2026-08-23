@@ -342,7 +342,9 @@ EventBus 仍不保存历史 delta，工具仍顺序执行。
 
 ## 可插拔扩展
 
-- 本地 registry、MCP provider 都实现 `ToolProvider` 契约。
+- 本地 registry、MCP provider 都实现 `ToolProvider` 契约，Agent 侧统一收到 `ToolResult`。
+- 10 个教学 query 和 5 个教学 command 经 canonical `TeachingDataProvider`；写 command 只能从 `PolicyToolExecutor -> registry.dispatch_transactional` 路径进入。
+- `run_code` 仅经健康、capability 完整且已审批的 `CodeExecutionProvider`，不创建教学库连接或 ToolOperation。
 - `PluginManager` 支持 Python entry point `edu_agent.plugins` 和显式模块加载。
 - 插件只能通过 `PluginContext.register_tool()` 注册工具，不需要修改 Agent Loop。
 - 重名工具默认拒绝，避免插件静默覆盖核心安全语义。

@@ -28,6 +28,7 @@ from ..tools.manifest import (
     ToolManifestMismatch,
     manifest_entry_matches,
 )
+from ..teaching import TeachingProviderErrorKind, TeachingProviderRejected
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,9 @@ class ExecutionPolicy:
 
 
 @dataclass
-class ToolOutcome:
+class ToolResult:
+    """Stable result crossing every ToolProvider -> Agent boundary."""
+
     ok: bool
     data: Any = None
     error: dict | None = None
@@ -81,6 +84,10 @@ class ToolOutcome:
             "error": self.error,
             "meta": self.meta,
         }
+
+
+# Backward-compatible name used by the pre-R3 runtime and public callers.
+ToolOutcome = ToolResult
 
 
 def _validate_value(value: Any, schema: dict, path: str) -> list[str]:
@@ -464,7 +471,13 @@ class PolicyToolExecutor:
                     frozen_manifest,
                 )
             context.check_control("tool.after_call")
-            if isinstance(result, dict) and "error" in result:
+            if isinstance(result, dict) and isinstance(
+                result.get("_teaching_provider_error"), dict
+            ):
+                outcome = self._teaching_provider_error(
+                    result["_teaching_provider_error"]
+                )
+            elif isinstance(result, dict) and "error" in result:
                 outcome = ToolOutcome(
                     False,
                     error={"code": "TOOL_ERROR", "message": str(result["error"])},
@@ -480,6 +493,8 @@ class PolicyToolExecutor:
                 outcome = ToolOutcome(True, data=result)
         except (FencingTokenRejected, RunCancelled, CancellationRequested):
             raise
+        except TeachingProviderRejected as error:
+            outcome = self._teaching_provider_error(error.error)
         except TimeoutError as error:
             outcome = ToolOutcome(
                 False,
@@ -606,10 +621,12 @@ class PolicyToolExecutor:
         own_connection = conn is None
         connection = conn or db.connect()
         operation = None
-        from ..tools import registry as local_registry
 
-        transactional_base = getattr(self.provider, "transactional_base", self.provider)
-        if transactional_base is not local_registry:
+        transactional_dispatch = getattr(self.provider, "dispatch_transactional", None)
+        if not callable(transactional_dispatch):
+            transactional_base = getattr(self.provider, "transactional_base", self.provider)
+            transactional_dispatch = getattr(transactional_base, "dispatch_transactional", None)
+        if not callable(transactional_dispatch):
             if own_connection:
                 connection.close()
             return self._finish(
@@ -712,7 +729,21 @@ class PolicyToolExecutor:
             execution = self.transaction_runtime.execute(
                 connection,
                 operation,
-                lambda: spec.handler(connection, **arguments),
+                lambda: self._dispatch_transactional(
+                    transactional_dispatch,
+                    name,
+                    arguments,
+                    context,
+                    connection,
+                    {
+                        **operation,
+                        "status": "executing",
+                        # Persisted operation arguments are redacted.  The
+                        # in-process command must bind the original validated
+                        # payload to the already stored hash.
+                        "arguments": arguments,
+                    },
+                ),
                 context=context,
             )
             outcome = ToolOutcome(
@@ -728,6 +759,8 @@ class PolicyToolExecutor:
                 False,
                 error={"code": "IDEMPOTENCY_CONFLICT", "message": str(error)},
             )
+        except TeachingProviderRejected as error:
+            outcome = self._teaching_provider_error(error.error)
         except OperationUnavailable as error:
             outcome = ToolOutcome(
                 False,
@@ -762,6 +795,76 @@ class PolicyToolExecutor:
             tool_call_id=tool_call_id,
             operation=operation,
         )
+
+    @staticmethod
+    def _teaching_provider_error(provider_error) -> ToolOutcome:
+        if isinstance(provider_error, dict):
+            raw_kind = provider_error.get("kind")
+            try:
+                kind = TeachingProviderErrorKind(raw_kind)
+            except (TypeError, ValueError):
+                kind = TeachingProviderErrorKind.INTERNAL
+            message = str(provider_error.get("message") or "教学 Provider 执行失败")
+            retryable = bool(provider_error.get("retryable", False))
+            details = provider_error.get("details")
+            details = dict(details) if isinstance(details, dict) else {}
+        else:
+            kind = provider_error.kind
+            message = provider_error.message
+            retryable = provider_error.retryable
+            details = dict(provider_error.details)
+        code = {
+            TeachingProviderErrorKind.INVALID_QUERY: "INVALID_ARGUMENTS",
+            TeachingProviderErrorKind.INVALID_COMMAND: "INVALID_ARGUMENTS",
+            TeachingProviderErrorKind.NOT_FOUND: "NOT_FOUND",
+            TeachingProviderErrorKind.BUSINESS_REJECTED: "BUSINESS_REJECTED",
+            TeachingProviderErrorKind.SCOPE_DENIED: "COURSE_SCOPE_DENIED",
+            TeachingProviderErrorKind.APPROVAL_REQUIRED: "APPROVAL_REQUIRED",
+            TeachingProviderErrorKind.UNAVAILABLE: "TOOL_UNAVAILABLE",
+            TeachingProviderErrorKind.UNSUPPORTED: "TOOL_UNAVAILABLE",
+        }.get(kind, "TOOL_EXCEPTION")
+        return ToolOutcome(
+            False,
+            error={
+                "code": code,
+                "message": message,
+                "kind": kind.value,
+                "retryable": retryable,
+                "details": details,
+            },
+        )
+
+    @staticmethod
+    def _dispatch_transactional(
+        dispatch,
+        name: str,
+        arguments: dict,
+        context: RunContext,
+        connection,
+        operation: dict,
+    ) -> dict:
+        """Invoke the provider's write boundary with executor-issued identity."""
+
+        try:
+            parameters = inspect.signature(dispatch).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_kwargs = any(
+            item.kind is inspect.Parameter.VAR_KEYWORD
+            for item in parameters.values()
+        )
+        kwargs = {
+            "conn": connection,
+            "context": context,
+            "operation": operation,
+        }
+        if not accepts_kwargs:
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in parameters
+            }
+        return dispatch(name, arguments, **kwargs)
 
     def _spec(self, name: str, *, manifest: ToolManifest | None = None):
         if manifest is not None:

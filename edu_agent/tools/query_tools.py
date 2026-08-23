@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 from ..teaching import PageRequest, TeachingQueryKind
 from .teaching_adapter import execute_teaching_read
 
@@ -132,25 +130,3 @@ def get_learning_progress(
         context=_context,
         provider=_provider,
     )
-
-
-def _resolve_kp_uid(
-    conn: sqlite3.Connection, ref: str, course_id=None
-) -> str | None:
-    """Legacy write-tool helper retained until the R3.3 transaction migration."""
-
-    row = conn.execute("SELECT node_uid FROM kg_nodes WHERE node_uid=?", (ref,)).fetchone()
-    if row:
-        return row["node_uid"]
-    query = "SELECT node_uid FROM kg_nodes WHERE name=?"
-    parameters = [ref]
-    if course_id is not None:
-        query += " AND course_id=?"
-        parameters.append(course_id)
-    row = conn.execute(query, parameters).fetchone()
-    if row:
-        return row["node_uid"]
-    row = conn.execute(
-        "SELECT node_uid FROM kg_nodes WHERE name LIKE ? LIMIT 1", (f"%{ref}%",)
-    ).fetchone()
-    return row["node_uid"] if row else None

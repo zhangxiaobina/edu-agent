@@ -10,6 +10,11 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from edu_agent.data import db, generate  # noqa: E402
+from edu_agent.runtime.models import RunContext  # noqa: E402
+from edu_agent.runtime.tool_executor import (  # noqa: E402
+    ExecutionPolicy,
+    PolicyToolExecutor,
+)
 from edu_agent.tools import registry  # noqa: E402
 
 DB_PATH = os.path.join(tempfile.gettempdir(), "edu_agent_test.db")
@@ -22,6 +27,29 @@ def setup_module(module=None):
 
 def _conn():
     return db.connect(DB_PATH)
+
+
+def _write(name, arguments, key):
+    connection = _conn()
+    try:
+        return PolicyToolExecutor(
+            registry,
+            policy=ExecutionPolicy(require_write_approval=False),
+        ).execute(
+            name,
+            arguments,
+            RunContext.create(
+                session_id=f"tools-{key}",
+                actor_id="teacher-tools",
+                tenant_id="school-tools",
+                role="admin",
+                course_ids={1},
+            ),
+            conn=connection,
+            caller_idempotency_key=key,
+        )
+    finally:
+        connection.close()
 
 
 def _python_exam_3ban():
@@ -129,9 +157,14 @@ def test_get_score_distribution():
 
 # ---------------- 操作类（写入） ----------------
 def test_create_exam():
-    res = registry.dispatch("create_exam",
-                            {"exam_name": "单元测验-单测", "class_id": 3, "course_id": 1,
-                             "duration": 60, "total_score": 50, "pass_score": 30})
+    outcome = _write(
+        "create_exam",
+        {"exam_name": "单元测验-单测", "class_id": 3, "course_id": 1,
+         "duration": 60, "total_score": 50, "pass_score": 30},
+        "tools-create-exam",
+    )
+    assert outcome.ok
+    res = outcome.data
     assert res["created"] and res["status"] == 0
     with _conn() as c:
         assert c.execute("SELECT 1 FROM exams WHERE id=?", (res["exam_id"],)).fetchone()
@@ -148,15 +181,38 @@ def test_generate_paper():
 
 def test_batch_grade_idempotent():
     eid, _ = _python_exam_3ban()
-    res = registry.dispatch("batch_grade", {"exam_id": eid, "regrade": True})
+    outcome = _write(
+        "batch_grade",
+        {"exam_id": eid, "regrade": True},
+        "tools-batch-grade",
+    )
+    assert outcome.ok
+    res = outcome.data
     assert res["graded_count"] > 0 and res["failed_count"] == 0
 
 
 def test_assign_homework():
-    res = registry.dispatch("assign_homework",
-                            {"title": "第一次作业-单测", "course_id": 1, "class_ids": [3],
-                             "end_time": "2025-12-31 23:59:59"})
+    outcome = _write(
+        "assign_homework",
+        {"title": "第一次作业-单测", "course_id": 1, "class_ids": [3],
+         "end_time": "2025-12-31 23:59:59"},
+        "tools-assign-homework",
+    )
+    assert outcome.ok
+    res = outcome.data
     assert res["created"] and 3 in res["class_ids"]
+
+
+def test_plain_registry_cannot_bypass_transactional_executor():
+    result = registry.dispatch(
+        "create_exam",
+        {"exam_name": "不应写入", "class_id": 3, "course_id": 1},
+    )
+    assert result["code"] == "TRANSACTIONAL_EXECUTOR_REQUIRED"
+    with _conn() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM exams WHERE exam_name='不应写入'"
+        ).fetchone()[0] == 0
 
 
 # ---------------- AI / 执行 ----------------

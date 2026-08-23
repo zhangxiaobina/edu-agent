@@ -18,6 +18,7 @@ from .tool_executor import (
     ExecutionPolicy,
     PolicyToolExecutor,
     ToolOutcome,
+    ToolResult,
 )
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "STABLE_CURSOR_DECISION_TABLE",
     "RuntimeManager",
     "ToolOutcome",
+    "ToolResult",
     "ToolResultBudget",
     "load_config",
     "redact_sensitive",

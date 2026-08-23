@@ -1,4 +1,4 @@
-"""Storage-neutral contracts for canonical teaching-data reads.
+"""Storage-neutral contracts for canonical teaching queries and commands.
 
 These contracts describe authoritative teaching data such as exams, scores,
 progress and knowledge paths.  They must not be confused with the R1 model
@@ -29,10 +29,28 @@ class TeachingQueryKind(str, Enum):
     STUDY_PATH = "study_path"
 
 
+class TeachingCommandKind(str, Enum):
+    CREATE_EXAM = "create_exam"
+    GENERATE_PAPER = "generate_paper"
+    BATCH_GRADE = "batch_grade"
+    ASSIGN_HOMEWORK = "assign_homework"
+    GENERATE_QUESTIONS = "generate_questions"
+
+
+class TeachingCommandEffect(str, Enum):
+    READ = "read"
+    PURE = "pure"
+    WRITE = "write"
+
+
 class TeachingProviderErrorKind(str, Enum):
     INVALID_QUERY = "invalid_query"
+    INVALID_COMMAND = "invalid_command"
     NOT_FOUND = "not_found"
+    BUSINESS_REJECTED = "business_rejected"
     SCOPE_DENIED = "scope_denied"
+    APPROVAL_REQUIRED = "approval_required"
+    UNSUPPORTED = "unsupported"
     UNAVAILABLE = "unavailable"
     INTERNAL = "internal"
 
@@ -135,6 +153,86 @@ class TeachingQuery:
 
 
 @dataclass(frozen=True)
+class TeachingOperationContext:
+    """Executor-issued identity for one approved transactional command.
+
+    This is transport-neutral metadata, not an alternate transaction manager.
+    Providers may pass the idempotency key to a future platform API, while the
+    local provider still joins the caller-owned business transaction.
+    """
+
+    operation_id: str
+    idempotency_key: str
+    payload_hash: str
+    approval_scope: str
+    status: str
+    arguments: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "operation_id",
+            "idempotency_key",
+            "payload_hash",
+            "approval_scope",
+            "status",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} 必须是非空字符串")
+        normalized = _canonical_value(dict(self.arguments), path="operation.arguments")
+        object.__setattr__(self, "arguments", MappingProxyType(normalized))
+
+    @classmethod
+    def from_operation(cls, operation: Mapping[str, Any]) -> TeachingOperationContext:
+        if not isinstance(operation, Mapping):
+            raise TypeError("operation 必须是 mapping")
+        return cls(
+            operation_id=str(operation["id"]),
+            idempotency_key=str(operation["idempotency_key"]),
+            payload_hash=str(operation["payload_hash"]),
+            approval_scope=str(operation["approval_scope"]),
+            status=str(operation["status"]),
+            arguments=operation.get("arguments") or {},
+        )
+
+
+@dataclass(frozen=True)
+class TeachingCommand:
+    kind: TeachingCommandKind
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    scope: TeachingScope = field(default_factory=TeachingScope.unrestricted)
+    operation: TeachingOperationContext | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, TeachingCommandKind):
+            raise TypeError("kind 必须是 TeachingCommandKind")
+        if not isinstance(self.scope, TeachingScope):
+            raise TypeError("scope 必须是 TeachingScope")
+        if self.operation is not None and not isinstance(
+            self.operation, TeachingOperationContext
+        ):
+            raise TypeError("operation 必须是 TeachingOperationContext")
+        normalized = _canonical_value(dict(self.payload), path="payload")
+        object.__setattr__(self, "payload", MappingProxyType(normalized))
+
+    @property
+    def effect(self) -> TeachingCommandEffect:
+        if self.kind is TeachingCommandKind.GENERATE_PAPER:
+            return TeachingCommandEffect.READ
+        if self.kind is TeachingCommandKind.GENERATE_QUESTIONS:
+            return (
+                TeachingCommandEffect.WRITE
+                if bool(self.payload.get("save_to_bank"))
+                else TeachingCommandEffect.PURE
+            )
+        return TeachingCommandEffect.WRITE
+
+    @property
+    def mutating(self) -> bool:
+        return self.effect is TeachingCommandEffect.WRITE
+
+
+@dataclass(frozen=True)
 class TeachingProviderError:
     kind: TeachingProviderErrorKind
     message: str
@@ -196,8 +294,96 @@ class TeachingResult:
         return _canonical_value(dict(self.data or {}), path="tool_result")
 
 
+@dataclass(frozen=True)
+class TeachingReceipt:
+    kind: TeachingCommandKind
+    effect: TeachingCommandEffect
+    data: Mapping[str, Any]
+    request_id: str | None = None
+    operation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, TeachingCommandKind):
+            raise TypeError("receipt kind 必须是 TeachingCommandKind")
+        if not isinstance(self.effect, TeachingCommandEffect):
+            raise TypeError("receipt effect 必须是 TeachingCommandEffect")
+        normalized = _canonical_value(dict(self.data), path="receipt.data")
+        object.__setattr__(self, "data", normalized)
+        for name in ("request_id", "operation_id"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"receipt {name} 必须为非空字符串或 None")
+
+    def to_tool_result(self) -> dict:
+        """Keep the pre-provider tool payload stable."""
+
+        return _canonical_value(dict(self.data), path="tool_result")
+
+
+@dataclass(frozen=True)
+class TeachingCommandResult:
+    receipt: TeachingReceipt | None = None
+    error: TeachingProviderError | None = None
+
+    def __post_init__(self) -> None:
+        if (self.receipt is None) == (self.error is None):
+            raise ValueError("TeachingCommandResult 必须且只能包含 receipt 或 error")
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+    @classmethod
+    def success(
+        cls,
+        command: TeachingCommand,
+        data: Mapping[str, Any],
+    ) -> TeachingCommandResult:
+        operation = command.operation
+        return cls(
+            receipt=TeachingReceipt(
+                kind=command.kind,
+                effect=command.effect,
+                data=data,
+                request_id=operation.idempotency_key if operation is not None else None,
+                operation_id=operation.operation_id if operation is not None else None,
+            )
+        )
+
+    @classmethod
+    def failure(
+        cls,
+        kind: TeachingProviderErrorKind,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: Mapping[str, Any] | None = None,
+    ) -> TeachingCommandResult:
+        return cls(
+            error=TeachingProviderError(
+                kind=kind,
+                message=message,
+                retryable=retryable,
+                details=details or {},
+            )
+        )
+
+    def to_tool_result(self) -> dict:
+        if self.error is not None:
+            return {"error": self.error.message}
+        return self.receipt.to_tool_result()
+
+
+class TeachingProviderRejected(RuntimeError):
+    """Preserve a canonical business rejection across a DB rollback."""
+
+    def __init__(self, error: TeachingProviderError):
+        super().__init__(error.message)
+        self.error = error
+
+
 class TeachingDataProvider(ABC):
-    """Minimal domain provider used by read-only teaching tools.
+    """Minimal domain provider used by the built-in teaching tools.
 
     ``connection`` is an adapter-private escape hatch for a caller-owned,
     controlled transaction.  Ordinary calls leave it unset so each invocation
@@ -206,6 +392,15 @@ class TeachingDataProvider(ABC):
 
     @abstractmethod
     def execute(self, query: TeachingQuery, *, connection: object | None = None) -> TeachingResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute_command(
+        self,
+        command: TeachingCommand,
+        *,
+        connection: object | None = None,
+    ) -> TeachingCommandResult:
         raise NotImplementedError
 
 

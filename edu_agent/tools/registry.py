@@ -9,7 +9,11 @@ from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 
 from ..data import db
-from ..teaching import SyntheticProvider, TeachingDataProvider
+from ..teaching import (
+    SyntheticProvider,
+    TeachingDataProvider,
+    TeachingProviderRejected,
+)
 from ..state import FencingTokenRejected, RunCancelled
 from ..runtime.cancellation import CancellationRequested
 from . import ai_tools, analysis_tools, kg_tools, ops_tools, query_tools
@@ -53,6 +57,15 @@ READ_ONLY_TEACHING_TOOLS = frozenset(
         "get_score_distribution",
     }
 )
+TEACHING_COMMAND_TOOLS = frozenset(
+    {
+        "create_exam",
+        "generate_paper",
+        "batch_grade",
+        "assign_homework",
+        "generate_questions",
+    }
+)
 
 
 def configure_teaching_data_provider(provider: TeachingDataProvider | None) -> None:
@@ -60,8 +73,12 @@ def configure_teaching_data_provider(provider: TeachingDataProvider | None) -> N
 
     global _teaching_data_provider
     candidate = provider or SyntheticProvider(db.connect)
-    if not callable(getattr(candidate, "execute", None)):
-        raise TypeError("teaching data provider 必须实现 execute(query, connection=...)")
+    if not callable(getattr(candidate, "execute", None)) or not callable(
+        getattr(candidate, "execute_command", None)
+    ):
+        raise TypeError(
+            "teaching data provider 必须实现 execute(query) 与 execute_command(command)"
+        )
     _teaching_data_provider = candidate
 
 
@@ -625,6 +642,15 @@ def dispatch(name: str, arguments: dict | None = None,
         ):
             return {"error": "工具 registry 在 run 内发生变化，manifest 身份不匹配"}
     arguments = arguments or {}
+    if spec.is_mutating(arguments):
+        # A plain ToolProvider call has no actor-bound approval, operation or
+        # outbox context.  Writes are admitted only through
+        # ``PolicyToolExecutor`` -> ``dispatch_transactional``.
+        return {
+            "error": "TRANSACTION_REQUIRED",
+            "code": "TRANSACTIONAL_EXECUTOR_REQUIRED",
+            "message": "教学写入必须经 PolicyToolExecutor 的审批、幂等和 outbox 安全门",
+        }
     if name in READ_ONLY_TEACHING_TOOLS:
         try:
             handler = manifest.get(name).handler if manifest is not None else TOOL_FUNCTIONS[name]
@@ -638,20 +664,59 @@ def dispatch(name: str, arguments: dict | None = None,
             )
         except TypeError as error:
             return {"error": f"参数错误：{error}"}
+        except TeachingProviderRejected as error:
+            provider_error = error.error
+            return {
+                "error": provider_error.message,
+                "_teaching_provider_error": {
+                    "kind": provider_error.kind.value,
+                    "message": provider_error.message,
+                    "retryable": provider_error.retryable,
+                    "details": dict(provider_error.details),
+                },
+            }
+        except Exception as error:
+            return {"error": f"工具执行异常：{type(error).__name__}: {error}"}
+    if name in TEACHING_COMMAND_TOOLS:
+        try:
+            handler = manifest.get(name).handler if manifest is not None else TOOL_FUNCTIONS[name]
+            if handler is None:
+                handler = TOOL_FUNCTIONS[name]
+            return handler(
+                conn,
+                _provider=_teaching_data_provider,
+                _context=context,
+                **arguments,
+            )
+        except TypeError as error:
+            return {"error": f"参数错误：{error}"}
+        except TeachingProviderRejected as error:
+            provider_error = error.error
+            return {
+                "error": provider_error.message,
+                "_teaching_provider_error": {
+                    "kind": provider_error.kind.value,
+                    "message": provider_error.message,
+                    "retryable": provider_error.retryable,
+                    "details": dict(provider_error.details),
+                },
+            }
+        except Exception as error:
+            return {"error": f"工具执行异常：{type(error).__name__}: {error}"}
+    if spec.effect is ToolEffect.CODE_EXECUTION:
+        if not code_execution_available():
+            return {"error": "代码执行后端未通过健康与安全能力门禁"}
+        try:
+            return ai_tools.run_code(None, _provider=_code_execution_provider, **arguments)
         except Exception as error:
             return {"error": f"工具执行异常：{type(error).__name__}: {error}"}
     own = conn is None
     conn = conn or db.connect()
     try:
-        if spec.effect is ToolEffect.CODE_EXECUTION and not code_execution_available():
-            result = {"error": "代码执行后端未通过健康与安全能力门禁"}
-        elif spec.effect is ToolEffect.CODE_EXECUTION:
-            result = ai_tools.run_code(conn, _provider=_code_execution_provider, **arguments)
-        else:
-            handler = manifest.get(name).handler if manifest is not None else TOOL_FUNCTIONS[name]
-            if handler is None:
-                handler = TOOL_FUNCTIONS[name]
-            result = handler(conn, **arguments)
+        handler = manifest.get(name).handler if manifest is not None else TOOL_FUNCTIONS[name]
+        if handler is None:
+            handler = TOOL_FUNCTIONS[name]
+        result = handler(conn, **arguments)
         if own:
             conn.commit()
         return result
@@ -666,6 +731,55 @@ def dispatch(name: str, arguments: dict | None = None,
     finally:
         if own:
             conn.close()
+
+
+def dispatch_transactional(
+    name: str,
+    arguments: dict | None = None,
+    *,
+    conn=None,
+    context=None,
+    operation=None,
+) -> dict:
+    """Executor-only adapter for teaching writes.
+
+    ``operation`` is intentionally required and is passed through the thin
+    tool adapter to the canonical provider.  This function never owns or
+    commits the connection; the transaction runtime does.
+    """
+
+    arguments = arguments or {}
+    spec = TOOL_SPECS.get(name)
+    if spec is None:
+        return {"error": f"未知工具：{name}"}
+    if not spec.is_mutating(arguments):
+        return dispatch(name, arguments, conn=conn, context=context)
+    if operation is None or conn is None:
+        return {
+            "error": "TRANSACTIONAL_EXECUTOR_REQUIRED",
+            "code": "TRANSACTIONAL_EXECUTOR_REQUIRED",
+            "message": "写工具必须携带受控 ToolOperation 和同库连接",
+        }
+    handler = TOOL_FUNCTIONS[name]
+    try:
+        return handler(
+            conn,
+            _provider=_teaching_data_provider,
+            _context=context,
+            _operation=operation,
+            **arguments,
+        )
+    except (
+        FencingTokenRejected,
+        RunCancelled,
+        CancellationRequested,
+        TeachingProviderRejected,
+    ):
+        raise
+    except TypeError as error:
+        return {"error": f"参数错误：{error}"}
+    except Exception as error:
+        return {"error": f"工具执行异常：{type(error).__name__}: {error}"}
 
 
 def dispatch_with_context(
@@ -711,24 +825,14 @@ def dispatch_with_context(
     arguments = arguments or {}
     if not code_execution_available():
         return {"error": "代码执行后端未通过健康与安全能力门禁"}
-    own = conn is None
-    connection = conn or db.connect()
     try:
-        result = ai_tools.run_code(
-            connection, _provider=_code_execution_provider, _context=context, **arguments,
+        return ai_tools.run_code(
+            None, _provider=_code_execution_provider, _context=context, **arguments,
         )
-        if own:
-            connection.commit()
-        return result
     except (FencingTokenRejected, RunCancelled, CancellationRequested):
         raise
     except Exception as error:
-        if own:
-            connection.rollback()
         return {"error": f"工具执行异常：{type(error).__name__}: {error}"}
-    finally:
-        if own:
-            connection.close()
 
 
 def tool_names() -> list[str]:

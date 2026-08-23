@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import statistics
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from ..data.kg import Edge, KnowledgeGraph
 from .contracts import (
     ExamStatus,
     PageRequest,
+    TeachingCommand,
+    TeachingCommandKind,
+    TeachingCommandResult,
     TeachingDataProvider,
     TeachingProviderErrorKind,
     TeachingQuery,
@@ -26,6 +31,9 @@ ConnectionFactory = Callable[[], sqlite3.Connection]
 
 
 _NODE_FIELDS = ("node_uid", "name", "type", "difficulty", "importance", "course_id")
+_QUESTION_TYPE_CYCLE = ("single", "judge", "fill")
+_DIFFICULTY_CYCLE = ("easy", "medium", "hard")
+_QUESTION_OPTIONS = ("选项A", "选项B", "选项C", "选项D")
 
 
 class SyntheticProvider(TeachingDataProvider):
@@ -51,6 +59,13 @@ class SyntheticProvider(TeachingDataProvider):
             TeachingQueryKind.SCORE_DISTRIBUTION: self._score_distribution,
             TeachingQueryKind.KNOWLEDGE_GRAPH: self._knowledge_graph,
             TeachingQueryKind.STUDY_PATH: self._study_path,
+        }
+        self._command_handlers = {
+            TeachingCommandKind.CREATE_EXAM: self._create_exam,
+            TeachingCommandKind.GENERATE_PAPER: self._generate_paper,
+            TeachingCommandKind.BATCH_GRADE: self._batch_grade,
+            TeachingCommandKind.ASSIGN_HOMEWORK: self._assign_homework,
+            TeachingCommandKind.GENERATE_QUESTIONS: self._generate_questions,
         }
 
     def execute(self, query: TeachingQuery, *, connection: object | None = None) -> TeachingResult:
@@ -99,6 +114,159 @@ class SyntheticProvider(TeachingDataProvider):
                 details={"cause": type(error).__name__},
             )
 
+    def execute_command(
+        self,
+        command: TeachingCommand,
+        *,
+        connection: object | None = None,
+    ) -> TeachingCommandResult:
+        if not isinstance(command, TeachingCommand):
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.INVALID_COMMAND,
+                "教学 command 契约无效",
+            )
+        handler = self._command_handlers.get(command.kind)
+        if handler is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.UNSUPPORTED,
+                f"不支持的教学 command：{command.kind.value}",
+            )
+        if connection is not None and not isinstance(connection, sqlite3.Connection):
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.INVALID_COMMAND,
+                "受控连接类型与 SyntheticProvider 不兼容",
+            )
+        if command.mutating:
+            if command.operation is None:
+                return TeachingCommandResult.failure(
+                    TeachingProviderErrorKind.APPROVAL_REQUIRED,
+                    "教学写入必须经过 ToolOperation 与审批执行器",
+                )
+            if command.operation.status not in {"approved", "executing"}:
+                return TeachingCommandResult.failure(
+                    TeachingProviderErrorKind.APPROVAL_REQUIRED,
+                    f"ToolOperation 状态 {command.operation.status} 不允许写入",
+                )
+            if connection is None or not connection.in_transaction:
+                return TeachingCommandResult.failure(
+                    TeachingProviderErrorKind.INVALID_COMMAND,
+                    "教学写入必须加入执行器控制的同库事务",
+                )
+            authority_error = self._validate_mutation_authority(connection, command)
+            if authority_error is not None:
+                return authority_error
+        try:
+            with self._connection(connection) as active:
+                return handler(active, command)
+        except (KeyError, TypeError, ValueError) as error:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.INVALID_COMMAND,
+                "教学 command 参数无效",
+                details={"cause": type(error).__name__},
+            )
+        except sqlite3.IntegrityError as error:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.BUSINESS_REJECTED,
+                "教学业务约束拒绝了该操作",
+                details={"cause": type(error).__name__},
+            )
+        except (TimeoutError, sqlite3.OperationalError) as error:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.UNAVAILABLE,
+                "合成教学服务暂不可用",
+                retryable=True,
+                details={"cause": type(error).__name__},
+            )
+        except sqlite3.DatabaseError as error:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.INTERNAL,
+                "合成教学 command 执行失败",
+                details={"cause": type(error).__name__},
+            )
+        except Exception as error:  # noqa: BLE001 - do not leak adapter details
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.INTERNAL,
+                "教学 Provider command 执行失败",
+                details={"cause": type(error).__name__},
+            )
+
+    @staticmethod
+    def _validate_mutation_authority(
+        connection: sqlite3.Connection,
+        command: TeachingCommand,
+    ) -> TeachingCommandResult | None:
+        operation = command.operation
+        if operation is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.APPROVAL_REQUIRED,
+                "教学写入缺少 ToolOperation",
+            )
+        try:
+            row = connection.execute(
+                """SELECT idempotency_key, payload_hash, tool_name, status,
+                          approval_scope
+                   FROM tool_operations WHERE id=?""",
+                (operation.operation_id,),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            row = None
+        if row is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.APPROVAL_REQUIRED,
+                "教学写入没有可验证的 ToolOperation",
+            )
+        expected = {
+            "idempotency_key": operation.idempotency_key,
+            "payload_hash": operation.payload_hash,
+            "tool_name": command.kind.value,
+            "status": "executing",
+            "approval_scope": operation.approval_scope,
+        }
+        if any(row[key] != value for key, value in expected.items()):
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.APPROVAL_REQUIRED,
+                "ToolOperation 与 canonical command 绑定不匹配",
+            )
+        operation_arguments = dict(operation.arguments)
+        digest_payload = json.dumps(
+            {"tool": command.kind.value, "arguments": operation_arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        if hashlib.sha256(digest_payload.encode()).hexdigest() != operation.payload_hash:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.APPROVAL_REQUIRED,
+                "ToolOperation payload hash 无法验证",
+            )
+        if any(
+            key not in command.payload or command.payload[key] != value
+            for key, value in operation_arguments.items()
+        ):
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.APPROVAL_REQUIRED,
+                "canonical command payload 与审批参数不一致",
+            )
+        approval = connection.execute(
+            """SELECT 1 FROM tool_approvals
+               WHERE operation_id=? AND payload_hash=? AND scope=?
+                   AND decision='approved' AND expires_at>?
+               ORDER BY created_at DESC LIMIT 1""",
+            (
+                operation.operation_id,
+                operation.payload_hash,
+                operation.approval_scope,
+                datetime.now(UTC).isoformat(),
+            ),
+        ).fetchone()
+        if approval is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.APPROVAL_REQUIRED,
+                "ToolOperation 缺少未过期的有效审批",
+            )
+        return None
+
     @contextmanager
     def _connection(self, controlled: object | None) -> Iterator[sqlite3.Connection]:
         if controlled is not None:
@@ -138,10 +306,28 @@ class SyntheticProvider(TeachingDataProvider):
             details={"course_id": int(course_id)},
         )
 
+    @staticmethod
+    def _command_scope_denied(course_id: int) -> TeachingCommandResult:
+        return TeachingCommandResult.failure(
+            TeachingProviderErrorKind.SCOPE_DENIED,
+            f"当前身份无权访问课程 {course_id}",
+            details={"course_id": int(course_id)},
+        )
+
     @classmethod
     def _require_course(cls, query: TeachingQuery, course_id: int | None) -> TeachingResult | None:
         if course_id is not None and not query.scope.allows_course(int(course_id)):
             return cls._scope_denied(int(course_id))
+        return None
+
+    @classmethod
+    def _require_command_course(
+        cls,
+        command: TeachingCommand,
+        course_id: int | None,
+    ) -> TeachingCommandResult | None:
+        if course_id is not None and not command.scope.allows_course(int(course_id)):
+            return cls._command_scope_denied(int(course_id))
         return None
 
     @classmethod
@@ -956,6 +1142,574 @@ class SyntheticProvider(TeachingDataProvider):
                 "cypher_hint": graph.to_cypher_hint(target_uid),
             }
         )
+
+    def _create_exam(
+        self,
+        connection: sqlite3.Connection,
+        command: TeachingCommand,
+    ) -> TeachingCommandResult:
+        payload = command.payload
+        class_id = payload["class_id"]
+        course_id = payload["course_id"]
+        denied = self._require_command_course(command, course_id)
+        if denied is not None:
+            return denied
+        if connection.execute(
+            "SELECT 1 FROM classes WHERE id=?", (class_id,)
+        ).fetchone() is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.NOT_FOUND,
+                f"班级 {class_id} 不存在",
+                details={"class_id": class_id},
+            )
+        if connection.execute(
+            "SELECT 1 FROM courses WHERE id=?", (course_id,)
+        ).fetchone() is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.NOT_FOUND,
+                f"课程 {course_id} 不存在",
+                details={"course_id": course_id},
+            )
+        exam_id = self._next_id(connection, "exams")
+        exam_code = f"EX{exam_id:04d}"
+        connection.execute(
+            """INSERT INTO exams(
+                   id, exam_name, exam_code, description, class_id, course_id,
+                   question_bank_id, creator_id, start_time, end_time, duration,
+                   total_score, pass_score, question_count, status
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            (
+                exam_id,
+                payload["exam_name"],
+                exam_code,
+                payload.get("description"),
+                class_id,
+                course_id,
+                payload.get("question_bank_id"),
+                self._course_teacher(connection, course_id),
+                None,
+                None,
+                payload.get("duration", 90),
+                payload.get("total_score", 100),
+                payload.get("pass_score", 60),
+                payload.get("question_count", 0),
+            ),
+        )
+        return TeachingCommandResult.success(
+            command,
+            {
+                "created": True,
+                "exam_id": exam_id,
+                "exam_code": exam_code,
+                "exam_name": payload["exam_name"],
+                "class_id": class_id,
+                "course_id": course_id,
+                "status": 0,
+                "status_text": "未开始(草稿)",
+            },
+        )
+
+    def _generate_paper(
+        self,
+        connection: sqlite3.Connection,
+        command: TeachingCommand,
+    ) -> TeachingCommandResult:
+        payload = command.payload
+        bank_id = payload["question_bank_id"]
+        bank = connection.execute(
+            "SELECT id, name, course_id FROM question_banks WHERE id=?",
+            (bank_id,),
+        ).fetchone()
+        if bank is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.NOT_FOUND,
+                f"题库 {bank_id} 不存在",
+                details={"question_bank_id": bank_id},
+            )
+        denied = self._require_command_course(command, bank["course_id"])
+        if denied is not None:
+            return denied
+        pool = [
+            dict(row)
+            for row in connection.execute(
+                """SELECT q.id, q.title, q.question_type, q.difficulty, q.score
+                   FROM questions q
+                   JOIN question_bank_questions qbq ON qbq.question_id=q.id
+                   WHERE qbq.question_bank_id=? AND q.status=1
+                   ORDER BY q.id""",
+                (bank_id,),
+            ).fetchall()
+        ]
+        knowledge_points = payload.get("knowledge_points")
+        if knowledge_points:
+            resolved = {
+                item[0]
+                for reference in knowledge_points
+                if (
+                    item := self._resolve_knowledge_point(
+                        connection,
+                        reference,
+                        course_id=bank["course_id"],
+                    )
+                )
+            }
+            if resolved:
+                placeholders = ",".join("?" for _ in resolved)
+                allowed = {
+                    row["resource_id"]
+                    for row in connection.execute(
+                        "SELECT resource_id FROM kg_resource_link "
+                        "WHERE resource_type='question' "
+                        f"AND node_uid IN ({placeholders})",
+                        sorted(resolved),
+                    )
+                }
+                pool = [question for question in pool if question["id"] in allowed]
+
+        selected: list[dict[str, Any]] = []
+        chosen_ids: set[int] = set()
+
+        def take(items: list[dict[str, Any]], count: int) -> None:
+            for question in items:
+                if len(selected) >= 200 or question["id"] in chosen_ids:
+                    continue
+                selected.append(question)
+                chosen_ids.add(question["id"])
+                count -= 1
+                if count <= 0:
+                    break
+
+        difficulty_distribution = payload.get("difficulty_distribution")
+        question_counts = payload.get("question_counts")
+        if difficulty_distribution:
+            for difficulty, count in difficulty_distribution.items():
+                take(
+                    [item for item in pool if item["difficulty"] == difficulty],
+                    count,
+                )
+        elif question_counts:
+            for question_type, count in question_counts.items():
+                take(
+                    [item for item in pool if item["question_type"] == question_type],
+                    count,
+                )
+        else:
+            take(pool, payload.get("total_questions", 10))
+
+        type_distribution: dict[str, int] = {}
+        selected_difficulties: dict[str, int] = {}
+        for question in selected:
+            question_type = question["question_type"]
+            difficulty = question["difficulty"]
+            type_distribution[question_type] = type_distribution.get(question_type, 0) + 1
+            selected_difficulties[difficulty] = selected_difficulties.get(difficulty, 0) + 1
+        quality, suggestions = self._paper_quality(
+            selected,
+            selected_difficulties,
+            type_distribution,
+        )
+        return TeachingCommandResult.success(
+            command,
+            {
+                "preview_id": f"PV-{bank_id}-{len(selected)}",
+                "paper_name": payload.get("paper_name") or f"{bank['name']}自动组卷",
+                "question_bank_id": bank_id,
+                "course_id": bank["course_id"],
+                "total_questions": len(selected),
+                "total_score": round(sum(item["score"] for item in selected), 1),
+                "difficulty_distribution": selected_difficulties,
+                "type_distribution": type_distribution,
+                "quality_score": quality,
+                "suggestions": suggestions,
+                "questions": selected,
+                "note": "预览阶段；真实平台需 confirm 才落库为正式试卷",
+            },
+        )
+
+    def _batch_grade(
+        self,
+        connection: sqlite3.Connection,
+        command: TeachingCommand,
+    ) -> TeachingCommandResult:
+        payload = command.payload
+        exam_id = payload["exam_id"]
+        exam = connection.execute(
+            "SELECT course_id, pass_score FROM exams WHERE id=?", (exam_id,)
+        ).fetchone()
+        if exam is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.NOT_FOUND,
+                f"考试 {exam_id} 不存在",
+                details={"exam_id": exam_id},
+            )
+        denied = self._require_command_course(command, exam["course_id"])
+        if denied is not None:
+            return denied
+        regrade = bool(payload.get("regrade", False))
+        status_filter = "" if regrade else " AND status < 3"
+        records = connection.execute(
+            f"SELECT id, student_id FROM exam_records "
+            f"WHERE exam_id=?{status_filter} ORDER BY id",
+            (exam_id,),
+        ).fetchall()
+        graded = 0
+        failed = 0
+        for record in records:
+            aggregate = connection.execute(
+                """SELECT COALESCE(SUM(earned_score), 0) AS score,
+                          COALESCE(SUM(is_correct), 0) AS correct_count,
+                          COUNT(*) AS answer_count
+                   FROM exam_answers WHERE record_id=?""",
+                (record["id"],),
+            ).fetchone()
+            if aggregate["answer_count"] == 0:
+                failed += 1
+                continue
+            passed = 1 if aggregate["score"] >= exam["pass_score"] else 0
+            connection.execute(
+                """UPDATE exam_records
+                   SET score=?, correct_count=?, answer_count=?, status=3, passed=?
+                   WHERE id=?""",
+                (
+                    round(aggregate["score"], 1),
+                    aggregate["correct_count"],
+                    aggregate["answer_count"],
+                    passed,
+                    record["id"],
+                ),
+            )
+            graded += 1
+        ranked = connection.execute(
+            "SELECT id FROM exam_records WHERE exam_id=? ORDER BY score DESC, id",
+            (exam_id,),
+        ).fetchall()
+        for rank, record in enumerate(ranked, start=1):
+            connection.execute(
+                "UPDATE exam_records SET rank=? WHERE id=?",
+                (rank, record["id"]),
+            )
+        return TeachingCommandResult.success(
+            command,
+            {
+                "exam_id": exam_id,
+                "total_records": len(records),
+                "graded_count": graded,
+                "failed_count": failed,
+                "regrade": regrade,
+            },
+        )
+
+    def _assign_homework(
+        self,
+        connection: sqlite3.Connection,
+        command: TeachingCommand,
+    ) -> TeachingCommandResult:
+        payload = command.payload
+        course_id = payload["course_id"]
+        denied = self._require_command_course(command, course_id)
+        if denied is not None:
+            return denied
+        if connection.execute(
+            "SELECT 1 FROM courses WHERE id=?", (course_id,)
+        ).fetchone() is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.NOT_FOUND,
+                f"课程 {course_id} 不存在",
+                details={"course_id": course_id},
+            )
+        homework_id = self._next_id(connection, "homeworks")
+        connection.execute(
+            """INSERT INTO homeworks(
+                   id, title, homework_type, description, course_id, creator_id,
+                   start_time, end_time, total_score, max_submissions, status
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED')""",
+            (
+                homework_id,
+                payload["title"],
+                payload.get("homework_type", "open"),
+                payload.get("description"),
+                course_id,
+                self._course_teacher(connection, course_id),
+                payload.get("start_time"),
+                payload["end_time"],
+                payload.get("total_score", 100),
+                payload.get("max_submissions", 1),
+            ),
+        )
+        linked: list[int] = []
+        class_ids = payload["class_ids"]
+        if isinstance(class_ids, int):
+            class_ids = [class_ids]
+        for class_id in class_ids:
+            if connection.execute(
+                "SELECT 1 FROM classes WHERE id=?", (class_id,)
+            ).fetchone():
+                connection.execute(
+                    "INSERT INTO homework_classes(homework_id, class_id) VALUES (?, ?)",
+                    (homework_id, class_id),
+                )
+                linked.append(class_id)
+        return TeachingCommandResult.success(
+            command,
+            {
+                "created": True,
+                "homework_id": homework_id,
+                "title": payload["title"],
+                "course_id": course_id,
+                "class_ids": linked,
+                "end_time": payload["end_time"],
+                "status": "PUBLISHED",
+            },
+        )
+
+    def _generate_questions(
+        self,
+        connection: sqlite3.Connection,
+        command: TeachingCommand,
+    ) -> TeachingCommandResult:
+        payload = command.payload
+        course_id = payload["course_id"]
+        denied = self._require_command_course(command, course_id)
+        if denied is not None:
+            return denied
+        course = connection.execute(
+            "SELECT id, name FROM courses WHERE id=?", (course_id,)
+        ).fetchone()
+        if course is None:
+            return TeachingCommandResult.failure(
+                TeachingProviderErrorKind.NOT_FOUND,
+                f"课程 {course_id} 不存在",
+                details={"course_id": course_id},
+            )
+        bank_id = payload.get("save_to_bank")
+        if bank_id:
+            bank = connection.execute(
+                "SELECT course_id FROM question_banks WHERE id=?", (bank_id,)
+            ).fetchone()
+            if bank is None:
+                return TeachingCommandResult.failure(
+                    TeachingProviderErrorKind.NOT_FOUND,
+                    f"题库 {bank_id} 不存在",
+                    details={"question_bank_id": bank_id},
+                )
+            if int(bank["course_id"]) != int(course_id):
+                return TeachingCommandResult.failure(
+                    TeachingProviderErrorKind.BUSINESS_REJECTED,
+                    "目标题库与出题课程不一致",
+                    details={"question_bank_id": bank_id, "course_id": course_id},
+                )
+
+        knowledge_point_uid = None
+        knowledge_point_name = payload.get("knowledge_point")
+        if knowledge_point_name:
+            resolved = self._resolve_knowledge_point(
+                connection,
+                knowledge_point_name,
+                course_id=course_id,
+            )
+            if resolved is not None:
+                knowledge_point_uid = resolved[0]
+                knowledge_point_name = connection.execute(
+                    "SELECT name FROM kg_nodes WHERE node_uid=?",
+                    (knowledge_point_uid,),
+                ).fetchone()["name"]
+        if not knowledge_point_name:
+            row = connection.execute(
+                "SELECT node_uid, name FROM kg_nodes "
+                "WHERE course_id=? AND type='concept' ORDER BY node_uid LIMIT 1",
+                (course_id,),
+            ).fetchone()
+            if row is not None:
+                knowledge_point_uid = row["node_uid"]
+                knowledge_point_name = row["name"]
+            else:
+                knowledge_point_name = course["name"]
+
+        pairs = self._expand_question_pairs(
+            payload.get("count", 5),
+            payload.get("question_types"),
+            payload.get("difficulty_distribution"),
+        )
+        generated = []
+        saved_ids = []
+        for index, (question_type, difficulty) in enumerate(pairs, start=1):
+            options, answer = self._generate_question_body(question_type, index)
+            question = {
+                "title": f"【AI·{knowledge_point_name}】生成题{index}",
+                "content": (
+                    f"围绕知识点「{knowledge_point_name}」生成的"
+                    f"{difficulty}难度{question_type}题（合成）。"
+                ),
+                "question_type": question_type,
+                "difficulty": difficulty,
+                "options": options,
+                "correct_answer": answer,
+                "source": "ai",
+            }
+            generated.append(question)
+            if bank_id:
+                question_id = self._save_question(
+                    connection,
+                    question,
+                    course_id,
+                    knowledge_point_uid,
+                    bank_id,
+                )
+                question["id"] = question_id
+                saved_ids.append(question_id)
+        return TeachingCommandResult.success(
+            command,
+            {
+                "course_id": course_id,
+                "knowledge_point": knowledge_point_name,
+                "generation_type": (
+                    "knowledge_graph" if knowledge_point_uid else "manual"
+                ),
+                "status": "completed",
+                "created_questions": len(generated),
+                "saved_to_bank": bank_id,
+                "saved_question_ids": saved_ids,
+                "questions": generated,
+                "note": (
+                    "模板化合成生成；接入工具调用模型(vLLM/API)"
+                    "后可替换为真实 AI 出题。"
+                ),
+            },
+        )
+
+    @staticmethod
+    def _next_id(connection: sqlite3.Connection, table: str) -> int:
+        return connection.execute(
+            f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table}"
+        ).fetchone()[0]
+
+    @staticmethod
+    def _course_teacher(connection: sqlite3.Connection, course_id: int) -> int | None:
+        row = connection.execute(
+            "SELECT teacher_id FROM courses WHERE id=?", (course_id,)
+        ).fetchone()
+        return row["teacher_id"] if row is not None else None
+
+    @staticmethod
+    def _paper_quality(
+        selected: list[dict[str, Any]],
+        difficulty_distribution: dict[str, int],
+        type_distribution: dict[str, int],
+    ) -> tuple[float, list[str]]:
+        suggestions = []
+        if not selected:
+            return 0.0, ["未选中任何题目，请放宽过滤条件"]
+        count = len(selected)
+        ideal = {"easy": 0.3, "medium": 0.5, "hard": 0.2}
+        deviation = sum(
+            abs(difficulty_distribution.get(level, 0) / count - ratio)
+            for level, ratio in ideal.items()
+        )
+        balance = max(0.0, 1 - deviation)
+        diversity = min(1.0, len(type_distribution) / 3)
+        quality = round(0.6 * balance + 0.4 * diversity, 2)
+        if difficulty_distribution.get("hard", 0) == 0:
+            suggestions.append("缺少难题，建议加入 hard 题以拉开区分度")
+        if len(type_distribution) < 2:
+            suggestions.append("题型单一，建议混合多种题型")
+        if not suggestions:
+            suggestions.append("难度与题型分布较均衡")
+        return quality, suggestions
+
+    @staticmethod
+    def _expand_question_pairs(
+        count: int,
+        question_types: dict[str, int] | None,
+        difficulty_distribution: dict[str, int] | None,
+    ) -> list[tuple[str, str]]:
+        types = []
+        if question_types:
+            for question_type, amount in question_types.items():
+                types += [question_type] * int(amount)
+        difficulties = []
+        if difficulty_distribution:
+            for difficulty, amount in difficulty_distribution.items():
+                difficulties += [difficulty] * int(amount)
+        size = max(count or 0, len(types), len(difficulties)) or 5
+        return [
+            (
+                types[index]
+                if index < len(types)
+                else _QUESTION_TYPE_CYCLE[index % len(_QUESTION_TYPE_CYCLE)],
+                difficulties[index]
+                if index < len(difficulties)
+                else _DIFFICULTY_CYCLE[index % len(_DIFFICULTY_CYCLE)],
+            )
+            for index in range(size)
+        ]
+
+    @staticmethod
+    def _generate_question_body(
+        question_type: str,
+        index: int,
+    ) -> tuple[list[str] | None, str]:
+        if question_type == "single":
+            return list(_QUESTION_OPTIONS), "ABCD"[index % 4]
+        if question_type == "multiple":
+            return (
+                list(_QUESTION_OPTIONS),
+                ",".join(sorted({"A", "B", "C"})[: 2 + (index % 2)]),
+            )
+        if question_type == "judge":
+            return ["正确", "错误"], "正确" if index % 2 == 0 else "错误"
+        if question_type == "fill":
+            return None, "参考答案"
+        return None, "# 参考实现\npass"
+
+    @classmethod
+    def _save_question(
+        cls,
+        connection: sqlite3.Connection,
+        question: dict[str, Any],
+        course_id: int,
+        knowledge_point_uid: str | None,
+        bank_id: int,
+    ) -> int:
+        question_id = cls._next_id(connection, "questions")
+        score = {"easy": 4, "medium": 5, "hard": 8}.get(
+            question["difficulty"], 5
+        )
+        connection.execute(
+            """INSERT INTO questions(
+                   id, title, content, question_type, difficulty, options,
+                   correct_answer, explanation, score, source, status,
+                   creator_id, language, usage_count, course_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, 0, ?)""",
+            (
+                question_id,
+                question["title"],
+                question["content"],
+                question["question_type"],
+                question["difficulty"],
+                json.dumps(question["options"], ensure_ascii=False)
+                if question["options"]
+                else None,
+                question["correct_answer"],
+                "考查：",
+                score,
+                "ai",
+                course_id,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO question_bank_questions(question_bank_id, question_id) "
+            "VALUES (?, ?)",
+            (bank_id, question_id),
+        )
+        if knowledge_point_uid:
+            connection.execute(
+                """INSERT OR IGNORE INTO kg_resource_link(
+                       course_id, node_uid, resource_type, resource_id,
+                       link_type, weight
+                   ) VALUES (?, ?, 'question', ?, 'tests', 1.0)""",
+                (course_id, knowledge_point_uid, question_id),
+            )
+        return question_id
 
     @staticmethod
     def _resolve_knowledge_point(

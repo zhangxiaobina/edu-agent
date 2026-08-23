@@ -125,9 +125,9 @@ private-contract/
 版本差异、未填充的知识图谱/RAG/掌握度域和状态口径问题；现在接入会把业务库的不稳定性带入 Agent
 主线，也会诱导工具实现直接耦合生产表。
 
-- 当前查询/分析/知识图谱 10 个只读切片已经通过 registry-backed SQLite `SyntheticProvider` 执行；
-  canonical query/result/error 不暴露 SQLite Row、表名或生产 ORM。操作/写入切片仍沿既有事务实现，
-  尚未在本阶段并入领域 Provider。
+- 查询/分析/知识图谱 10 个切片与 5 个教学 command 已通过 registry-backed SQLite
+  `SyntheticProvider` 执行；canonical query/command/result/receipt/error 不暴露 SQLite Row、表名或生产
+  ORM。写 command 仍加入既有 ToolOperation 同库事务，Provider 不自行审批或 commit。
 - 私有 DDL 仅用于设计 Canonical Contract、发现状态和权限差异，不作为运行依赖。
 - 主仓不得保存本地数据库凭据、连接配置、原始行、查询结果或由真实学生数据生成的 Fixture。
 - 写工具继续在合成库验证审批、幂等、补偿和 outbox；最终接平台时只能通过业务 API 写入。
@@ -621,8 +621,7 @@ R0-R5 拆成 33 个可独立验收和交接的提示词；前一编号未满足�
 2. R1 已完成：Provider Gateway 已跑通 Chat Completions/Responses mode、Retry-After 和兼容 fallback。
 3. R2 已完成：RunEvent、RunJournal、增量工具消息、TurnFinalizer、Provider/SSE 真流、统一取消、持久 writer
    fence、五崩溃窗恢复和独立门禁均已通过。
-4. R3.1 已冻结 ToolManifest，R3.2 已将查询/分析/知识图谱只读切片收口为 SyntheticProvider；下一步 R3.3
-   收口剩余写/条件写工具契约，之后再做参数规范化和安全并发。
+4. R3.1 已冻结 ToolManifest，R3.2 已收口只读切片，R3.3 已将教学 command/receipt/error 与 16 工具契约矩阵收口；下一步 R3.4 做 schema-guided 参数规范化与 repair audit，仍不并发。
 5. 完成 R4：补实际 token/overflow recovery、全树预算、drain 与 backup/restore。
 6. 完成 R5：跑一次固定真实模型独立 Test，更新演示、部署和运行手册，冻结秋招候选版。
 

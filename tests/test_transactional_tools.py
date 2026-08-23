@@ -22,6 +22,31 @@ from edu_agent.state import StateStore
 from edu_agent.tools import registry
 
 
+class _RecordingTeachingProvider:
+    def __init__(self, base):
+        self.base = base
+        self.queries = []
+        self.commands = []
+        self.command_results = []
+
+    def execute(self, query, *, connection=None):
+        self.queries.append(query)
+        return self.base.execute(query, connection=connection)
+
+    def execute_command(self, command, *, connection=None):
+        self.commands.append(command)
+        result = self.base.execute_command(command, connection=connection)
+        self.command_results.append(result)
+        return result
+
+
+@pytest.fixture(autouse=True)
+def _restore_teaching_provider():
+    original = registry.teaching_data_provider()
+    yield
+    registry.configure_teaching_data_provider(original)
+
+
 def _context(**overrides) -> RunContext:
     values = {
         "session_id": "session-1",
@@ -56,6 +81,185 @@ def _executor(store, *, faults=None, approval=True):
 
 def _exam_args(name="事务考试"):
     return {"exam_name": name, "class_id": 3, "course_id": 1}
+
+
+def test_provider_write_cannot_bypass_executor_or_missing_approval(data_path, tmp_path):
+    provider = _RecordingTeachingProvider(registry.teaching_data_provider())
+    registry.configure_teaching_data_provider(provider)
+    direct = registry.dispatch("create_exam", _exam_args("直接绕过"))
+    assert direct["code"] == "TRANSACTIONAL_EXECUTOR_REQUIRED"
+    assert provider.commands == []
+
+    store = StateStore(tmp_path / "state.db")
+    connection = db.connect(data_path)
+    denied = _executor(store, approval=False).execute(
+        "create_exam",
+        _exam_args("未审批"),
+        _context(),
+        conn=connection,
+        caller_idempotency_key="provider-approval-gate",
+    )
+    assert denied.error["code"] == "APPROVAL_REQUIRED"
+    assert provider.commands == []
+    assert connection.execute(
+        "SELECT COUNT(*) FROM exams WHERE exam_name IN ('直接绕过', '未审批')"
+    ).fetchone()[0] == 0
+    connection.close()
+
+
+def test_provider_receipt_replays_without_second_command(data_path, tmp_path):
+    provider = _RecordingTeachingProvider(registry.teaching_data_provider())
+    registry.configure_teaching_data_provider(provider)
+    store = StateStore(tmp_path / "state.db")
+    connection = db.connect(data_path)
+    first = _executor(store).execute(
+        "create_exam",
+        _exam_args("回执重放"),
+        _context(),
+        conn=connection,
+        caller_idempotency_key="provider-receipt-replay",
+    )
+    replay = _executor(store).execute(
+        "create_exam",
+        _exam_args("回执重放"),
+        _context(session_id="session-replay"),
+        conn=connection,
+        caller_idempotency_key="provider-receipt-replay",
+    )
+    assert first.ok and replay.ok
+    assert replay.data == first.data
+    assert replay.meta["idempotent_replay"] is True
+    assert len(provider.commands) == 1
+    command = provider.commands[0]
+    receipt = provider.command_results[0].receipt
+    assert command.operation is not None
+    assert command.operation.idempotency_key
+    assert command.operation.payload_hash
+    assert receipt.operation_id == first.meta["operation_id"]
+    assert receipt.request_id == command.operation.idempotency_key
+    assert connection.execute(
+        "SELECT COUNT(*) FROM exams WHERE exam_name='回执重放'"
+    ).fetchone()[0] == 1
+    connection.close()
+
+
+def test_generate_questions_effect_is_derived_after_validation(data_path, tmp_path):
+    provider = _RecordingTeachingProvider(registry.teaching_data_provider())
+    registry.configure_teaching_data_provider(provider)
+    approvals = []
+    executor = PolicyToolExecutor(
+        registry,
+        policy=ExecutionPolicy(require_write_approval=True),
+        approval_handler=lambda request: approvals.append(request) or True,
+        state_store=StateStore(tmp_path / "state.db"),
+    )
+    context = _context()
+    connection = db.connect(data_path)
+
+    invalid = executor.execute(
+        "generate_questions",
+        {"course_id": 1, "count": 1, "save_to_bank": "1"},
+        context,
+        conn=connection,
+    )
+    assert invalid.error["code"] == "INVALID_ARGUMENTS"
+    assert provider.commands == [] and approvals == []
+
+    pure = executor.execute(
+        "generate_questions",
+        {"course_id": 1, "count": 1},
+        context,
+        conn=connection,
+    )
+    assert pure.ok and pure.data["saved_question_ids"] == []
+    assert provider.commands[-1].operation is None
+    assert approvals == []
+    operations_before = connection.execute(
+        "SELECT COUNT(*) FROM tool_operations"
+    ).fetchone()[0]
+
+    saved = executor.execute(
+        "generate_questions",
+        {"course_id": 1, "count": 1, "save_to_bank": 1},
+        context,
+        conn=connection,
+        caller_idempotency_key="save-generated-question",
+    )
+    assert saved.ok and len(saved.data["saved_question_ids"]) == 1
+    assert provider.commands[-1].operation is not None
+    assert len(approvals) == 1
+    assert connection.execute(
+        "SELECT COUNT(*) FROM tool_operations"
+    ).fetchone()[0] == operations_before + 1
+    connection.close()
+
+
+def test_non_mutating_command_keeps_canonical_error_without_operation(data_path, tmp_path):
+    connection = db.connect(data_path)
+    outcome = _executor(StateStore(tmp_path / "state.db")).execute(
+        "generate_paper",
+        {"question_bank_id": 999_999},
+        _context(),
+        conn=connection,
+    )
+    assert outcome.error["code"] == "NOT_FOUND"
+    assert outcome.error["kind"] == "not_found"
+    assert "operation_id" not in outcome.meta
+    assert connection.execute("SELECT COUNT(*) FROM tool_operations").fetchone()[0] == 0
+    connection.close()
+
+
+def test_provider_business_rejection_rolls_back_operation_and_outbox(data_path, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    connection = db.connect(data_path)
+    other_bank = connection.execute(
+        "SELECT id FROM question_banks WHERE course_id!=1 ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    before_questions = connection.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+    outcome = _executor(store).execute(
+        "generate_questions",
+        {"course_id": 1, "count": 1, "save_to_bank": other_bank},
+        _context(),
+        conn=connection,
+        caller_idempotency_key="wrong-course-bank",
+    )
+    assert outcome.error["code"] == "BUSINESS_REJECTED"
+    assert outcome.error["kind"] == "business_rejected"
+    assert connection.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == before_questions
+    assert connection.execute(
+        "SELECT status FROM tool_operations WHERE id=?",
+        (outcome.meta["operation_id"],),
+    ).fetchone()[0] == "failed"
+    assert connection.execute("SELECT COUNT(*) FROM tool_outbox").fetchone()[0] == 0
+    connection.close()
+
+
+def test_indirect_exam_scope_is_rechecked_by_command_provider(data_path, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    connection = db.connect(data_path)
+    denied_exam = connection.execute(
+        "SELECT id FROM exams WHERE course_id=2 ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    executor = PolicyToolExecutor(
+        registry,
+        policy=ExecutionPolicy(require_write_approval=True, enforce_roles=False),
+        approval_handler=lambda request: True,
+        state_store=store,
+    )
+    outcome = executor.execute(
+        "batch_grade",
+        {"exam_id": denied_exam},
+        _context(role="teacher", course_ids={1}),
+        conn=connection,
+        caller_idempotency_key="indirect-scope-denied",
+    )
+    assert outcome.error["code"] == "COURSE_SCOPE_DENIED"
+    assert outcome.error["kind"] == "scope_denied"
+    assert connection.execute(
+        "SELECT status FROM tool_operations WHERE id=?",
+        (outcome.meta["operation_id"],),
+    ).fetchone()[0] == "failed"
+    connection.close()
 
 
 def test_after_approval_before_business_crash_replays_without_duplicate(data_path, tmp_path):
@@ -126,6 +330,24 @@ def test_business_write_before_commit_is_rolled_back_and_recoverable(data_path, 
             (failed.meta["operation_id"],),
         ).fetchone()
         assert row["status"] == "failed"
+
+        recovered = _executor(store).execute(
+            "assign_homework",
+            {
+                "title": "事务作业",
+                "course_id": 1,
+                "class_ids": [3],
+                "end_time": "2026-09-01T20:00:00+08:00",
+            },
+            context,
+            conn=connection,
+            tool_call_id="call-homework-retry",
+            caller_idempotency_key="homework:week-1",
+        )
+        assert recovered.ok
+        assert connection.execute(
+            "SELECT COUNT(*) FROM homeworks WHERE title='事务作业'"
+        ).fetchone()[0] == 1
     finally:
         connection.close()
 
@@ -318,6 +540,43 @@ def test_compensation_failure_resumes_and_owner_scope_is_enforced(data_path, tmp
     assert connection.execute(
         "SELECT COUNT(*) FROM homeworks WHERE title='可补偿作业'"
     ).fetchone()[0] == 0
+    connection.close()
+
+
+def test_saved_generated_questions_keep_existing_compensation_state_machine(
+    data_path, tmp_path
+):
+    store = StateStore(tmp_path / "state.db")
+    context = _context()
+    connection = db.connect(data_path)
+    outcome = _executor(store).execute(
+        "generate_questions",
+        {"course_id": 1, "knowledge_point": "递归", "count": 2, "save_to_bank": 1},
+        context,
+        conn=connection,
+        caller_idempotency_key="compensate-generated-questions",
+    )
+    question_ids = outcome.data["saved_question_ids"]
+    assert outcome.ok and len(question_ids) == 2
+    assert connection.execute(
+        f"SELECT COUNT(*) FROM questions WHERE id IN ({','.join('?' for _ in question_ids)})",
+        question_ids,
+    ).fetchone()[0] == 2
+
+    operation = TransactionalToolRuntime(state_store=store).compensate(
+        connection,
+        outcome.meta["operation_id"],
+        context=context,
+    )
+    assert operation["status"] == "compensated"
+    assert connection.execute(
+        f"SELECT COUNT(*) FROM questions WHERE id IN ({','.join('?' for _ in question_ids)})",
+        question_ids,
+    ).fetchone()[0] == 0
+    assert connection.execute(
+        "SELECT COUNT(*) FROM tool_outbox WHERE operation_id=?",
+        (outcome.meta["operation_id"],),
+    ).fetchone()[0] == 2
     connection.close()
 
 
