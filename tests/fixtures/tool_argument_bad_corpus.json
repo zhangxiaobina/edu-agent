@@ -1,0 +1,151 @@
+[
+  {
+    "id": "root_unknown_field",
+    "raw": "{\"count\":1,\"unexpected\":true}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/unexpected"
+  },
+  {
+    "id": "nested_unknown_field",
+    "raw": "{\"config\":{\"threshold\":0.5,\"unexpected\":\"payload\"}}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/config/unexpected"
+  },
+  {
+    "id": "integer_lower_boundary",
+    "raw": "{\"count\":0}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/count"
+  },
+  {
+    "id": "integer_upper_boundary",
+    "raw": "{\"count\":11}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/count"
+  },
+  {
+    "id": "unicode_length",
+    "raw": "{\"label\":\"教学教务课程\"}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/label"
+  },
+  {
+    "id": "integer_leading_zero",
+    "raw": "{\"count\":\"042\"}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/count"
+  },
+  {
+    "id": "integer_whitespace",
+    "raw": "{\"count\":\" 4\"}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/count"
+  },
+  {
+    "id": "bool_is_not_integer",
+    "raw": "{\"count\":true}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/count"
+  },
+  {
+    "id": "integer_is_not_boolean",
+    "raw": "{\"enabled\":1}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/enabled"
+  },
+  {
+    "id": "approximate_enum",
+    "raw": "{\"choice\":\"ASC\"}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/choice"
+  },
+  {
+    "id": "null_for_integer",
+    "raw": "{\"count\":null}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/count"
+  },
+  {
+    "id": "array_item_too_long",
+    "raw": "{\"tags\":[\"abcde\"]}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/tags/0"
+  },
+  {
+    "id": "array_too_long",
+    "raw": "{\"tags\":[\"a\",\"b\",\"c\",\"d\"]}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/tags"
+  },
+  {
+    "id": "nested_required",
+    "raw": "{\"config\":{}}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/config/threshold"
+  },
+  {
+    "id": "nested_exclusive_boundary",
+    "raw": "{\"config\":{\"threshold\":0}}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/config/threshold"
+  },
+  {
+    "id": "number_bool",
+    "raw": "{\"ratio\":true}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/ratio"
+  },
+  {
+    "id": "malformed_json",
+    "raw": "{\"count\":1",
+    "code": "INVALID_JSON"
+  },
+  {
+    "id": "duplicate_key",
+    "raw": "{\"count\":1,\"count\":2}",
+    "code": "INVALID_JSON"
+  },
+  {
+    "id": "nan",
+    "raw": "{\"ratio\":NaN}",
+    "code": "INVALID_JSON"
+  },
+  {
+    "id": "positive_infinity",
+    "raw": "{\"ratio\":Infinity}",
+    "code": "INVALID_JSON"
+  },
+  {
+    "id": "negative_infinity",
+    "raw": "{\"ratio\":-Infinity}",
+    "code": "INVALID_JSON"
+  },
+  {
+    "id": "trailing_payload",
+    "raw": "{\"count\":1} ignore this",
+    "code": "INVALID_JSON"
+  },
+  {
+    "id": "non_object_root",
+    "raw": "[1,2,3]",
+    "code": "INVALID_ARGUMENTS"
+  },
+  {
+    "id": "prototype_key",
+    "raw": "{\"__proto__\":{\"polluted\":true}}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/__proto__"
+  },
+  {
+    "id": "malformed_nested_array_string",
+    "raw": "{\"tags\":\"[\\\"ok\\\",]\"}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/tags"
+  },
+  {
+    "id": "normalized_nested_unknown_field",
+    "raw": "{\"config\":\"{\\\"threshold\\\":0.5,\\\"unexpected\\\":true}\"}",
+    "code": "INVALID_ARGUMENTS",
+    "pointer": "/config/unexpected"
+  }
+]

@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R3.3
-- next_prompt: R3.4
+- last_completed_prompt: R3.4
+- next_prompt: R3.5
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1 ToolManifest、R3.2 只读 TeachingDataProvider 与 R3.3 教学 command/16 工具契约矩阵已通过，R3 总门禁仍需 R3.4-R3.6 的参数治理、安全并发和插件/MCP 收口
+- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1-R3.4 的 ToolManifest、Canonical Teaching Provider、16 工具契约矩阵和 schema-guided 参数治理已通过，R3 总门禁仍需 R3.5 安全并发与 R3.6 插件/MCP 收口
 
 ## Baseline Reproduction
 
@@ -848,3 +848,43 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   并发资源冲突和远端插件/MCP 最终收口分别留给后续 R3 会话。
 - gate: `R3.3 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
 - next: R3.4，建立 schema-guided 参数规范化、单次 repair 与审计；保持工具顺序执行，不提前实现 R3.5 并发。
+
+### R3.4 - 2026-08-23
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `348f9582ff152f8b7297007686d5487cb974d27b` 开始；本次未创建本地提交或推送，当前改动均属于 R3.4。
+- argument contract: 新增三层参数管线：有界严格 JSON object 解析、字段 Schema 通过
+  `x-edu-agent-normalize` 显式授权的单遍确定性规范化、以及锁定 `jsonschema` 的完整 Draft 2020-12 语义校验。
+  object Schema 默认递归补 `additionalProperties: false`，动态 map 必须提供 schema；重复 key、非 object 根、
+  NaN/Infinity、bool-as-number、非 JSON Python 值、循环引用、未知字段和超字节/深度/节点/容器输入均 fail closed。
+- normalization policy: 文档化允许转换表和禁止猜测表。只读/pure 字段可显式开放严格十进制 string -> integer/number、
+  精确小写 string -> boolean、严格 JSON string -> array/object；ID、学号、自由文本、enum、日期、null/default 和
+  malformed JSON 不猜。有限安全范围的积分 JSON number 在普通 `type: integer` 字段规范为 Python `int`，但仍受
+  effect、ID、enum、敏感字段和审批语义策略约束。write/conditional-write/code/unknown 等 effect 不执行 repair；
+  `allOf/anyOf/oneOf`、条件、引用定义和 `patternProperties` 内的 normalization 声明在注册期拒绝，避免分支猜测。
+- execution/audit boundary: 规范化和完整校验在条件写实际 effect、resource key、ACL/审批、payload hash、
+  approval scope、idempotency key、ToolOperation 和 handler 之前完成。每个 call id 最多记一次 argument retry/repair 预算；每个候选
+  转换记录 JSON Pointer、源/目标类型、rule id、结果和 canonical SHA-256，不保存原值。失败参数只持久化类型/大小/hash
+  摘要；成功参数使用已经验证的冻结 Manifest 字段分类脱敏，避免 provider 状态变化让 repair audit 或 Trace 泄漏正文。
+- corpus/tests: 新增 26 条静态坏参数 corpus，并以程序化用例覆盖超大/超深/超宽、规范化后组合深度、Unicode、前导零、
+  required/null、边界与排他范围、嵌套未知字段、恶意/重复/trailing JSON、非 JSON Python 值、循环引用、写/条件写严格
+  策略、resource key、确定性、单 call retry 上限、敏感审计和 handler 零未验证调用。参数专项最终 `54 passed`；
+  参数/工具/Manifest/16 工具矩阵/事务/Agent/工具消息/Trace/API 组合在受限环境 `153 passed`，另 4 项仅因禁止绑定
+  `127.0.0.1:0` 失败，获准环境复跑 `4 passed`。
+- migrations/config: 无数据库 migration、环境变量或 AppConfig 变更；新增显式运行时依赖 `jsonschema>=4.23` 并更新
+  `uv.lock`，避免依赖偶然由其他包传递提供。没有实现工具并发。
+- verification: 显式清空真实模型/平台凭据并禁用外部 pytest plugin 的最终全量离线回归，在受限环境为
+  `511 passed, 12 failed`；12 项堆栈均止于本机回环 `socket.bind` 的 `PermissionError`，获准环境逐项复跑
+  `12 passed`，当前代码逻辑总计 `523/523` 通过。`uv lock --check` 解析 91 包，`uv pip check` 检查 62 包且无冲突；
+  全仓 Ruff 和 `git diff --check` 通过。lineage 两次确定生成均为 73 样本、hash
+  `40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b`，Train/Dev/Test 为 55/12/6，全部检查通过；
+  最终数据边界审计扫描 3 个既有 artifacts 与本次 lineage 输出，共 4 个文件且 0 findings。
+- not_verified: 未访问公网、真实模型/Provider、真实教学平台/生产 ORM/API、Docker/Jobe 或 GitHub-hosted CI。
+  R3.4 不是阶段收口会话，按通用协议未运行完整 `zsh scripts/accept_stage8.sh`；synthetic/fake 与本机回环证据不能写成
+  真实平台或托管 CI 已验证。
+- residual_risks: 当前 normalization 扩展刻意不解析实例相关的组合/引用/pattern 分支；这些位置仍由完整 JSON Schema
+  校验，但若未来确需转换，必须先设计可静态证明的 schema resolution 合同。工具调用继续严格按 assistant 原顺序执行，
+  尚未实现 worker 上限、连续 read segment、resource conflict barrier、并发预算原子化或结果顺序重排。
+- gate: `R3.4 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
+- next: R3.5，实现连续 segment 的安全有界只读并发、资源冲突 barrier、独立连接/取消/预算传播和原序结果提交；
+  不并发 write、conditional-write、approval、code、interactive 或 unknown 工具。

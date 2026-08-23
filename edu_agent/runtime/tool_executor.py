@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import hashlib
 import inspect
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -14,6 +13,15 @@ from ..state.store import FencingTokenRejected, RunCancelled
 from .cancellation import CancellationRequested
 from .models import BudgetExceeded, RunContext
 from .security import redact_sensitive
+from .tool_arguments import (
+    RepairAudit,
+    ToolArgumentError,
+    normalize_tool_arguments,
+    redact_classified_arguments,
+    strict_parse_tool_arguments,
+    summarize_raw_arguments,
+    validate_tool_arguments,
+)
 from .transactions import (
     IdempotencyConflict,
     OperationUnavailable,
@@ -91,51 +99,11 @@ ToolOutcome = ToolResult
 
 
 def _validate_value(value: Any, schema: dict, path: str) -> list[str]:
-    errors: list[str] = []
-    expected = schema.get("type")
-    type_map = {
-        "string": str,
-        "integer": int,
-        "number": (int, float),
-        "boolean": bool,
-        "array": list,
-        "object": dict,
-    }
-    if expected in type_map:
-        expected_type = type_map[expected]
-        if not isinstance(value, expected_type) or expected == "integer" and isinstance(value, bool):
-            return [f"{path} 应为 {expected}"]
-    if "enum" in schema and value not in schema["enum"]:
-        errors.append(f"{path} 必须是 {schema['enum']} 之一")
-    if isinstance(value, str):
-        if "maxLength" in schema and len(value) > schema["maxLength"]:
-            errors.append(f"{path} 长度不能超过 {schema['maxLength']}")
-        if "minLength" in schema and len(value) < schema["minLength"]:
-            errors.append(f"{path} 长度不能小于 {schema['minLength']}")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in schema and value < schema["minimum"]:
-            errors.append(f"{path} 不能小于 {schema['minimum']}")
-        if "maximum" in schema and value > schema["maximum"]:
-            errors.append(f"{path} 不能大于 {schema['maximum']}")
-    if isinstance(value, list):
-        if "maxItems" in schema and len(value) > schema["maxItems"]:
-            errors.append(f"{path} 元素数不能超过 {schema['maxItems']}")
-        item_schema = schema.get("items")
-        if item_schema:
-            for index, item in enumerate(value):
-                errors.extend(_validate_value(item, item_schema, f"{path}[{index}]"))
-    if isinstance(value, dict):
-        properties = schema.get("properties", {})
-        for required in schema.get("required", []):
-            if required not in value:
-                errors.append(f"{path}.{required} 为必填参数")
-        if schema.get("additionalProperties") is False:
-            for key in set(value) - set(properties):
-                errors.append(f"{path}.{key} 是未知参数")
-        for key, item in value.items():
-            if key in properties:
-                errors.extend(_validate_value(item, properties[key], f"{path}.{key}"))
-    return errors
+    """Compatibility wrapper over the complete JSON Schema validator."""
+
+    issues = validate_tool_arguments(value, schema)
+    prefix = "" if path == "arguments" else path
+    return [f"{prefix}{issue['message']}" for issue in issues]
 
 
 class PolicyToolExecutor:
@@ -160,6 +128,57 @@ class PolicyToolExecutor:
         )
         self.manifest = manifest
 
+    @staticmethod
+    def _argument_pipeline_meta(
+        context: RunContext,
+        *,
+        tool_call_id: str | None,
+        repairs: tuple[RepairAudit, ...],
+        consume_retry: bool,
+    ) -> dict[str, Any]:
+        meta: dict[str, Any] = {}
+        if repairs:
+            meta["argument_repairs"] = [repair.to_dict() for repair in repairs]
+        if consume_retry:
+            consumed = context.consume_argument_retry_budget(tool_call_id)
+            meta["argument_retry"] = {
+                "consumed": int(consumed),
+                "used_for_call": 1,
+                "max_per_call": 1,
+            }
+        return meta
+
+    def _record_argument_repairs(
+        self,
+        context: RunContext,
+        *,
+        name: str,
+        tool_call_id: str | None,
+        repairs: tuple[RepairAudit, ...],
+    ) -> None:
+        if self.state_store is None or not repairs:
+            return
+        results = {repair.result for repair in repairs}
+        decision = (
+            "applied"
+            if results == {"applied"}
+            else "rejected"
+            if "applied" not in results
+            else "partial"
+        )
+        self.state_store.record_audit_event(
+            actor_id=context.actor_id,
+            tenant_id=context.tenant_id,
+            action="tool.argument_repair",
+            resource=name,
+            decision=decision,
+            details={
+                "run_id": context.run_id,
+                "tool_call_id": tool_call_id,
+                "repairs": [repair.to_dict() for repair in repairs],
+            },
+        )
+
     def execute_raw(
         self,
         name: str,
@@ -181,12 +200,13 @@ class PolicyToolExecutor:
             else context.tool_manifest
         )
         started = time.monotonic()
+        raw_summary = {"_raw": summarize_raw_arguments(raw_arguments)}
         if frozen_manifest is not None:
             if hasattr(frozen_manifest, "matches_context") and not frozen_manifest.matches_context(context):
                 return self._finish(
                     context,
                     name,
-                    {"_raw": raw_arguments},
+                    raw_summary,
                     started,
                     ToolOutcome(
                         False,
@@ -203,7 +223,7 @@ class PolicyToolExecutor:
                 return self._finish(
                     context,
                     name,
-                    {"_raw": raw_arguments},
+                    raw_summary,
                     started,
                     ToolOutcome(
                         False,
@@ -215,7 +235,7 @@ class PolicyToolExecutor:
                 return self._finish(
                     context,
                     name,
-                    {"_raw": raw_arguments},
+                    raw_summary,
                     started,
                     ToolOutcome(
                         False,
@@ -226,19 +246,42 @@ class PolicyToolExecutor:
                     ),
                     tool_call_id=tool_call_id,
                 )
-        arguments, parse_error = parse_tool_arguments(raw_arguments)
-        if parse_error is not None:
+        try:
+            arguments = strict_parse_tool_arguments(raw_arguments)
+        except ToolArgumentError as error:
+            context.check_control("tool.before_call")
+            try:
+                context.budget.consume_tool_call()
+            except BudgetExceeded as budget_error:
+                return self._finish(
+                    context,
+                    name,
+                    raw_summary,
+                    started,
+                    ToolOutcome(
+                        False,
+                        error={"code": "BUDGET_EXCEEDED", "message": str(budget_error)},
+                    ),
+                    tool_call_id=tool_call_id,
+                )
+            argument_meta = self._argument_pipeline_meta(
+                context,
+                tool_call_id=tool_call_id,
+                repairs=(),
+                consume_retry=True,
+            )
             return self._finish(
                 context,
                 name,
-                {"_raw": raw_arguments},
+                raw_summary,
                 started,
-                parse_error,
+                ToolOutcome(False, error=error.to_error()),
                 tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
             )
         return self.execute(
             name,
-            arguments or {},
+            arguments,
             context,
             conn=conn,
             allowed_tools=allowed_tools,
@@ -246,6 +289,7 @@ class PolicyToolExecutor:
             plan_step_id=plan_step_id,
             caller_idempotency_key=caller_idempotency_key,
             manifest=frozen_manifest,
+            _parsed=True,
         )
 
     def execute(
@@ -260,8 +304,10 @@ class PolicyToolExecutor:
         plan_step_id: str | None = None,
         caller_idempotency_key: str | None = None,
         manifest: ToolManifest | None = None,
+        _parsed: bool = False,
     ) -> ToolOutcome:
         started = time.monotonic()
+        unvalidated_summary = {"_raw": summarize_raw_arguments(arguments)}
         context.check_control("tool.before_call")
         try:
             context.budget.consume_tool_call()
@@ -269,7 +315,7 @@ class PolicyToolExecutor:
             return self._finish(
                 context,
                 name,
-                arguments,
+                unvalidated_summary,
                 started,
                 ToolOutcome(False, error={"code": "BUDGET_EXCEEDED", "message": str(error)}),
                 tool_call_id=tool_call_id,
@@ -278,7 +324,7 @@ class PolicyToolExecutor:
             return self._finish(
                 context,
                 name,
-                arguments,
+                unvalidated_summary,
                 started,
                 ToolOutcome(
                     False,
@@ -301,7 +347,7 @@ class PolicyToolExecutor:
                 return self._finish(
                     context,
                     name,
-                    arguments,
+                    unvalidated_summary,
                     started,
                     ToolOutcome(
                         False,
@@ -316,7 +362,7 @@ class PolicyToolExecutor:
             return self._finish(
                 context,
                 name,
-                arguments,
+                unvalidated_summary,
                 started,
                 ToolOutcome(
                     False,
@@ -333,7 +379,7 @@ class PolicyToolExecutor:
             return self._finish(
                 context,
                 name,
-                arguments,
+                unvalidated_summary,
                 started,
                 ToolOutcome(
                     False,
@@ -345,7 +391,7 @@ class PolicyToolExecutor:
             return self._finish(
                 context,
                 name,
-                arguments,
+                unvalidated_summary,
                 started,
                 ToolOutcome(
                     False,
@@ -353,18 +399,93 @@ class PolicyToolExecutor:
                 ),
                 tool_call_id=tool_call_id,
             )
-        validation_errors = _validate_value(arguments, spec.schema.get("parameters", {}), "arguments")
-        if validation_errors:
+        if not _parsed:
+            try:
+                arguments = strict_parse_tool_arguments(arguments)
+            except ToolArgumentError as error:
+                argument_meta = self._argument_pipeline_meta(
+                    context,
+                    tool_call_id=tool_call_id,
+                    repairs=(),
+                    consume_retry=True,
+                )
+                return self._finish(
+                    context,
+                    name,
+                    unvalidated_summary,
+                    started,
+                    ToolOutcome(False, error=error.to_error()),
+                    tool_call_id=tool_call_id,
+                    argument_meta=argument_meta,
+                    data_classification=getattr(spec, "data_classification", {}),
+                )
+        parameter_schema = spec.schema.get("parameters", {})
+        data_classification = getattr(spec, "data_classification", {})
+        protected_pointers = tuple(
+            f"/{key}" for key in getattr(spec, "mutation_parameters", ())
+        )
+        try:
+            arguments, repairs = normalize_tool_arguments(
+                arguments,
+                parameter_schema,
+                effect=spec.effect,
+                data_classification=data_classification,
+                protected_pointers=protected_pointers,
+            )
+        except ToolArgumentError as error:
+            repairs = error.repair_audits
+            argument_meta = self._argument_pipeline_meta(
+                context,
+                tool_call_id=tool_call_id,
+                repairs=repairs,
+                consume_retry=True,
+            )
+            self._record_argument_repairs(
+                context,
+                name=name,
+                tool_call_id=tool_call_id,
+                repairs=repairs,
+            )
             return self._finish(
                 context,
                 name,
-                arguments,
+                {"_raw": summarize_raw_arguments(arguments)},
+                started,
+                ToolOutcome(False, error=error.to_error()),
+                tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
+                data_classification=data_classification,
+            )
+        validation_issues = validate_tool_arguments(arguments, parameter_schema)
+        argument_meta = self._argument_pipeline_meta(
+            context,
+            tool_call_id=tool_call_id,
+            repairs=repairs,
+            consume_retry=bool(repairs or validation_issues),
+        )
+        self._record_argument_repairs(
+            context,
+            name=name,
+            tool_call_id=tool_call_id,
+            repairs=repairs,
+        )
+        if validation_issues:
+            return self._finish(
+                context,
+                name,
+                {"_raw": summarize_raw_arguments(arguments)},
                 started,
                 ToolOutcome(
                     False,
-                    error={"code": "INVALID_ARGUMENTS", "message": "; ".join(validation_errors)},
+                    error={
+                        "code": "INVALID_ARGUMENTS",
+                        "message": "; ".join(issue["message"] for issue in validation_issues),
+                        "details": {"issues": [dict(issue) for issue in validation_issues]},
+                    },
                 ),
                 tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
+                data_classification=data_classification,
             )
         if self.policy.enforce_roles and context.role not in spec.allowed_roles:
             return self._finish(
@@ -380,6 +501,8 @@ class PolicyToolExecutor:
                     },
                 ),
                 tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
+                data_classification=data_classification,
             )
         course_id = arguments.get("course_id")
         if (
@@ -402,6 +525,8 @@ class PolicyToolExecutor:
                     },
                 ),
                 tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
+                data_classification=data_classification,
             )
         if spec.effect is ToolEffect.CODE_EXECUTION and not self.policy.allow_local_code_execution:
             return self._finish(
@@ -417,6 +542,8 @@ class PolicyToolExecutor:
                     },
                 ),
                 tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
+                data_classification=data_classification,
             )
         availability = getattr(self.provider, "tool_available", None)
         if callable(availability) and not self._tool_is_available(availability, name, context):
@@ -430,10 +557,17 @@ class PolicyToolExecutor:
                     error={"code": "TOOL_UNAVAILABLE", "message": f"工具 {name} 当前健康状态不可用"},
                 ),
                 tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
+                data_classification=data_classification,
             )
         if spec.effect is ToolEffect.CODE_EXECUTION:
             approval_outcome = self._approve_code_execution(
-                spec, arguments, context, started=started, tool_call_id=tool_call_id,
+                spec,
+                arguments,
+                context,
+                started=started,
+                tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
             )
             if approval_outcome is not None:
                 return approval_outcome
@@ -448,6 +582,7 @@ class PolicyToolExecutor:
                 tool_call_id=tool_call_id,
                 plan_step_id=plan_step_id,
                 caller_idempotency_key=caller_idempotency_key,
+                argument_meta=argument_meta,
             )
         try:
             contextual_dispatch = getattr(self.provider, "dispatch_with_context", None)
@@ -512,6 +647,8 @@ class PolicyToolExecutor:
             started,
             outcome,
             tool_call_id=tool_call_id,
+            argument_meta=argument_meta,
+            data_classification=data_classification,
         )
 
     @staticmethod
@@ -548,6 +685,7 @@ class PolicyToolExecutor:
         *,
         started: float,
         tool_call_id: str | None,
+        argument_meta: dict[str, Any] | None = None,
     ) -> ToolOutcome | None:
         if not self.policy.require_code_execution_approval:
             return None
@@ -603,6 +741,8 @@ class PolicyToolExecutor:
                 },
             ),
             tool_call_id=tool_call_id,
+            argument_meta=argument_meta,
+            data_classification=getattr(spec, "data_classification", {}),
         )
 
     def _execute_mutation(
@@ -617,6 +757,7 @@ class PolicyToolExecutor:
         tool_call_id: str | None,
         plan_step_id: str | None,
         caller_idempotency_key: str | None,
+        argument_meta: dict[str, Any] | None = None,
     ) -> ToolOutcome:
         own_connection = conn is None
         connection = conn or db.connect()
@@ -642,6 +783,8 @@ class PolicyToolExecutor:
                     },
                 ),
                 tool_call_id=tool_call_id,
+                argument_meta=argument_meta,
+                data_classification=getattr(spec, "data_classification", {}),
             )
         digest = payload_hash(name, arguments)
         scope = approval_scope(
@@ -725,6 +868,8 @@ class PolicyToolExecutor:
                         ),
                         tool_call_id=tool_call_id,
                         operation=operation,
+                        argument_meta=argument_meta,
+                        data_classification=getattr(spec, "data_classification", {}),
                     )
             execution = self.transaction_runtime.execute(
                 connection,
@@ -794,6 +939,8 @@ class PolicyToolExecutor:
             outcome,
             tool_call_id=tool_call_id,
             operation=operation,
+            argument_meta=argument_meta,
+            data_classification=getattr(spec, "data_classification", {}),
         )
 
     @staticmethod
@@ -952,7 +1099,11 @@ class PolicyToolExecutor:
         *,
         tool_call_id: str | None = None,
         operation: dict | None = None,
+        argument_meta: dict[str, Any] | None = None,
+        data_classification: Mapping[str, str] | None = None,
     ) -> ToolOutcome:
+        if argument_meta:
+            outcome.meta.update(argument_meta)
         outcome.meta.update(
             {
                 "tool": name,
@@ -983,6 +1134,20 @@ class PolicyToolExecutor:
             )
         if self.state_store is not None:
             context.check_control("tool.before_event_commit")
+            classifications = data_classification
+            if classifications is None:
+                try:
+                    current_spec = (
+                        self.provider.get_spec(name)
+                        if hasattr(self.provider, "get_spec")
+                        else None
+                    )
+                    classifications = getattr(current_spec, "data_classification", {})
+                except Exception:
+                    classifications = {}
+            persisted_arguments = redact_sensitive(
+                redact_classified_arguments(arguments, classifications)
+            )
             tool_event_id = self.state_store.record_tool_event(
                 run_id=context.run_id,
                 session_id=context.session_id,
@@ -990,7 +1155,7 @@ class PolicyToolExecutor:
                 operation_id=operation["id"] if operation else None,
                 operation_status=operation["status"] if operation else None,
                 tool_name=name,
-                arguments=redact_sensitive(arguments),
+                arguments=persisted_arguments,
                 outcome=outcome.to_dict(),
                 duration_ms=outcome.meta["duration_ms"],
                 context=context,
@@ -1045,21 +1210,7 @@ class PolicyToolExecutor:
 
 
 def parse_tool_arguments(raw_arguments: str | dict | None) -> tuple[dict | None, ToolOutcome | None]:
-    if isinstance(raw_arguments, dict):
-        return raw_arguments, None
     try:
-        parsed = json.loads(raw_arguments or "{}")
-    except json.JSONDecodeError as error:
-        return None, ToolOutcome(
-            False,
-            error={
-                "code": "INVALID_JSON",
-                "message": f"工具参数不是合法 JSON：{error.msg}",
-            },
-        )
-    if not isinstance(parsed, dict):
-        return None, ToolOutcome(
-            False,
-            error={"code": "INVALID_ARGUMENTS", "message": "工具参数必须是 JSON object"},
-        )
-    return parsed, None
+        return strict_parse_tool_arguments(raw_arguments), None
+    except ToolArgumentError as error:
+        return None, ToolOutcome(False, error=error.to_error())

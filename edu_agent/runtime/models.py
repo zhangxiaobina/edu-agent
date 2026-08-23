@@ -81,6 +81,12 @@ class RunContext:
     )
     _tool_manifest: object | None = field(default=None, repr=False, compare=False)
     _tool_manifest_hash_override: str | None = field(default=None, repr=False, compare=False)
+    _argument_retry_calls: set[str] = field(default_factory=set, repr=False, compare=False)
+    _argument_retry_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        repr=False,
+        compare=False,
+    )
 
     def bind_runtime_control(
         self,
@@ -122,6 +128,24 @@ class RunContext:
         self.cancellation_token.checkpoint("provider_event.before_publish")
         if self._provider_event_sink is not None:
             self._provider_event_sink(event)
+
+    def consume_argument_retry_budget(self, tool_call_id: str | None) -> bool:
+        """Charge at most one argument-repair/retry unit to one tool call.
+
+        Calls without a provider id are scoped to their already charged tool
+        call ordinal, so standalone executor use remains bounded as well.
+        """
+
+        key = tool_call_id or f"anonymous:{self.budget.tool_calls}"
+        with self._argument_retry_lock:
+            if key in self._argument_retry_calls:
+                return False
+            self._argument_retry_calls.add(key)
+            return True
+
+    def argument_retry_count(self, tool_call_id: str) -> int:
+        with self._argument_retry_lock:
+            return int(tool_call_id in self._argument_retry_calls)
 
     def bind_control_check(self, control_check: Callable[[str], None]) -> None:
         """Bind a cooperative child control check without a session lease.

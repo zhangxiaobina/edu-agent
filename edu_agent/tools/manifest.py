@@ -18,6 +18,10 @@ from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
 
 from ..data_classification import DataClass, classify_key
+from .argument_contract import (
+    strictify_object_schemas,
+    validate_normalization_declarations,
+)
 
 
 class ToolManifestError(ValueError):
@@ -208,6 +212,29 @@ def field_data_classification(schema: Mapping[str, Any]) -> dict[str, str]:
             result[child_pointer] = category.value
             if child.get("type") == "object":
                 walk(child, child_pointer)
+                additional = child.get("additionalProperties")
+                if isinstance(additional, Mapping):
+                    item_pointer = f"{child_pointer}/*"
+                    item_type = additional.get("type")
+                    result[item_pointer] = (
+                        DataClass.FREE_TEXT.value
+                        if item_type == "string"
+                        else category.value
+                    )
+                    if item_type == "object":
+                        walk(additional, item_pointer)
+                    elif item_type == "array" and isinstance(
+                        additional.get("items"), Mapping
+                    ):
+                        item = additional["items"]
+                        nested_pointer = f"{item_pointer}/*"
+                        result[nested_pointer] = (
+                            DataClass.FREE_TEXT.value
+                            if item.get("type") == "string"
+                            else category.value
+                        )
+                        if item.get("type") == "object":
+                            walk(item, nested_pointer)
             elif child.get("type") == "array" and isinstance(child.get("items"), Mapping):
                 item = child["items"]
                 item_pointer = f"{child_pointer}/*"
@@ -356,6 +383,12 @@ def validate_function_schema(schema: Mapping[str, Any], *, name: str | None = No
         raise ToolRegistrationError("tool schema 必须包含 parameters object")
     if parameters.get("type") != "object":
         raise ToolRegistrationError("tool parameters 根节点必须是 object")
+    schema_dialect = parameters.get("$schema")
+    if schema_dialect is not None and schema_dialect not in {
+        "https://json-schema.org/draft/2020-12/schema",
+        "https://json-schema.org/draft/2020-12/schema#",
+    }:
+        raise ToolRegistrationError("tool parameters 只支持 JSON Schema Draft 2020-12")
     properties = parameters.get("properties", {})
     if not isinstance(properties, dict):
         raise ToolRegistrationError("tool parameters.properties 必须是 object")
@@ -364,37 +397,19 @@ def validate_function_schema(schema: Mapping[str, Any], *, name: str | None = No
         raise ToolRegistrationError("tool parameters.required 必须是字符串数组")
     if len(set(required)) != len(required) or not set(required) <= set(properties):
         raise ToolRegistrationError("tool parameters.required 含重复或未知字段")
-    parameters.setdefault("additionalProperties", False)
+    try:
+        strictify_object_schemas(parameters)
+        validate_normalization_declarations(parameters)
+    except ValueError as error:
+        raise ToolRegistrationError(str(error)) from error
     _validate_json_values(normalized)
     try:
         import jsonschema
 
-        validator_cls = jsonschema.validators.validator_for(parameters)
-        validator_cls.check_schema(parameters)
-    except ImportError:
-        # The project lock currently brings jsonschema transitively.  Keep a
-        # structural fallback for minimal standard-library plugin hosts.
-        _validate_schema_structure(parameters)
+        jsonschema.Draft202012Validator.check_schema(parameters)
     except Exception as error:
         raise ToolRegistrationError(f"tool JSON Schema 无效: {error}") from error
     return normalized
-
-
-def _validate_schema_structure(node: Mapping[str, Any], path: str = "parameters") -> None:
-    if not isinstance(node, Mapping):
-        raise ToolRegistrationError(f"{path} 必须是 object")
-    allowed_types = {"object", "array", "string", "integer", "number", "boolean", "null"}
-    if "type" in node and node["type"] not in allowed_types and not isinstance(node["type"], list):
-        raise ToolRegistrationError(f"{path}.type 无效")
-    if isinstance(node.get("properties"), Mapping):
-        for key, child in node["properties"].items():
-            if not isinstance(key, str):
-                raise ToolRegistrationError(f"{path}.properties key 无效")
-            _validate_schema_structure(child, f"{path}.properties.{key}")
-    if isinstance(node.get("items"), Mapping):
-        _validate_schema_structure(node["items"], f"{path}.items")
-    if isinstance(node.get("additionalProperties"), Mapping):
-        _validate_schema_structure(node["additionalProperties"], f"{path}.additionalProperties")
 
 
 def validate_handler_contract(handler: Callable[..., Any], schema: Mapping[str, Any]) -> None:

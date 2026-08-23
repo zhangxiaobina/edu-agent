@@ -502,6 +502,7 @@ name = "edu-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jsonschema" },
     { name = "langchain-core" },
     { name = "langgraph" },
     { name = "openai" },
@@ -526,6 +527,7 @@ rag = [
 
 [package.metadata]
 requires-dist = [
+    { name = "jsonschema", specifier = ">=4.23" },
     { name = "langchain-community", marker = "extra == 'rag'", specifier = ">=0.3.0" },
     { name = "langchain-core", specifier = ">=0.3.0" },
     { name = "langgraph", specifier = ">=0.2.0" },

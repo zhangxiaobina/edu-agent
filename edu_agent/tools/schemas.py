@@ -6,6 +6,15 @@
 """
 from __future__ import annotations
 
+from .argument_contract import (
+    JSON_STRING_TO_ARRAY,
+    JSON_STRING_TO_OBJECT,
+    NORMALIZATION_KEYWORD,
+    STRING_TO_BOOLEAN,
+    STRING_TO_INTEGER,
+    STRING_TO_NUMBER,
+)
+
 # ---- 复用的枚举 ----
 _DIFFICULTY = ["easy", "medium", "hard"]
 _QTYPE = ["single", "multiple", "judge", "fill", "essay", "coding"]
@@ -22,9 +31,20 @@ SCHEMAS: list[dict] = [
                 "exam_id": {"type": "integer", "description": "考试 ID"},
                 "student_id": {"type": "integer", "description": "学生 ID"},
                 "class_id": {"type": "integer", "description": "班级 ID（结合 exam 过滤该班成绩）"},
-                "only_failed": {"type": "boolean", "description": "仅返回不及格记录", "default": False},
-                "page": {"type": "integer", "default": 1},
-                "page_size": {"type": "integer", "default": 50},
+                "only_failed": {
+                    "type": "boolean",
+                    "description": "仅返回不及格记录",
+                    "default": False,
+                    NORMALIZATION_KEYWORD: STRING_TO_BOOLEAN,
+                },
+                "page": {
+                    "type": "integer", "minimum": 1, "default": 1,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
+                "page_size": {
+                    "type": "integer", "minimum": 1, "maximum": 200, "default": 50,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
             },
             "required": [],
         },
@@ -41,8 +61,14 @@ SCHEMAS: list[dict] = [
                 "status": {"type": "integer", "enum": [0, 1, 2],
                            "description": "0=未开始 1=进行中 2=已结束"},
                 "search": {"type": "string", "description": "考试名/编号关键词"},
-                "page": {"type": "integer", "default": 1},
-                "page_size": {"type": "integer", "default": 50},
+                "page": {
+                    "type": "integer", "minimum": 1, "default": 1,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
+                "page_size": {
+                    "type": "integer", "minimum": 1, "maximum": 200, "default": 50,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
             },
             "required": [],
         },
@@ -57,8 +83,14 @@ SCHEMAS: list[dict] = [
                 "search": {"type": "string", "description": "按学生姓名或学号搜索"},
                 "sort_by": {"type": "string", "enum": ["student_name", "student_username", "join_time", "avg_score"]},
                 "sort_order": {"type": "string", "enum": ["asc", "desc"], "default": "asc"},
-                "page": {"type": "integer", "default": 1},
-                "page_size": {"type": "integer", "default": 100},
+                "page": {
+                    "type": "integer", "minimum": 1, "default": 1,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
+                "page_size": {
+                    "type": "integer", "minimum": 1, "maximum": 200, "default": 100,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
             },
             "required": ["class_id"],
         },
@@ -79,8 +111,14 @@ SCHEMAS: list[dict] = [
                 "keyword": {"type": "string", "description": "题目标题/内容关键词"},
                 "status": {"type": "integer", "enum": [0, 1], "default": 1,
                            "description": "0=禁用 1=正常"},
-                "page": {"type": "integer", "default": 1},
-                "page_size": {"type": "integer", "default": 20},
+                "page": {
+                    "type": "integer", "minimum": 1, "default": 1,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
+                "page_size": {
+                    "type": "integer", "minimum": 1, "maximum": 200, "default": 20,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
             },
             "required": [],
         },
@@ -130,7 +168,11 @@ SCHEMAS: list[dict] = [
             "properties": {
                 "exam_id": {"type": "integer", "description": "考试 ID（优先）"},
                 "class_id": {"type": "integer", "description": "班级 ID（汇总该班所有考试）"},
-                "top": {"type": "integer", "default": 10, "description": "返回前 N 题"},
+                "top": {
+                    "type": "integer", "minimum": 1, "maximum": 100, "default": 10,
+                    "description": "返回前 N 题",
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
             },
             "required": [],
         },
@@ -145,8 +187,15 @@ SCHEMAS: list[dict] = [
                 "student_id": {"type": "integer", "description": "学生 ID（个人诊断）"},
                 "class_id": {"type": "integer", "description": "班级 ID（全班汇总诊断）"},
                 "course_id": {"type": "integer", "description": "限定课程"},
-                "threshold": {"type": "number", "default": 0.6, "description": "掌握度阈值，低于即薄弱"},
-                "top": {"type": "integer", "default": 10},
+                "threshold": {
+                    "type": "number", "minimum": 0, "maximum": 1, "default": 0.6,
+                    "description": "掌握度阈值，低于即薄弱",
+                    NORMALIZATION_KEYWORD: STRING_TO_NUMBER,
+                },
+                "top": {
+                    "type": "integer", "minimum": 1, "maximum": 100, "default": 10,
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
             },
             "required": [],
         },
@@ -191,19 +240,34 @@ SCHEMAS: list[dict] = [
             "properties": {
                 "question_bank_id": {"type": "integer", "description": "题库 ID（必填）"},
                 "paper_name": {"type": "string", "description": "试卷名称"},
-                "total_questions": {"type": "integer", "default": 10, "description": "目标题量"},
+                "total_questions": {
+                    "type": "integer", "minimum": 1, "maximum": 200, "default": 10,
+                    "description": "目标题量",
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
                 "difficulty_distribution": {
                     "type": "object",
                     "description": "各难度题数，如 {\"easy\":4,\"medium\":4,\"hard\":2}",
-                    "additionalProperties": {"type": "integer"},
+                    "additionalProperties": {
+                        "type": "integer", "minimum": 0,
+                        NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                    },
+                    NORMALIZATION_KEYWORD: JSON_STRING_TO_OBJECT,
                 },
                 "question_counts": {
                     "type": "object",
                     "description": "各题型题数，如 {\"single\":6,\"judge\":2}",
-                    "additionalProperties": {"type": "integer"},
+                    "additionalProperties": {
+                        "type": "integer", "minimum": 0,
+                        NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                    },
+                    NORMALIZATION_KEYWORD: JSON_STRING_TO_OBJECT,
                 },
-                "knowledge_points": {"type": "array", "items": {"type": "string"},
-                                     "description": "限定知识点（名称或 uid）列表"},
+                "knowledge_points": {
+                    "type": "array", "maxItems": 100, "items": {"type": "string"},
+                    "description": "限定知识点（名称或 uid）列表",
+                    NORMALIZATION_KEYWORD: JSON_STRING_TO_ARRAY,
+                },
             },
             "required": ["question_bank_id"],
         },
@@ -272,9 +336,21 @@ SCHEMAS: list[dict] = [
                 "student_id": {"type": "integer", "description": "学生 ID（必填）"},
                 "course_id": {"type": "integer", "description": "课程 ID（必填）"},
                 "target": {"type": "string", "description": "目标知识点名称/uid；不填自动选取"},
-                "threshold": {"type": "number", "default": 0.6, "description": "薄弱判定阈值"},
-                "max_points": {"type": "integer", "default": 6, "description": "路径最多包含的知识点数"},
-                "questions_per_point": {"type": "integer", "default": 3, "description": "每个薄弱点附题数"},
+                "threshold": {
+                    "type": "number", "minimum": 0, "maximum": 1, "default": 0.6,
+                    "description": "薄弱判定阈值",
+                    NORMALIZATION_KEYWORD: STRING_TO_NUMBER,
+                },
+                "max_points": {
+                    "type": "integer", "minimum": 1, "maximum": 100, "default": 6,
+                    "description": "路径最多包含的知识点数",
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
+                "questions_per_point": {
+                    "type": "integer", "minimum": 1, "maximum": 100, "default": 3,
+                    "description": "每个薄弱点附题数",
+                    NORMALIZATION_KEYWORD: STRING_TO_INTEGER,
+                },
             },
             "required": ["student_id", "course_id"],
         },

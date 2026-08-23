@@ -7,13 +7,14 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "zhangxiaobina", email = "ruibin834@gmail.com" }]
 
-# 核心 数据层 + 工具层 仅用标准库（sqlite3 / 纯 Python Dijkstra），零依赖、可离线复现。
-# 下列依赖供 Agent 编排 / 引擎 / RAG / MCP 层（后续接入）。
+# 数据层与教学算法仍以标准库为主；运行时、JSON Schema 校验、Agent 编排和
+# Provider 适配使用下列锁定依赖。
 dependencies = [
     "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
     "openai>=1.40.0",        # 走 vLLM 的 OpenAI 兼容端点 / 通义千问兼容端点
     "pydantic>=2.0",
+    "jsonschema>=4.23",
 ]
 
 [project.optional-dependencies]
