@@ -117,6 +117,7 @@ class PolicyToolExecutor:
         result_budget=None,
         transaction_runtime: TransactionalToolRuntime | None = None,
         manifest: ToolManifest | None = None,
+        defer_result_commit: bool = False,
     ):
         self.provider = provider
         self.policy = policy or ExecutionPolicy()
@@ -127,6 +128,21 @@ class PolicyToolExecutor:
             state_store=state_store
         )
         self.manifest = manifest
+        self.defer_result_commit = bool(defer_result_commit)
+
+    def deferred_worker(self) -> PolicyToolExecutor:
+        """Create an execution view whose candidate result needs coordinator acceptance."""
+
+        return PolicyToolExecutor(
+            self.provider,
+            policy=self.policy,
+            approval_handler=self.approval_handler,
+            state_store=self.state_store,
+            result_budget=None,
+            transaction_runtime=self.transaction_runtime,
+            manifest=self.manifest,
+            defer_result_commit=True,
+        )
 
     @staticmethod
     def _argument_pipeline_meta(
@@ -191,6 +207,7 @@ class PolicyToolExecutor:
         plan_step_id: str | None = None,
         caller_idempotency_key: str | None = None,
         manifest: ToolManifest | None = None,
+        budget_reserved: bool = False,
     ) -> ToolOutcome:
         frozen_manifest = (
             manifest
@@ -250,20 +267,21 @@ class PolicyToolExecutor:
             arguments = strict_parse_tool_arguments(raw_arguments)
         except ToolArgumentError as error:
             context.check_control("tool.before_call")
-            try:
-                context.budget.consume_tool_call()
-            except BudgetExceeded as budget_error:
-                return self._finish(
-                    context,
-                    name,
-                    raw_summary,
-                    started,
-                    ToolOutcome(
-                        False,
-                        error={"code": "BUDGET_EXCEEDED", "message": str(budget_error)},
-                    ),
-                    tool_call_id=tool_call_id,
-                )
+            if not budget_reserved:
+                try:
+                    context.budget.consume_tool_call()
+                except BudgetExceeded as budget_error:
+                    return self._finish(
+                        context,
+                        name,
+                        raw_summary,
+                        started,
+                        ToolOutcome(
+                            False,
+                            error={"code": "BUDGET_EXCEEDED", "message": str(budget_error)},
+                        ),
+                        tool_call_id=tool_call_id,
+                    )
             argument_meta = self._argument_pipeline_meta(
                 context,
                 tool_call_id=tool_call_id,
@@ -290,6 +308,7 @@ class PolicyToolExecutor:
             caller_idempotency_key=caller_idempotency_key,
             manifest=frozen_manifest,
             _parsed=True,
+            _budget_reserved=budget_reserved,
         )
 
     def execute(
@@ -305,21 +324,23 @@ class PolicyToolExecutor:
         caller_idempotency_key: str | None = None,
         manifest: ToolManifest | None = None,
         _parsed: bool = False,
+        _budget_reserved: bool = False,
     ) -> ToolOutcome:
         started = time.monotonic()
         unvalidated_summary = {"_raw": summarize_raw_arguments(arguments)}
         context.check_control("tool.before_call")
-        try:
-            context.budget.consume_tool_call()
-        except BudgetExceeded as error:
-            return self._finish(
-                context,
-                name,
-                unvalidated_summary,
-                started,
-                ToolOutcome(False, error={"code": "BUDGET_EXCEEDED", "message": str(error)}),
-                tool_call_id=tool_call_id,
-            )
+        if not _budget_reserved:
+            try:
+                context.budget.consume_tool_call()
+            except BudgetExceeded as error:
+                return self._finish(
+                    context,
+                    name,
+                    unvalidated_summary,
+                    started,
+                    ToolOutcome(False, error={"code": "BUDGET_EXCEEDED", "message": str(error)}),
+                    tool_call_id=tool_call_id,
+                )
         if allowed_tools is not None and name not in allowed_tools:
             return self._finish(
                 context,
@@ -1119,6 +1140,65 @@ class PolicyToolExecutor:
                     "operation_status": operation["status"],
                 }
             )
+        if self.defer_result_commit:
+            return outcome
+        return self._persist_outcome(
+            context,
+            name,
+            arguments,
+            outcome,
+            tool_call_id=tool_call_id,
+            operation=operation,
+            data_classification=data_classification,
+        )
+
+    def finalize_deferred(
+        self,
+        name: str,
+        arguments: dict,
+        context: RunContext,
+        outcome: ToolOutcome,
+        *,
+        tool_call_id: str | None = None,
+    ) -> ToolOutcome:
+        """Accept one worker candidate after its timeout/cancellation fence wins."""
+
+        context.check_control("tool.deferred_result.accept")
+        outcome.meta.setdefault("tool", name)
+        outcome.meta.setdefault("run_id", context.run_id)
+        outcome.meta.setdefault("tool_call_id", tool_call_id)
+        outcome.meta.setdefault("duration_ms", 0.0)
+        operation = None
+        operation_id = outcome.meta.get("operation_id")
+        operation_status = outcome.meta.get("operation_status")
+        if isinstance(operation_id, str) and isinstance(operation_status, str):
+            operation = {"id": operation_id, "status": operation_status}
+        try:
+            spec = self._spec(name, manifest=self.manifest or context.tool_manifest)
+            classifications = getattr(spec, "data_classification", {}) if spec is not None else {}
+        except ToolManifestMismatch:
+            classifications = {}
+        return self._persist_outcome(
+            context,
+            name,
+            arguments,
+            outcome,
+            tool_call_id=tool_call_id,
+            operation=operation,
+            data_classification=classifications,
+        )
+
+    def _persist_outcome(
+        self,
+        context: RunContext,
+        name: str,
+        arguments: dict,
+        outcome: ToolOutcome,
+        *,
+        tool_call_id: str | None = None,
+        operation: dict | None = None,
+        data_classification: Mapping[str, str] | None = None,
+    ) -> ToolOutcome:
         if self.result_budget is not None:
             context.check_control("tool.before_result_spill")
             processed = self.result_budget.apply(

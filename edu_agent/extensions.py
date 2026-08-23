@@ -15,6 +15,8 @@ class ToolProvider(Protocol):
 
     def build_tool_manifest(self, **kwargs): ...
 
+    def supports_parallel_tool_calls(self, name: str, *, context=None) -> bool: ...
+
 
 class PluginContext:
     def __init__(self, *, register_tool, source: str = "plugin:unknown", version: str = "0.0.0"):

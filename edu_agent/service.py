@@ -822,6 +822,10 @@ class EduAgentService:
                 ),
                 loop_fault_injector=self.loop_fault_injector,
                 tool_manifest=manifest,
+                tool_batch_max_workers=self.config.runtime.tool_batch_max_workers,
+                tool_call_timeout_seconds=(
+                    self.config.runtime.tool_call_timeout_seconds
+                ),
             )
             context.check_control("messages.before_final_commit")
             context.emit_run_event(

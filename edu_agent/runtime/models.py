@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -30,20 +31,29 @@ class IterationBudget:
             self.model_calls += 1
 
     def consume_tool_call(self) -> None:
+        if self.reserve_tool_calls(1) != 1:
+            raise BudgetExceeded(
+                f"工具调用预算已耗尽（{self.tool_calls}/{self.max_tool_calls}）"
+            )
+
+    def reserve_tool_calls(self, requested: int) -> int:
+        """Atomically reserve an original-order prefix of a tool segment."""
+
+        if isinstance(requested, bool) or not isinstance(requested, int) or requested < 0:
+            raise ValueError("requested tool calls must be a non-negative integer")
         with self._lock:
-            if self.tool_calls >= self.max_tool_calls:
-                raise BudgetExceeded(
-                    f"工具调用预算已耗尽（{self.tool_calls}/{self.max_tool_calls}）"
-                )
-            self.tool_calls += 1
+            accepted = min(requested, max(0, self.max_tool_calls - self.tool_calls))
+            self.tool_calls += accepted
+            return accepted
 
     def usage(self) -> dict:
-        return {
-            "model_calls": self.model_calls,
-            "max_model_calls": self.max_model_calls,
-            "tool_calls": self.tool_calls,
-            "max_tool_calls": self.max_tool_calls,
-        }
+        with self._lock:
+            return {
+                "model_calls": self.model_calls,
+                "max_model_calls": self.max_model_calls,
+                "tool_calls": self.tool_calls,
+                "max_tool_calls": self.max_tool_calls,
+            }
 
 
 @dataclass
@@ -81,6 +91,8 @@ class RunContext:
     )
     _tool_manifest: object | None = field(default=None, repr=False, compare=False)
     _tool_manifest_hash_override: str | None = field(default=None, repr=False, compare=False)
+    _provider_route: object | None = field(default=None, repr=False, compare=False)
+    _trace_context: object | None = field(default=None, repr=False, compare=False)
     _argument_retry_calls: set[str] = field(default_factory=set, repr=False, compare=False)
     _argument_retry_lock: threading.Lock = field(
         default_factory=threading.Lock,
@@ -211,6 +223,68 @@ class RunContext:
                     run_id=self.run_id,
                 )
         self._tool_manifest = manifest
+
+    @property
+    def provider_route(self):
+        return deepcopy(self._provider_route)
+
+    def bind_provider_route(self, route: object) -> None:
+        """Freeze the redacted provider route propagated to tool workers."""
+
+        frozen = deepcopy(route)
+        if self._provider_route is not None and self._provider_route != frozen:
+            from ..state import RunJournalIdentityError
+
+            raise RunJournalIdentityError(
+                "run provider route cannot be replaced after freeze",
+                run_id=self.run_id,
+            )
+        self._provider_route = frozen
+
+    @property
+    def trace_context(self):
+        return deepcopy(self._trace_context)
+
+    def bind_trace_context(self, trace_context: object) -> None:
+        """Bind an explicit trace carrier for worker propagation."""
+
+        frozen = deepcopy(trace_context)
+        if self._trace_context is not None and self._trace_context != frozen:
+            from ..state import RunJournalIdentityError
+
+            raise RunJournalIdentityError(
+                "run trace context cannot be replaced after freeze",
+                run_id=self.run_id,
+            )
+        self._trace_context = frozen
+
+    def for_tool_worker(self, *, cancellation_token: CancellationToken) -> RunContext:
+        """Build an explicit worker context without relying on thread-local state."""
+
+        worker = RunContext(
+            session_id=self.session_id,
+            actor_id=self.actor_id,
+            role=self.role,
+            tenant_id=self.tenant_id,
+            course_ids=self.course_ids,
+            replay_scope=self.replay_scope,
+            run_id=self.run_id,
+            started_at=self.started_at,
+            budget=self.budget,
+            lease_owner=self.lease_owner,
+            fencing_token=self.fencing_token,
+            cancellation_token=cancellation_token,
+        )
+        worker._control_check = self._control_check
+        worker._run_event_sink = self._run_event_sink
+        worker._provider_event_sink = self._provider_event_sink
+        worker._tool_manifest = self._tool_manifest
+        worker._tool_manifest_hash_override = self._tool_manifest_hash_override
+        worker._provider_route = deepcopy(self._provider_route)
+        worker._trace_context = deepcopy(self._trace_context)
+        worker._argument_retry_calls = self._argument_retry_calls
+        worker._argument_retry_lock = self._argument_retry_lock
+        return worker
 
     @classmethod
     def create(

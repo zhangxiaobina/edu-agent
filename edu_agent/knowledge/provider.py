@@ -598,6 +598,12 @@ class KnowledgeToolProvider:
         checker = getattr(self.base, "tool_available", None)
         return bool(checker(name, context=context)) if callable(checker) else self.get_spec(name) is not None
 
+    def supports_parallel_tool_calls(self, name: str, *, context=None) -> bool:
+        if name == "retrieve_course_materials":
+            return self.knowledge.available()
+        checker = getattr(self.base, "supports_parallel_tool_calls", None)
+        return bool(checker(name, context=context)) if callable(checker) else False
+
     def dispatch(self, name: str, arguments: dict | None = None, conn=None) -> dict:
         if name == "retrieve_course_materials":
             return {"error": "知识检索需要带身份与课程作用域的执行上下文"}

@@ -44,6 +44,10 @@ class SyntheticProvider(TeachingDataProvider):
     boundary needs the teaching read to join that transaction.
     """
 
+    @property
+    def supports_parallel_reads(self) -> bool:
+        return True
+
     def __init__(self, connection_factory: ConnectionFactory):
         if not callable(connection_factory):
             raise TypeError("connection_factory 必须可调用")

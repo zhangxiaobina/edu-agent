@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R3.4
-- next_prompt: R3.5
+- last_completed_prompt: R3.5
+- next_prompt: R3.6
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1-R3.4 的 ToolManifest、Canonical Teaching Provider、16 工具契约矩阵和 schema-guided 参数治理已通过，R3 总门禁仍需 R3.5 安全并发与 R3.6 插件/MCP 收口
+- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1-R3.5 的 Manifest、Canonical Provider、16 工具契约、参数治理和安全有界只读并发已通过，R3 总门禁仍需 R3.6 插件/MCP 安全边界与公开文档收口
 
 ## Baseline Reproduction
 
@@ -888,3 +888,48 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - gate: `R3.4 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
 - next: R3.5，实现连续 segment 的安全有界只读并发、资源冲突 barrier、独立连接/取消/预算传播和原序结果提交；
   不并发 write、conditional-write、approval、code、interactive 或 unknown 工具。
+
+### R3.5 - 2026-08-23
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `92be7bda7ebfa3e6ce9f20d60197dec2c16fdbe0` 开始；用户随后明确要求提交，本次 R3.5 改动已统一提交并推送，
+  提交号以本条所在 Git commit 为准；未覆盖用户既有改动。
+- planning/safety: 新增 `ToolBatchPlanner`，按模型原始 call 顺序切连续 segment。只有冻结 Manifest 中参数已完成同一
+  规范化/完整校验、`effect=read`、`parallel_safe=true`、Provider 显式 opt-in 且解析后 resource key 不冲突的调用
+  才进入同一并发 segment；write、conditional-write、approval、code、interactive、unknown、插件/MCP、坏参数和
+  capability 缺失均形成单调用 barrier。同资源只读调用切到后续 segment，保持先后关系；调用方显式传入的
+  `db_conn` 继续走串行兼容路径，绝不在线程间共享。
+- execution/context: 新增配置化 `runtime.tool_batch_max_workers=4`（校验范围 1..8）和
+  `runtime.tool_call_timeout_seconds=120` 全局上限，单调用仍取 Manifest timeout 与全局上限的较小值。每个 worker
+  构造独立 `RunContext` 和子 `CancellationToken`，显式传播 actor/tenant/role/course、run/session、lease owner、
+  fencing token、冻结 manifest、脱敏 route、Trace carrier、参数 retry 状态和复制的 `contextvars`；需要 SQLite 的
+  provider 每调用获取并关闭独立连接，connection factory 返回活动共享连接会 fail closed。
+- ordering/fence: worker 只产生 deferred candidate；协调器可按完成时间发布 `tool.completed`，但结果预算、
+  `tool_events` 验收、模型可见 tool message 和增量 journal cursor 最终均由单协调器处理，其中 tool message/journal
+  严格按原 call 顺序追加。失败、timeout、批前/批中取消、预算拒绝和未启动调用都生成恰好一个配对结果；取消优先于
+  timeout 分类，envelope 提交后立即取消也会完成全部配对。调用 timeout/取消后的迟到 worker 不能自行持久化，
+  root control 与 SQLite lease/fencing 在 coordinator acceptance/commit 再次拒绝迟到值。
+- budget/concurrency: `IterationBudget.reserve_tool_calls()` 在共享锁内原子预留每个 segment 的原序前缀，预算不足时
+  只启动确定选中的前缀，其余返回 `BUDGET_EXCEEDED`，不超卖；原 model/tool 计数与 usage snapshot 使用同一预算锁。
+  只读并发使用小型 bounded worker pool，不修改 delegation runtime 或子 Agent 并发。
+- tests: 新增 14 个 batch 测试，覆盖全部 barrier effect、Provider opt-in、资源冲突、串并行结果等价、最大并发、
+  worker connection/context/route/Trace/contextvars 隔离、model/tool 预算竞争、原序 journal cursor、单 worker 失败、
+  批前与批中取消、增量提交中取消、timeout/迟到拒绝，以及由 Event/Barrier 控制且连续 7 轮成立的 P95 加速 fixture；
+  测试不以 `sleep` 时序作为唯一正确性断言。
+- migrations/config: 无 SQLite migration、依赖或环境变量变化；新增上述两个 `RuntimeConfig` 字段及默认值、校验和
+  `config.example.toml` 示例。未修改子 Agent 委派并发。
+- verification: batch 专项最终 `14 passed`；batch/tools/manifest/arguments/journal/transaction/cancel/SSE 组合在受限
+  环境为 `163 passed, 7 failed`，7 项堆栈全部止于 `127.0.0.1:0` 的 `socket.bind PermissionError`，获准环境逐项复跑
+  `7 passed`。显式清空真实模型/平台凭据并禁用外部 pytest plugin 的最终全量离线回归 `537 passed (30.83s)`。
+  `uv lock --check` 解析 91 包，`uv pip check` 检查 62 包且无冲突；全仓 Ruff、`git diff --check` 均通过。只读数据
+  边界审计扫描 3 个既有 artifact，`findings=[]`。
+- not_verified: 未访问公网、真实模型/Provider、真实教学平台/生产 ORM/API、Docker/Jobe 或 GitHub-hosted CI。
+  R3.5 不是阶段收口会话，按通用协议未运行完整 `zsh scripts/accept_stage8.sh`；本机 synthetic/RAG/fake 和 loopback
+  证据不能写成真实平台、远端 MCP 或托管 CI 已验证。
+- residual_risks: Python 同步 worker 只能协作取消，无法强制终止仍在第三方同步调用中的线程；其候选结果已由 deferred
+  acceptance、CancellationToken 和持久 lease/fence 拒绝，但底层只读请求可能继续到 provider 自行返回。当前仅
+  SyntheticProvider 与本地 RAG wrapper 显式允许并发读；插件和 MCP 默认 barrier，其 metadata/hash、断线迟到与恶意
+  Provider 边界留给 R3.6。架构、演示和 README 的并发能力公开更新也按提示词留给 R3.6 统一收口。
+- gate: `R3.5 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
+- next: R3.6，验证 plugin/MCP 在冻结 Manifest、参数、ACL、超时/取消、结果预算和并发合同下的安全边界，运行完整
+  R3 门禁并同步架构/演示/README；不得提前开始 R4 上下文压缩。

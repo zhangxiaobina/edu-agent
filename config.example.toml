@@ -31,6 +31,10 @@ circuit_cooldown_seconds = 30.0
 [runtime]
 max_model_calls = 12
 max_tool_calls = 24
+# 同一 assistant 回合只并发冻结 Manifest 明确允许的只读、无冲突调用。
+tool_batch_max_workers = 4
+# 每个工具仍受 Manifest timeout 限制；这里是运行时全局上限。
+tool_call_timeout_seconds = 120
 context_token_budget = 12000
 recent_message_limit = 80
 compression_enabled = true

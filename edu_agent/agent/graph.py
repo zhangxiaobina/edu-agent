@@ -14,9 +14,10 @@ from ..planning.models import PlanStatus, StepStatus
 from ..planning.planner import ModelPlanGenerator, PlanGenerationError, should_create_plan
 from ..planning.runtime import PlanCoordinator, PlanningOptions
 from ..planning.verifier import EvidenceVerifier
-from ..runtime.models import BudgetExceeded, RunContext
 from ..runtime.cancellation import CancellationRequested
-from ..runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor, ToolOutcome
+from ..runtime.models import BudgetExceeded, RunContext
+from ..runtime.tool_batch import ToolBatchExecutor, ToolBatchPlanner, ToolBatchSegment
+from ..runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor
 from ..state import RunPhase
 from ..state.store import RunCancelled
 from ..tools import registry
@@ -165,6 +166,9 @@ def build_agent(
     loop_journal: AgentLoopJournal | None = None,
     tool_manifest: ToolManifest | None = None,
     entry_point: str = "agent",
+    tool_batch_max_workers: int = 4,
+    tool_call_timeout_seconds: float = 120.0,
+    tool_connection_factory=None,
 ):
     """编译 Agent 图；生产控制由 RunContext 和 ToolExecutor 承担。"""
     provider = tools_provider if tools_provider is not None else registry
@@ -274,7 +278,11 @@ def build_agent(
         }
 
     def tools_node(state: AgentState):
-        context.emit_run_event("run.phase", {"phase": "tools"})
+        initial_cancellation: RunCancelled | CancellationRequested | None = None
+        try:
+            context.emit_run_event("run.phase", {"phase": "tools"})
+        except (RunCancelled, CancellationRequested) as error:
+            initial_cancellation = error
         last = next(
             (
                 message
@@ -285,10 +293,9 @@ def build_agent(
         )
         if last is None:
             raise RuntimeError("tools phase 缺少 assistant tool-call envelope")
-        output = []
-        turn_results = []
+        output: list[dict] = []
+        turn_results: list[dict] = []
         model_attempt = state.get("model_attempt")
-        cancellation: RunCancelled | CancellationRequested | None = None
         allowed_tools = None
         if plan_coordinator is not None:
             step = next(
@@ -300,102 +307,84 @@ def build_agent(
                 None,
             )
             allowed_tools = set(step.allowed_tools) if step else set()
-        for tool_call in last.get("tool_calls", []):
+
+        tool_calls = list(last.get("tool_calls", []))
+        planner = ToolBatchPlanner(
+            provider,
+            manifest,
+            max_call_timeout_seconds=tool_call_timeout_seconds,
+        )
+        planned_segments = planner.plan(tool_calls, context)
+        replayed: dict[int, dict] = {}
+        pending_segments: list[ToolBatchSegment] = []
+        for segment in planned_segments:
+            pending_calls = []
+            for call in segment.calls:
+                existing = (
+                    loop_journal.call_record(call.call_id)
+                    if loop_journal is not None
+                    else None
+                )
+                if existing is not None and existing.get("status") == "completed":
+                    replayed[call.index] = existing["result_message"]
+                else:
+                    pending_calls.append(call)
+            if pending_calls:
+                pending_segments.append(
+                    ToolBatchSegment(
+                        segment_id=segment.segment_id,
+                        mode=segment.mode,
+                        calls=tuple(pending_calls),
+                    )
+                )
+
+        batch = ToolBatchExecutor(
+            executor,
+            context,
+            manifest,
+            max_workers=tool_batch_max_workers,
+            allowed_tools=allowed_tools,
+            plan_step_id=state.get("active_step_id"),
+            connection_factory=(
+                tool_connection_factory if db_conn is None else None
+            ),
+            legacy_connection=db_conn,
+        ).execute(
+            pending_segments,
+            initial_cancellation=initial_cancellation,
+        )
+        executed = {record.call.index: record for record in batch.records}
+        late_cancellation: RunCancelled | CancellationRequested | None = batch.cancellation
+
+        for index, tool_call in enumerate(tool_calls):
             function = tool_call["function"]
             name = function["name"]
             call_id = tool_call["id"]
-            if loop_journal is not None:
-                existing = loop_journal.call_record(call_id)
-                if existing is not None and existing.get("status") == "completed":
-                    already_present = any(
-                        message.get("role") == "tool"
-                        and message.get("tool_call_id") == call_id
-                        for message in state["messages"]
-                    )
-                    if not already_present:
-                        output.append(existing["result_message"])
-                    turn_results.append(existing["result_message"])
-                    continue
-            operation_record = (
-                executor.state_store.get_tool_operation_for_call(
+            if index in replayed:
+                result_message = replayed[index]
+                already_present = any(
+                    message.get("role") == "tool"
+                    and message.get("tool_call_id") == call_id
+                    for message in state["messages"]
+                )
+                if not already_present:
+                    output.append(result_message)
+                turn_results.append(result_message)
+                continue
+            record = executed.get(index)
+            if record is None:
+                raise RuntimeError(f"tool batch 缺少 call {call_id} 的配对结果")
+            outcome = record.outcome
+            if executor.state_store is not None and not outcome.meta.get("operation_id"):
+                operation = executor.state_store.get_tool_operation_for_call(
                     run_id=context.run_id,
                     tool_call_id=call_id,
                     actor_id=context.actor_id,
                     tenant_id=context.tenant_id,
                 )
-                if executor.state_store is not None
-                else None
-            )
-            try:
-                if cancellation is None:
-                    context.check_control("tools.before_batch" if not output else "tool.between_calls")
-                    context.emit_run_event(
-                        "tool.started",
-                        {"tool_call_id": call_id, "tool_name": name},
-                    )
-                    if operation_record is not None and operation_record["status"] in {
-                        "executing",
-                        "manual_review",
-                    }:
-                        outcome = ToolOutcome(
-                            False,
-                            error={
-                                "code": "OPERATION_UNAVAILABLE",
-                                "message": (
-                                    "写操作提交状态不确定，已禁止重新执行；"
-                                    "需要恢复流程复用回执或人工确认"
-                                ),
-                            },
-                            meta={
-                                "operation_id": operation_record["operation_id"],
-                                "operation_status": operation_record["status"],
-                                "run_id": context.run_id,
-                                "tool_call_id": call_id,
-                            },
-                        )
-                    else:
-                        outcome = executor.execute_raw(
-                            name,
-                            function.get("arguments"),
-                            context,
-                            conn=db_conn,
-                            allowed_tools=allowed_tools,
-                            manifest=manifest,
-                            tool_call_id=call_id,
-                            plan_step_id=state.get("active_step_id"),
-                        )
-                    context.emit_run_event(
-                        "tool.completed",
-                        {
-                            "tool_call_id": call_id,
-                            "tool_name": name,
-                            "ok": outcome.ok,
-                            "error": outcome.error,
-                        },
-                    )
-                else:
-                    outcome = ToolOutcome(
-                        False,
-                        error={"code": "CANCELLED", "message": str(cancellation)},
-                        meta={"run_id": context.run_id, "tool_call_id": call_id},
-                    )
-            except (RunCancelled, CancellationRequested) as error:
-                cancellation = error
-                outcome = ToolOutcome(
-                    False,
-                    error={"code": "CANCELLED", "message": str(error)},
-                    meta={"run_id": context.run_id, "tool_call_id": call_id},
-                )
-            if operation_record is None and executor.state_store is not None:
-                operation_record = executor.state_store.get_tool_operation_for_call(
-                    run_id=context.run_id,
-                    tool_call_id=call_id,
-                    actor_id=context.actor_id,
-                    tenant_id=context.tenant_id,
-                )
-            if operation_record is not None:
-                outcome.meta.setdefault("operation_id", operation_record["operation_id"])
-                outcome.meta.setdefault("operation_status", operation_record["status"])
+                if operation is not None:
+                    outcome.meta["operation_id"] = operation["operation_id"]
+                    outcome.meta["operation_status"] = operation["status"]
             result_message = {
                 "role": "tool",
                 "tool_call_id": call_id,
@@ -407,22 +396,38 @@ def build_agent(
                 ),
             }
             if loop_journal is not None:
-                result_message = executor.enforce_incremental_turn_budget(
-                    result_message,
-                    turn_results,
-                    context,
-                )
-                result_message = loop_journal.append_result(
-                    result_message,
-                    model_attempt=model_attempt,
-                    operation_id=outcome.meta.get("operation_id"),
-                    tool_event_id=outcome.meta.get("tool_event_id"),
-                    allow_cancelled=cancellation is not None,
-                )
+                try:
+                    if late_cancellation is None:
+                        result_message = executor.enforce_incremental_turn_budget(
+                            result_message,
+                            turn_results,
+                            context,
+                        )
+                    result_message = loop_journal.append_result(
+                        result_message,
+                        model_attempt=model_attempt,
+                        operation_id=outcome.meta.get("operation_id"),
+                        tool_event_id=outcome.meta.get("tool_event_id"),
+                        allow_cancelled=(
+                            late_cancellation is not None
+                            or context.cancellation_token.cancelled
+                        ),
+                    )
+                except (RunCancelled, CancellationRequested) as error:
+                    late_cancellation = late_cancellation or error
+                    result_message = loop_journal.append_result(
+                        result_message,
+                        model_attempt=model_attempt,
+                        operation_id=outcome.meta.get("operation_id"),
+                        tool_event_id=outcome.meta.get("tool_event_id"),
+                        allow_cancelled=True,
+                    )
             output.append(result_message)
             turn_results.append(result_message)
-        if cancellation is not None:
-            raise cancellation
+        if batch.terminal_error is not None:
+            raise batch.terminal_error
+        if late_cancellation is not None:
+            raise late_cancellation
         if loop_journal is not None:
             loop_journal.complete_tool_batch(model_attempt=model_attempt)
         else:
@@ -596,6 +601,9 @@ def run_agent(
     context_checkpoint_id: str | None = None,
     loop_fault_injector=None,
     tool_manifest: ToolManifest | None = None,
+    tool_batch_max_workers: int = 4,
+    tool_call_timeout_seconds: float = 120.0,
+    tool_connection_factory=None,
 ) -> dict:
     """运行一次 Agent turn，返回回答、轨迹、消息、预算和模型 usage。"""
     context = run_context or RunContext.create(
@@ -735,6 +743,9 @@ def run_agent(
         loop_journal=loop_journal if loop_journal.active else None,
         tool_manifest=manifest,
         entry_point=entry_point,
+        tool_batch_max_workers=tool_batch_max_workers,
+        tool_call_timeout_seconds=tool_call_timeout_seconds,
+        tool_connection_factory=tool_connection_factory,
     )
     messages = initial_messages or [
         {"role": "system", "content": system_prompt},

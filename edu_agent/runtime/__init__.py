@@ -20,6 +20,7 @@ from .tool_executor import (
     ToolOutcome,
     ToolResult,
 )
+from .tool_batch import ToolBatchExecutor, ToolBatchPlanner, ToolBatchSegment
 
 __all__ = [
     "AppConfig",
@@ -49,6 +50,9 @@ __all__ = [
     "STABLE_CURSOR_DECISION_TABLE",
     "RuntimeManager",
     "ToolOutcome",
+    "ToolBatchExecutor",
+    "ToolBatchPlanner",
+    "ToolBatchSegment",
     "ToolResult",
     "ToolResultBudget",
     "load_config",

@@ -149,6 +149,8 @@ class ModelConfig:
 class RuntimeConfig:
     max_model_calls: int = 12
     max_tool_calls: int = 24
+    tool_batch_max_workers: int = 4
+    tool_call_timeout_seconds: float = 120.0
     context_token_budget: int = 12_000
     recent_message_limit: int = 80
     compression_enabled: bool = True
@@ -163,6 +165,19 @@ class RuntimeConfig:
     run_stall_seconds: float = 90.0
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.tool_batch_max_workers, bool)
+            or not isinstance(self.tool_batch_max_workers, int)
+            or not 1 <= self.tool_batch_max_workers <= 8
+        ):
+            raise ValueError("runtime tool_batch_max_workers 必须在 [1, 8] 内")
+        if (
+            isinstance(self.tool_call_timeout_seconds, bool)
+            or not isinstance(self.tool_call_timeout_seconds, (int, float))
+            or not math.isfinite(float(self.tool_call_timeout_seconds))
+            or self.tool_call_timeout_seconds <= 0
+        ):
+            raise ValueError("runtime tool_call_timeout_seconds 必须是正有限数")
         if self.session_lease_seconds <= 0 or self.session_heartbeat_seconds <= 0:
             raise ValueError("runtime session lease 和 heartbeat 必须大于 0")
         if self.session_heartbeat_seconds >= self.session_lease_seconds:

@@ -62,6 +62,14 @@ class AgentLoopJournal:
         )
         self.manifest_hash = manifest_hash_override or self.canonical_manifest_hash
         self.route = RedactionPolicy().redact(frozen_route_shape(engine))
+        context.bind_provider_route(self.route)
+        context.bind_trace_context(
+            {
+                "run_id": context.run_id,
+                "session_id": context.session_id,
+                "route": self.route,
+            }
+        )
         self.context_checkpoint_id = context_checkpoint_id
         self.faults = fault_injector or FaultInjector()
         self._model_calls_in_invocation = 0

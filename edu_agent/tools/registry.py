@@ -617,6 +617,22 @@ def tool_available(name: str, context=None) -> bool:
     return spec is not None
 
 
+def supports_parallel_tool_calls(name: str, *, context=None) -> bool:
+    """Explicit provider capability gate for same-turn read concurrency."""
+
+    spec = TOOL_SPECS.get(name)
+    if (
+        spec is None
+        or spec.effect is not ToolEffect.READ
+        or not spec.parallel_safe
+        or not spec.source.startswith("builtin:")
+    ):
+        return False
+    if name in READ_ONLY_TEACHING_TOOLS or name == "generate_paper":
+        return bool(getattr(_teaching_data_provider, "supports_parallel_reads", False))
+    return False
+
+
 def dispatch(name: str, arguments: dict | None = None,
              conn: sqlite3.Connection | None = None,
              *, manifest: ToolManifest | None = None, context=None) -> dict:

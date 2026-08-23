@@ -390,6 +390,12 @@ class TeachingDataProvider(ABC):
     obtains its own connection or remote request context.
     """
 
+    @property
+    def supports_parallel_reads(self) -> bool:
+        """Providers opt in only when each read owns an isolated request context."""
+
+        return False
+
     @abstractmethod
     def execute(self, query: TeachingQuery, *, connection: object | None = None) -> TeachingResult:
         raise NotImplementedError
