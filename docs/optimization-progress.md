@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R3.1
-- next_prompt: R3.2
+- last_completed_prompt: R3.2
+- next_prompt: R3.3
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1 ToolManifest 切片已通过，R3 总门禁仍需 R3.2-R3.6 的 Provider、参数治理、并发和插件/MCP 收口
+- stage_gate_reason: R0-R2 顶层门禁保持 passed；R3.1 ToolManifest 与 R3.2 只读 TeachingDataProvider 切片已通过，R3 总门禁仍需 R3.3-R3.6 的写工具契约、参数治理、并发和插件/MCP 收口
 
 ## Baseline Reproduction
 
@@ -770,3 +770,44 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   否则不进入 manifest。`ToolManifest` 只冻结当前进程 provider identity，跨主机 registry 发布/版本治理仍未实现。
 - gate: `R3.1 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
 - next: R3.2，建立 Canonical Teaching Provider，只迁移只读查询/分析/知识图谱切片；继续不做参数修复、并发或事务写工具迁移。
+
+### R3.2 - 2026-08-23
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `52ae6835e0e09fbaab7fefc5b984b1967fe23c3a` 开始；本次未创建本地提交或推送，未覆盖用户既有改动。
+  未新增 SQLite migration、配置项或依赖，也未读取本机教学平台数据库或引入私有 DDL/生产数据 fixture。
+- canonical contract: 新增独立的 `edu_agent.teaching` 教学数据边界，定义 10 种 `TeachingQueryKind`、
+  `TeachingScope`、`PageRequest`、JSON-only `TeachingResult`、`TeachingProviderError` 及稳定的
+  `invalid_query/not_found/scope_denied/unavailable/internal` 分类。结果构造会复制并拒绝存储专有对象；底层
+  异常只保留异常类，不回显 SQL、表名或生产 ORM。模块和架构文档明确它不同于 R1 模型
+  `ProviderGateway`，也不同于带 tenant/course/citation 语义的课件 `KnowledgeProvider`。
+- synthetic provider: registry 默认持有 `SyntheticProvider(db.connect)`；成绩、考试、班级名单、题目、学习进度、
+  错题、薄弱点、成绩分布、知识图谱和学习路径均移到该实现。普通调用每次通过 connection factory 获取并关闭
+  自己的 `sqlite3.Connection`，线程测试验证四次 worker 调用得到四个独立连接；只有调用方显式传入受控连接时
+  才复用且不关闭。Provider 内对显式 course 和仅携带 `exam_id` 的间接资源再次执行 scope 校验，所有列表增加
+  确定 tie-breaker，状态统一映射但保持原工具 JSON 字段。
+- tool/runtime compatibility: `query_tools`、`analysis_tools`、`kg_tools` handler 已薄化为 schema/context -> canonical
+  query -> 原工具 JSON；registry 对这 10 个只读工具不再预开、提交或在线程间传递连接。Agent 图、
+  ToolManifest/schema/hash、MCP、Plan/Evidence 和原 ACL/role/course 二次鉴权接口未感知 SQLite。RAG 检索与 citation
+  生命周期继续走既有 `SQLiteKnowledgeProvider`，Evidence claim/citation 验证保持通过。仅被尚未迁移写工具使用的
+  `_resolve_kp_uid` 明确保留到 R3.3；`generate_paper`、写工具、条件写入和代码执行均未迁移。
+- contract tests: 新增共享 `TeachingProviderContract`，同一组 10 个只读用例同时运行 SyntheticProvider 与测试内
+  纯 fake adapter；覆盖分页、空结果、考试状态映射、直接/间接 course scope 拒绝、
+  `invalid/not_found/scope_denied` 分类、JSON canonical 边界和重复调用确定顺序。fake 只返回固定 canonical 数据，
+  不含真实平台命名、网络或存储逻辑；另测 registry 替换 adapter 后 manifest hash 不变、context scope 仍下传，
+  以及 SQLite unavailable 错误不泄露底层详情。
+- verification: 改动前只读/RAG/Plan/Agent 基线 `56 passed`；最终 contract 专项 `10 passed`；只读工具、RAG/citation、
+  Plan/Evidence、Manifest、MCP、Agent/Runtime、委派、eval 和事务防回归专项 `136 passed (9.10s)`；显式清空真实
+  模型/平台凭据并禁用外部 pytest plugin 的全量离线回归 `449 passed (27.93s)`。`uv lock --check`、
+  `uv pip check`、全仓 ruff 和 `git diff --check` 通过；对现有 `artifacts` 的只读数据边界审计扫描 3 个文件且
+  `findings=[]`。
+- not_verified: 未访问公网、真实模型、真实教学平台、生产 ORM/API 或 GitHub-hosted CI，未启动 Docker/Jobe；
+  本阶段明确不实现 `TeachingPlatformProvider`。按通用协议，R3.2 不是阶段收口会话，未重复运行完整
+  `zsh scripts/accept_stage8.sh`，不能用本次专项/全量 pytest 冒充 R3 总门禁。
+- residual_risks: 当前 teaching contract 只覆盖关系查询、分析和图路径；写/条件写回执、幂等、outbox 与补偿仍需
+  R3.3 在既有 `ToolOperation` 事务边界内收口。班级名单本身没有 course 参数，仍依赖既有角色 ACL 和平台未来的
+  实体授权映射；SyntheticProvider 不虚构生产租户表。工具仍按 assistant call 顺序执行，尚未实现 R3.4 参数
+  normalizer 或 R3.5 安全并发。
+- gate: `R3.2 passed`；R3 总门禁保持 `in_progress`，R0-R2 顶层 stage gate 仍为 `passed`。
+- next: R3.3，读取本交接和事务/写工具实现，为剩余教学工具建立 canonical command/receipt/error；保留审批、
+  幂等、同库事务、outbox/补偿，不做参数修复或工具并发，也不把 `run_code` 塞入教学数据 Provider。

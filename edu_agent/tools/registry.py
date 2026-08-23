@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 
 from ..data import db
+from ..teaching import SyntheticProvider, TeachingDataProvider
 from ..state import FencingTokenRejected, RunCancelled
 from ..runtime.cancellation import CancellationRequested
 from . import ai_tools, analysis_tools, kg_tools, ops_tools, query_tools
@@ -34,7 +35,38 @@ from .manifest import (
 from .schemas import SCHEMA_BY_NAME
 
 _code_execution_provider = None
+_teaching_data_provider: TeachingDataProvider = SyntheticProvider(db.connect)
 _REGISTRY_GENERATION = 0
+
+
+READ_ONLY_TEACHING_TOOLS = frozenset(
+    {
+        "query_student_scores",
+        "list_exams",
+        "get_class_roster",
+        "search_questions",
+        "get_learning_progress",
+        "query_knowledge_graph",
+        "recommend_study_path",
+        "analyze_class_errors",
+        "diagnose_weak_points",
+        "get_score_distribution",
+    }
+)
+
+
+def configure_teaching_data_provider(provider: TeachingDataProvider | None) -> None:
+    """Configure the teaching-domain provider, not the R1 model gateway."""
+
+    global _teaching_data_provider
+    candidate = provider or SyntheticProvider(db.connect)
+    if not callable(getattr(candidate, "execute", None)):
+        raise TypeError("teaching data provider 必须实现 execute(query, connection=...)")
+    _teaching_data_provider = candidate
+
+
+def teaching_data_provider() -> TeachingDataProvider:
+    return _teaching_data_provider
 
 
 def configure_code_execution(provider) -> None:
@@ -570,8 +602,8 @@ def tool_available(name: str, context=None) -> bool:
 
 def dispatch(name: str, arguments: dict | None = None,
              conn: sqlite3.Connection | None = None,
-             *, manifest: ToolManifest | None = None) -> dict:
-    """按名调用工具。conn 为空则自动打开/关闭合成库连接。"""
+             *, manifest: ToolManifest | None = None, context=None) -> dict:
+    """按名调用工具；canonical 只读调用由教学 Provider 管理连接。"""
     if manifest is not None and not manifest.contains(name):
         return {"error": "工具不在本 run 冻结的 manifest 中"}
     if name not in TOOL_FUNCTIONS:
@@ -593,6 +625,21 @@ def dispatch(name: str, arguments: dict | None = None,
         ):
             return {"error": "工具 registry 在 run 内发生变化，manifest 身份不匹配"}
     arguments = arguments or {}
+    if name in READ_ONLY_TEACHING_TOOLS:
+        try:
+            handler = manifest.get(name).handler if manifest is not None else TOOL_FUNCTIONS[name]
+            if handler is None:
+                handler = TOOL_FUNCTIONS[name]
+            return handler(
+                conn,
+                _provider=_teaching_data_provider,
+                _context=context,
+                **arguments,
+            )
+        except TypeError as error:
+            return {"error": f"参数错误：{error}"}
+        except Exception as error:
+            return {"error": f"工具执行异常：{type(error).__name__}: {error}"}
     own = conn is None
     conn = conn or db.connect()
     try:
@@ -654,7 +701,13 @@ def dispatch_with_context(
     if spec is None:
         return {"error": "工具 registry 元数据缺失"}
     if spec.effect is not ToolEffect.CODE_EXECUTION:
-        return dispatch(name, arguments, conn=conn, manifest=manifest)
+        return dispatch(
+            name,
+            arguments,
+            conn=conn,
+            manifest=manifest,
+            context=context,
+        )
     arguments = arguments or {}
     if not code_execution_available():
         return {"error": "代码执行后端未通过健康与安全能力门禁"}

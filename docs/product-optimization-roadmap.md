@@ -125,8 +125,9 @@ private-contract/
 版本差异、未填充的知识图谱/RAG/掌握度域和状态口径问题；现在接入会把业务库的不稳定性带入 Agent
 主线，也会诱导工具实现直接耦合生产表。
 
-- 当前可运行产品依赖 registry-backed SQLite 合成工具实现和公开数据评测 Adapter；尚未抽出名为
-  `SyntheticProvider` 的统一领域 Provider。
+- 当前查询/分析/知识图谱 10 个只读切片已经通过 registry-backed SQLite `SyntheticProvider` 执行；
+  canonical query/result/error 不暴露 SQLite Row、表名或生产 ORM。操作/写入切片仍沿既有事务实现，
+  尚未在本阶段并入领域 Provider。
 - 私有 DDL 仅用于设计 Canonical Contract、发现状态和权限差异，不作为运行依赖。
 - 主仓不得保存本地数据库凭据、连接配置、原始行、查询结果或由真实学生数据生成的 Fixture。
 - 写工具继续在合成库验证审批、幂等、补偿和 outbox；最终接平台时只能通过业务 API 写入。
@@ -301,7 +302,7 @@ HTTP / Scheduler
 | Working Context | 当前 turn、近期消息、工具结果 | 单次会话 | message/checkpoint |
 | Episodic Memory | 某次任务做了什么、是否成功、失败类型 | 有 TTL，可归档 | Trace 的结构化投影 |
 | Preference Memory | 教师的稳定格式、课程范围和工作偏好 | 可更新、可撤回 | 显式输入或批准候选 |
-| Authoritative Learning State | 成绩、进度、作答、班级成员 | 不作为长期记忆复制 | 当前查询 registry-backed SQLite 合成实现；R3 收口为 SyntheticProvider，私有阶段查询 TeachingPlatformProvider |
+| Authoritative Learning State | 成绩、进度、作答、班级成员 | 不作为长期记忆复制 | 当前只读查询走 SyntheticProvider；私有阶段才查询 TeachingPlatformProvider |
 | Procedural Memory | 如何完成一类教学任务 | 版本化 Skill | 评测通过的 SkillSpec |
 
 成绩和学习进度会变化，不能因为“长期记忆”而缓存成事实。相关回答必须查询当前激活的权威
@@ -605,9 +606,9 @@ context overflow 不盲重试；fallback 不选择 capability 不兼容模型；
 
 | 表述 | 可接受证据 | 当前示例 |
 |---|---|---|
-| 已实现 | 源码 + 专项测试 + 一键验收 | Plan/Evidence、事务工具、lease/fencing、Trace、受控委派 |
+| 已实现 | 源码 + 专项测试 + 一键验收 | Plan/Evidence、事务工具、lease/fencing、Trace、ToolManifest、只读 SyntheticProvider |
 | 已接入但未线上验证 | 协议/故障测试通过，真实环境报告明确 `not_run/not_verified` | 新 Provider adapter、外部数据 Adapter |
-| 计划中 | 只出现在本文，不写入 README “技术亮点” | ToolManifest、统一预算总账、Background Review |
+| 计划中 | 只出现在本文，不写入 README “技术亮点” | 参数治理/工具并发、统一预算总账、Background Review |
 
 ## 9. 当前下一步
 
@@ -619,8 +620,9 @@ R0-R5 拆成 33 个可独立验收和交接的提示词；前一编号未满足�
 1. 完成 R0：建立可追溯 Git/CI 基线，保持 Stage 8 单一公开验收入口，并修正 `commit="unavailable"`。
 2. R1 已完成：Provider Gateway 已跑通 Chat Completions/Responses mode、Retry-After 和兼容 fallback。
 3. R2 已完成：RunEvent、RunJournal、增量工具消息、TurnFinalizer、Provider/SSE 真流、统一取消、持久 writer
-   fence、五崩溃窗恢复和独立门禁均已通过；下一步 R3.1 冻结 ToolManifest，仍不提前并发工具。
-4. 完成 R3：冻结 ToolManifest，落地参数规范化和只读工具 segment 并发，再把 SQLite 工具收口为 SyntheticProvider。
+   fence、五崩溃窗恢复和独立门禁均已通过。
+4. R3.1 已冻结 ToolManifest，R3.2 已将查询/分析/知识图谱只读切片收口为 SyntheticProvider；下一步 R3.3
+   收口剩余写/条件写工具契约，之后再做参数规范化和安全并发。
 5. 完成 R4：补实际 token/overflow recovery、全树预算、drain 与 backup/restore。
 6. 完成 R5：跑一次固定真实模型独立 Test，更新演示、部署和运行手册，冻结秋招候选版。
 

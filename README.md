@@ -12,7 +12,7 @@ HTTP / Scheduler / Demo
 
 核心不变量：system prompt 在会话内保持字节稳定；tool call/result 原子配对；权限、课程范围、审批、预算在执行层复验；同 session 由 SQLite lease 单飞并以 fencing token 拒绝旧 Worker；写入是“至少一次调度 + 幂等业务键/消费”，不宣称 exactly-once；trace 导出前再次执行 owner scope 与中心脱敏。
 
-技术亮点：16 个教学工具复用本地/MCP 窄接口；PlanGraph 只接受真实工具事件、完整 Artifact 或验真的 citation；写工具把业务变更、operation 和 outbox 放在同一教学库事务；Trace Repository 将已有 run/plan/evidence/provider/operation/job/subagent/sandbox 状态投影为稳定时间线，不另建第二套运行状态。
+技术亮点：16 个教学工具复用本地/MCP 窄接口；其中查询/分析/知识图谱 10 个只读切片通过 canonical `TeachingDataProvider` 隔离 SQLite，替换教学数据 adapter 不改 Agent 图或 ToolManifest；PlanGraph 只接受真实工具事件、完整 Artifact 或验真的 citation；写工具把业务变更、operation 和 outbox 放在同一教学库事务；Trace Repository 将已有 run/plan/evidence/provider/operation/job/subagent/sandbox 状态投影为稳定时间线，不另建第二套运行状态。
 
 数据红线：仓库只使用固定 seed 的合成教学数据和公开材料；真实学生数据、业务代码、API key、cookie、审批秘密不进入仓库、trace 或 Artifact preview。代码执行默认关闭，只有同一真实后端完成健康、能力与 E2E attestation 后才暴露 `run_code`。
 
@@ -68,14 +68,16 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
 ## 架构
 
 ```
-合成数据层 (零依赖, stdlib)        工具层               编排层                引擎层 (可替换)
-┌──────────────────────┐   ┌──────────────┐   ┌──────────────┐   ┌────────────────────┐
-│ SQLite 关系库         │←──│ 16 个工具      │←──│ LangGraph     │──▶│ vLLM W4A16 Qwen3-14B │
-│ 内存知识图谱 (Dijkstra)│   │ + OpenAI schema│   │ ReAct/supervisor│   │ 或 通义千问/任意 API   │
-└──────────────────────┘   └──────────────┘   └──────────────┘   └────────────────────┘
+合成数据层                 教学数据防腐层          工具/编排层             模型层
+┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│ SQLite + 图算法    │←──│ SyntheticProvider│←──│ ToolProvider/Agent│──▶│ ProviderGateway   │
+│ 固定 seed 可复现   │   │ Canonical Query  │   │ Plan / Evidence  │   │ Chat/Responses    │
+└──────────────────┘   └──────────────────┘   └──────────────────┘   └──────────────────┘
 ```
 
-- **数据 + 工具层**：纯标准库，离线可跑、可复现（`sqlite3` + 纯 Python 加权最短路）。
+- **教学数据 + 工具层**：`SyntheticProvider` 通过每调用独立 connection factory 执行 10 个只读切片，
+  返回 storage-neutral canonical result；handler 只保留参数/context 与旧 JSON 的映射。写工具仍沿用既有
+  同库事务，留待 R3.3 收口。这里的教学数据 Provider 与模型 `ProviderGateway`、课件 RAG Provider 是三条边界。
 - **引擎层**：`EDU_AGENT_ENGINE` 环境变量切换（离线 mock / 通义千问 / 本地 vLLM / 算法仓 W4A16 端点），同一张图复用。
 - **工具来源可切换**：默认本地直调；同一批工具也可暴露为 **MCP server**（stdio 传输），Agent 经 **MCP 协议**往返调用（`MCPToolProvider` 与本地 registry 同契约，图 / 引擎均无需改动）。见 `edu_agent/mcp/` 与 `scripts/mcp_demo.py`。
 - **可靠 Agent Runtime**：`EduAgentService` 统一管理身份/租户、模型与工具预算、短期会话、
