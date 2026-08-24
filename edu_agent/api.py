@@ -32,6 +32,7 @@ from .observability import (
 from .observability.redaction import RedactionPolicy
 from .runtime.cancellation import CancellationRequested, CancellationToken
 from .runtime.context import CurrentUserInputTooLarge
+from .runtime.lifecycle import LifecycleAdmission, LifecycleRejected, ShutdownReport
 from .state import ContextCheckpointError
 
 
@@ -140,8 +141,15 @@ class EduAgentApi:
         self._lifecycle_lock = threading.Lock()
         self._futures: set[Future[Any]] = set()
         self._closing = False
+        self._shutdown_report: ShutdownReport | None = None
+        register_shutdown_hook = getattr(self.service, "register_shutdown_hook", None)
+        if callable(register_shutdown_hook):
+            register_shutdown_hook(
+                f"api.transport:{id(self)}",
+                self._close_transport,
+            )
 
-    def close(self) -> None:
+    def _close_transport(self) -> None:
         with self._lifecycle_lock:
             if self._closing:
                 return
@@ -156,6 +164,18 @@ class EduAgentApi:
         self._run_events.close()
         wait_futures(futures, timeout=self._stream_cleanup_seconds)
         self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def shutdown(self, *, deadline_seconds: float | None = None) -> ShutdownReport:
+        if self._shutdown_report is None:
+            self._shutdown_report = self.service.shutdown(
+                deadline_seconds=deadline_seconds,
+                reason="api_shutdown",
+            )
+        self._close_transport()
+        return self._shutdown_report
+
+    def close(self) -> ShutdownReport:
+        return self.shutdown(deadline_seconds=self._stream_cleanup_seconds)
 
     def _submit(self, call, /, *args) -> Future[Any]:
         with self._lifecycle_lock:
@@ -217,6 +237,7 @@ class EduAgentApi:
         recovery_action: str = "execute",
         cancellation_token: CancellationToken | None = None,
         stream_writer: RunStreamWriter | None = None,
+        lifecycle_admission: LifecycleAdmission | None = None,
     ) -> dict[str, Any]:
         try:
             if cancellation_token is not None:
@@ -228,6 +249,7 @@ class EduAgentApi:
                     tenant_id=principal.tenant_id,
                     cancellation_token=cancellation_token,
                     stream_writer=stream_writer,
+                    lifecycle_admission=lifecycle_admission,
                 )
             elif recovery_action == "recover_completed":
                 terminal = self.service.get_run_status(
@@ -262,6 +284,7 @@ class EduAgentApi:
                     run_id=run_id,
                     cancellation_token=cancellation_token,
                     stream_writer=stream_writer,
+                    lifecycle_admission=lifecycle_admission,
                 )
             terminal = self.service.get_run_status(
                 run_id,
@@ -391,6 +414,9 @@ class EduAgentApi:
         finally:
             if cancellation_token is not None:
                 self._release_control(run_id, cancellation_token)
+                cancellation_token.close()
+            if lifecycle_admission is not None:
+                lifecycle_admission.close()
 
     def _claim_request(
         self, payload: dict[str, Any], principal: Principal, request_id: str
@@ -470,39 +496,62 @@ class EduAgentApi:
         timeout = min(float(payload.get("timeout_seconds", self.max_timeout_seconds)), self.max_timeout_seconds)
         if timeout <= 0:
             raise ApiError(400, "INVALID_ARGUMENT", "timeout_seconds must be positive")
-        claim, run_id, owner_id, attempt = self._claim_request(payload, principal, request_id)
-        if claim["status"] == "completed":
-            return self._record_response(claim, replay=True)
-        if payload.get("stream") is True:
-            return ApiResponse(
-                200,
-                self._stream_chat(
+        admission = self.service.lifecycle.admit("api.chat")
+        try:
+            claim, run_id, owner_id, attempt = self._claim_request(
+                payload,
+                principal,
+                request_id,
+            )
+            if claim["status"] == "completed":
+                admission.close()
+                return self._record_response(claim, replay=True)
+            if payload.get("stream") is True:
+                return ApiResponse(
+                    200,
+                    self._stream_chat(
+                        payload,
+                        principal,
+                        request_id,
+                        run_id,
+                        owner_id,
+                        attempt,
+                        recovery_action=claim.get("recovery_action", "execute"),
+                        lifecycle_admission=admission,
+                    ),
+                    content_type="text/event-stream; charset=utf-8",
+                    headers={"Cache-Control": "no-cache"},
+                )
+            cancellation_token = CancellationToken.with_timeout(timeout)
+            admission.add_cancel_callback(
+                lambda: cancellation_token.cancel(
+                    "process shutdown deadline exceeded",
+                    source="process_shutdown",
+                )
+            )
+            self._register_control(run_id, cancellation_token)
+            recovery_action = claim.get("recovery_action", "execute")
+            try:
+                future = self._submit(
+                    self._run_chat,
                     payload,
                     principal,
                     request_id,
                     run_id,
                     owner_id,
                     attempt,
-                    recovery_action=claim.get("recovery_action", "execute"),
-                ),
-                content_type="text/event-stream; charset=utf-8",
-                headers={"Cache-Control": "no-cache"},
-            )
-        cancellation_token = CancellationToken.with_timeout(timeout)
-        self._register_control(run_id, cancellation_token)
-        recovery_action = claim.get("recovery_action", "execute")
-        future = self._submit(
-            self._run_chat,
-            payload,
-            principal,
-            request_id,
-            run_id,
-            owner_id,
-            attempt,
-            recovery_action,
-            cancellation_token,
-            None,
-        )
+                    recovery_action,
+                    cancellation_token,
+                    None,
+                    admission,
+                )
+            except Exception:
+                self._release_control(run_id, cancellation_token)
+                cancellation_token.close()
+                raise
+        except Exception:
+            admission.close()
+            raise
         try:
             response = future.result(timeout=timeout)
         except FutureTimeout as error:
@@ -510,11 +559,15 @@ class EduAgentApi:
             self.service.cancel_run(
                 run_id, actor_id=principal.actor_id, tenant_id=principal.tenant_id
             )
-            raise ApiError(504, "TIMEOUT", "chat exceeded its cooperative timeout", retryable=True) from error
+            raise ApiError(
+                504,
+                "TIMEOUT",
+                "chat exceeded its cooperative timeout",
+                retryable=True,
+            ) from error
         except Exception:
-            # ``_run_chat`` is the single request-finalization owner.  A
-            # second completion attempt here could turn a recovered successful
-            # run into a completed API envelope with no response body.
+            # ``_run_chat`` is the single request-finalization owner. A second
+            # completion attempt here could lose a recovered response body.
             raise
         return ApiResponse(200, response)
 
@@ -540,12 +593,20 @@ class EduAgentApi:
         owner_id: str,
         attempt: int,
         recovery_action: str = "execute",
+        lifecycle_admission: LifecycleAdmission | None = None,
     ) -> Iterator[bytes]:
         timeout = min(
             float(payload.get("timeout_seconds", self.max_timeout_seconds)),
             self.max_timeout_seconds,
         )
         cancellation_token = CancellationToken.with_timeout(timeout)
+        if lifecycle_admission is not None:
+            lifecycle_admission.add_cancel_callback(
+                lambda: cancellation_token.cancel(
+                    "process shutdown deadline exceeded",
+                    source="process_shutdown",
+                )
+            )
         writer = self._stream_writers.open(
             run_id=run_id,
             attempt=attempt,
@@ -577,6 +638,7 @@ class EduAgentApi:
                 recovery_action,
                 cancellation_token,
                 writer,
+                lifecycle_admission,
             )
             while not terminal_seen:
                 if cancellation_token.cancelled:
@@ -645,6 +707,10 @@ class EduAgentApi:
             self._release_control(run_id, cancellation_token)
             self._stream_writers.release(writer)
             cancellation_token.close()
+            if lifecycle_admission is not None and (
+                future is None or future.cancelled()
+            ):
+                lifecycle_admission.close()
 
     def _openapi(self) -> dict[str, Any]:
         return {
@@ -657,6 +723,12 @@ class EduAgentApi:
             },
             "security": [{"bearerAuth": []}],
             "paths": {
+                "/health/live": {
+                    "get": {"summary": "Process liveness", "security": []}
+                },
+                "/health/ready": {
+                    "get": {"summary": "Process readiness", "security": []}
+                },
                 "/v1/chat": {"post": {"summary": "Run one service chat turn"}},
                 "/v1/runs/{run_id}": {"get": {"summary": "Read owner-scoped run status"}},
                 "/v1/runs/{run_id}/cancel": {"post": {"summary": "Request cooperative cancellation"}},
@@ -686,6 +758,25 @@ class EduAgentApi:
             parsed = urlsplit(target)
             if method == "GET" and parsed.path == "/openapi.json":
                 return ApiResponse(200, self._openapi())
+            if method == "GET" and parsed.path in {"/health/live", "/healthz"}:
+                health = self.service.liveness_snapshot()
+                return ApiResponse(
+                    200 if health["live"] else 503,
+                    {
+                        "status": "ok" if health["live"] else "stopped",
+                        "lifecycle": health["lifecycle"],
+                        "live": health["live"],
+                    },
+                )
+            if method == "GET" and parsed.path in {"/health/ready", "/readyz"}:
+                health = self.service.health_snapshot()
+                return ApiResponse(
+                    200 if health["ready"] else 503,
+                    {
+                        "status": "ready" if health["ready"] else "not_ready",
+                        **health,
+                    },
+                )
             principal = self.authenticator.authenticate(normalized_headers)
             query = parse_qs(parsed.query)
             payload = json.loads(body or b"{}")
@@ -871,6 +962,17 @@ class EduAgentApi:
                 500,
                 ApiError(500, error.error_code, message).payload(request_id),
             )
+        except LifecycleRejected as error:
+            return ApiResponse(
+                503,
+                ApiError(
+                    503,
+                    error.error_code,
+                    "process is not accepting new work",
+                    retryable=True,
+                ).payload(request_id),
+                headers={"Retry-After": "1"},
+            )
         except ValueError as error:
             return ApiResponse(409, ApiError(409, "CONFLICT", str(error)).payload(request_id))
         except ApiError as error:
@@ -881,6 +983,10 @@ class EduAgentApi:
 
 
 def make_http_server(api: EduAgentApi, host: str = "127.0.0.1", port: int = 8080):
+    class LifecycleHTTPServer(ThreadingHTTPServer):
+        daemon_threads = True
+        block_on_close = False
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "EduAgentAPI/1.0"
 
@@ -926,4 +1032,4 @@ def make_http_server(api: EduAgentApi, host: str = "127.0.0.1", port: int = 8080
         def log_message(self, format: str, *args) -> None:
             return
 
-    return ThreadingHTTPServer((host, port), Handler)
+    return LifecycleHTTPServer((host, port), Handler)

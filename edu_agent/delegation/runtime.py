@@ -235,8 +235,8 @@ class DelegationRuntime:
         self._active_stops: dict[str, tuple[threading.Event, list[str]]] = {}
         self.recovery_report = self.state.recover_expired()
 
-    def close(self) -> None:
-        self._pool.shutdown(wait=True, cancel_futures=False)
+    def close(self, *, wait: bool = True) -> None:
+        self._pool.shutdown(wait=wait, cancel_futures=not wait)
 
     def __enter__(self) -> DelegationRuntime:
         return self

@@ -95,6 +95,11 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   system prompt 保持稳定；超大工具结果按单结果/整轮预算写入 tenant/actor/session 隔离的 Artifact，模型只看到
   typed reference 与脱敏 preview，并以 SHA-256 校验完整性。该保证限于
   共享同一 SQLite 文件的本机 Worker，不宣称跨主机或跨区域共识。
+- **进程 Lifecycle 与有限 Drain**：`LifecycleController` 在 migration、SQLite 回滚写探测和启用的本地
+  Code Execution/MCP Provider 健康后才从 `starting` 进入 `running`。`SIGTERM` 或显式 shutdown 原子进入
+  `draining`，readiness 立即失败并拒绝新 chat/Scheduler claim，liveness 在有界收尾期间保持成功。deadline
+  到期后统一取消 Provider stream、工具和 Scheduler runner；仍未完成的 run 先写成可恢复 `abandoned` 并保留
+  lease/fencing，再执行有界 WAL flush。外部模型短暂故障不参与 readiness，仍由 route breaker/fallback 处理。
 - **模型与后台任务容错**：模型错误区分连接/超时/429/5xx 与 auth/权限/参数/上下文/输出上限，只重试明确
   瞬态故障；重试遵守有上限的 `Retry-After` 并使用 full jitter，并发和 breaker 按冻结 route 隔离，
   half-open 只放行一个探测。fallback 只接管策略允许的瞬态故障，并在发送前复验目标 API mode、tool calling、
@@ -133,6 +138,9 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   只对显式 `parallel_safe` 的无副作用只读 segment 使用有界并发，写/审批/代码和未知调用仍是 barrier，模型结果与
   journal 按原顺序提交。OTLP 默认关闭；只有安装
   `otel` extra 并显式配置 endpoint 后才尝试导出，失败不击穿主路径。
+
+HTTP 进程探针为无需认证的 `GET /health/live` 和 `GET /health/ready`；响应只含 lifecycle、必要检查布尔值和
+活动工作数量等安全聚合字段，不返回 endpoint、key 或 Provider 错误原文。
 
 ## 目录结构
 

@@ -35,6 +35,7 @@ flowchart LR
 | `PolicyToolExecutor` | 参数、角色、范围、审批、预算复验 | operation/outbox/artifact | 把 Prompt 当安全边界 |
 | `TeachingDataProvider` | 规范化 10 个 query、5 个 command、receipt/error 和课程范围 | 合成教学库；写入加入 executor 的同库事务 | 自行审批/commit、暴露表名/ORM、代码执行 |
 | `CodeExecutionProvider` | 隔离执行请求/结果、健康与安全 capability | Jobe / Docker adapter | 教学数据读写、ToolOperation |
+| `LifecycleController` | 进程接收票据、readiness、单调 drain 与取消广播 | `audit_events` 中的状态转换 | 代替单 run 状态、删除 lease、无限等待线程 |
 | `RuntimeManager` | session lease、heartbeat、fencing、取消 | `session_leases/runs` | 宣称跨主机共识 |
 | `TraceRepository` | owner-scoped keyset 查询与分页导出 | 可重建 `trace_event_index` | 修改业务状态、读取 Artifact 全文 |
 
@@ -73,6 +74,19 @@ primary/fallback route plan 在 turn 起点冻结；fallback 只允许连接、�
 逐项检查；Provider fallback 的 context window 未知时拒绝，不能按无限处理。Trace 记录候选选择、拒绝/切换原因和
 唯一胜出 attempt；返回新的 `EngineResponse` 副本，只结算胜出 route usage。配置仍是每条 route 单一
 `CredentialRef`，没有 key pool 或运行时凭据轮换。
+
+## 进程 Lifecycle 与接收所有权
+
+R4.5 的 `LifecycleController` 与单 run/session 状态正交。进程只按
+`starting -> running -> draining -> stopped` 单调转换；迁移、SQLite 真实写入后 rollback、启用的本地
+Code Execution/MCP Provider 健康均通过后才能 running。外部模型不做 readiness 探测，短暂不可用由已有
+route breaker/retry/fallback 隔离，避免一次外网波动驱逐所有实例。
+
+API 和 Scheduler 在接收/claim 前原子取得 admission。draining 与新 admission 使用同一锁，因此先取得票据的工作
+继续由本进程负责并携票进入 Service，后到请求稳定返回 503/不领取任务。shutdown 先停止接收并等已有 admission、
+RuntimeManager/finalizer 与 Scheduler heartbeat；deadline 后广播同一 cancellation，MCP/Provider stream 和工具在
+已有关闭回调中收敛。仍未完成的本 owner run 先持久化为 `abandoned` 与明确恢复建议，session lease 不被提前删除；
+迟到 callback 继续经过 run 状态、owner、fencing token 以及 Scheduler attempt/execution key/lease expiry 复验。
 
 流式重试复用同一 breaker、semaphore、Retry-After、fallback capability 和审计策略。只有首个 text/tool delta
 前的瞬态失败能继续 retry/fallback；一旦已有可见 delta，error 即为该流终态，不会无提示拼接另一 attempt。

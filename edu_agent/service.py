@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import threading
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -33,6 +34,13 @@ from .runtime.context_engine import CheckpointContextEngine, ContextEngine
 from .runtime.cancellation import CancellationRequested, CancellationToken
 from .runtime.models import BudgetExceeded, RunContext
 from .runtime.manager import RuntimeManager
+from .runtime.lifecycle import (
+    LifecycleAdmission,
+    LifecycleController,
+    LifecycleStartupError,
+    LifecycleState,
+    ShutdownReport,
+)
 from .runtime.recovery import (
     RecoveryAction,
     RecoveryDecision,
@@ -79,13 +87,24 @@ class EduAgentService:
         finalizer_fault_injector=None,
         post_process_hooks=None,
         finalizer_cleanup=None,
+        lifecycle_controller: LifecycleController | None = None,
     ):
         self.config = config or AppConfig()
+        self.lifecycle = lifecycle_controller or LifecycleController(
+            poll_interval_seconds=self.config.lifecycle.poll_interval_seconds,
+        )
         self.engine = engine
         self.state_store = state_store or StateStore(self.config.state_path)
+        self.lifecycle.set_audit_sink(self._record_lifecycle_transition)
         self.code_execution_provider = self._build_code_execution_provider()
+        self._required_provider_healthy = True
         if self.code_execution_provider is not None:
-            self.code_execution_provider.health_check(force=True)
+            try:
+                self._required_provider_healthy = bool(
+                    self.code_execution_provider.health_check(force=True).healthy
+                )
+            except Exception:
+                self._required_provider_healthy = False
         registry.configure_code_execution(self.code_execution_provider)
         self.tools_provider = tools_provider or registry
         if tools_provider is None and self.config.knowledge.enabled:
@@ -113,7 +132,16 @@ class EduAgentService:
         stalled_recovery = self.state_store.recover_stalled_runs(
             stall_timeout_seconds=self.config.runtime.run_stall_seconds,
         )
-        self.recovery_report = self._startup_recovery_report(stalled_recovery)
+        shutdown_recovery = self.state_store.list_shutdown_recoverable_runs()
+        known_recovery_ids = {item["run_id"] for item in stalled_recovery}
+        self.recovery_report = self._startup_recovery_report(
+            stalled_recovery
+            + [
+                item
+                for item in shutdown_recovery
+                if item["run_id"] not in known_recovery_ids
+            ]
+        )
         self.memory = memory_provider or MemoryManager(
             self.state_store,
             max_items=self.config.memory.max_recalled_items,
@@ -162,8 +190,72 @@ class EduAgentService:
         )
         self._delegation_runtime = None
         self._teaching_delegation = None
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_report: ShutdownReport | None = None
+        self._shutdown_hooks_lock = threading.Lock()
+        self._shutdown_hooks: dict[str, Callable[[], None]] = {}
+        self._resources_closed = False
         if hasattr(self.engine, "event_sink") and self.engine.event_sink is None:
             self.engine.event_sink = lambda event: self.state_store.record_provider_event(**event)
+        self._refresh_lifecycle_health()
+        try:
+            self.lifecycle.complete_startup()
+        except LifecycleStartupError:
+            # The process remains observable in ``starting`` and can become
+            # ready when a required local provider recovers.
+            pass
+
+    def _record_lifecycle_transition(self, event: Mapping[str, object]) -> None:
+        runtime_manager = getattr(self, "runtime_manager", None)
+        owner_id = getattr(runtime_manager, "owner_id", "initializing")
+        self.state_store.record_audit_event(
+            actor_id="system",
+            tenant_id="system",
+            action="process.lifecycle_transition",
+            resource=f"process:{owner_id}",
+            decision=str(event.get("to_state") or "unknown"),
+            details={
+                "sequence": event.get("sequence"),
+                "from_state": event.get("from_state"),
+                "reason": event.get("reason"),
+            },
+        )
+
+    def _refresh_lifecycle_health(self) -> dict:
+        provider_ready = self._required_provider_healthy
+        if self.code_execution_provider is not None:
+            try:
+                provider_ready = bool(
+                    self.code_execution_provider.health_check(force=False).healthy
+                )
+            except Exception:
+                provider_ready = False
+            self._required_provider_healthy = provider_ready
+        tools_readiness = getattr(self.tools_provider, "readiness_check", None)
+        if callable(tools_readiness):
+            try:
+                provider_ready = provider_ready and bool(tools_readiness())
+            except Exception:
+                provider_ready = False
+        self.lifecycle.set_health(
+            migration=self.state_store.migration_ready(),
+            state_db_writable=self.state_store.writable_ready(),
+            required_providers=provider_ready,
+        )
+        if self.lifecycle.state is LifecycleState.STARTING:
+            try:
+                self.lifecycle.complete_startup()
+            except LifecycleStartupError:
+                pass
+        return self.lifecycle.health_snapshot()
+
+    def health_snapshot(self) -> dict:
+        return self._refresh_lifecycle_health()
+
+    def liveness_snapshot(self) -> dict:
+        """Return process-local liveness without touching external resources."""
+
+        return self.lifecycle.health_snapshot()
 
     def _context_route_limits(
         self,
@@ -554,6 +646,67 @@ class EduAgentService:
         )
 
     def chat(
+        self,
+        message: str,
+        *,
+        actor_id: str,
+        role: str | None = None,
+        tenant_id: str = "default",
+        course_ids: set[int] | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        db_conn=None,
+        replay_scope: str | None = None,
+        cancellation_token: CancellationToken | None = None,
+        stream_writer=None,
+        lifecycle_admission: LifecycleAdmission | None = None,
+    ) -> ChatResult:
+        owned_admission = lifecycle_admission is None
+        admission = lifecycle_admission or self.lifecycle.admit("chat")
+        self.lifecycle.assert_admission(admission)
+        effective_run_id = run_id or uuid.uuid4().hex
+        effective_token = cancellation_token or CancellationToken()
+
+        def cancel_for_shutdown() -> None:
+            effective_token.cancel(
+                "process shutdown deadline exceeded",
+                source="process_shutdown",
+            )
+            try:
+                self.state_store.request_process_shutdown(
+                    effective_run_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                )
+            except Exception:
+                pass
+
+        unregister_cancel = admission.add_cancel_callback(cancel_for_shutdown)
+        try:
+            effective_token.checkpoint("service.chat.before_enqueue")
+            return self._chat_accepted(
+                message,
+                actor_id=actor_id,
+                role=role,
+                tenant_id=tenant_id,
+                course_ids=course_ids,
+                session_id=session_id,
+                run_id=effective_run_id,
+                db_conn=db_conn,
+                replay_scope=replay_scope,
+                cancellation_token=effective_token,
+                stream_writer=stream_writer,
+            )
+        finally:
+            if effective_token.cancelled:
+                cancel_for_shutdown()
+            unregister_cancel()
+            if cancellation_token is None:
+                effective_token.close()
+            if owned_admission:
+                admission.close()
+
+    def _chat_accepted(
         self,
         message: str,
         *,
@@ -1573,6 +1726,56 @@ class EduAgentService:
         db_conn=None,
         cancellation_token: CancellationToken | None = None,
         stream_writer=None,
+        lifecycle_admission: LifecycleAdmission | None = None,
+    ) -> ChatResult:
+        owned_admission = lifecycle_admission is None
+        admission = lifecycle_admission or self.lifecycle.admit("run.resume")
+        self.lifecycle.assert_admission(admission)
+        effective_token = cancellation_token or CancellationToken()
+
+        def cancel_for_shutdown() -> None:
+            effective_token.cancel(
+                "process shutdown deadline exceeded",
+                source="process_shutdown",
+            )
+            try:
+                self.state_store.request_process_shutdown(
+                    run_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                )
+            except Exception:
+                pass
+
+        unregister_cancel = admission.add_cancel_callback(cancel_for_shutdown)
+        try:
+            effective_token.checkpoint("service.resume.before_prepare")
+            return self._resume_run_accepted(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                db_conn=db_conn,
+                cancellation_token=effective_token,
+                stream_writer=stream_writer,
+            )
+        finally:
+            if effective_token.cancelled:
+                cancel_for_shutdown()
+            unregister_cancel()
+            if cancellation_token is None:
+                effective_token.close()
+            if owned_admission:
+                admission.close()
+
+    def _resume_run_accepted(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str = "default",
+        db_conn=None,
+        cancellation_token: CancellationToken | None = None,
+        stream_writer=None,
     ) -> ChatResult:
         decision = self.get_recovery_decision(
             run_id,
@@ -1925,8 +2128,60 @@ class EduAgentService:
         tenant_id: str = "default",
         cancellation_token: CancellationToken | None = None,
         stream_writer=None,
+        lifecycle_admission: LifecycleAdmission | None = None,
+    ) -> ChatResult:
+        owned_admission = lifecycle_admission is None
+        admission = lifecycle_admission or self.lifecycle.admit("api.run.resume")
+        self.lifecycle.assert_admission(admission)
+        effective_token = cancellation_token or CancellationToken()
+
+        def cancel_for_shutdown() -> None:
+            effective_token.cancel(
+                "process shutdown deadline exceeded",
+                source="process_shutdown",
+            )
+            try:
+                self.state_store.request_process_shutdown(
+                    run_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                )
+            except Exception:
+                pass
+
+        unregister_cancel = admission.add_cancel_callback(cancel_for_shutdown)
+        try:
+            effective_token.checkpoint("service.api_resume.before_prepare")
+            return self._resume_api_run_accepted(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                cancellation_token=effective_token,
+                stream_writer=stream_writer,
+                lifecycle_admission=admission,
+            )
+        finally:
+            if effective_token.cancelled:
+                cancel_for_shutdown()
+            unregister_cancel()
+            if cancellation_token is None:
+                effective_token.close()
+            if owned_admission:
+                admission.close()
+
+    def _resume_api_run_accepted(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str = "default",
+        cancellation_token: CancellationToken | None = None,
+        stream_writer=None,
+        lifecycle_admission: LifecycleAdmission | None = None,
     ) -> ChatResult:
         """Resume a claimed queued/abandoned request using persistent run state."""
+        if lifecycle_admission is not None:
+            self.lifecycle.assert_admission(lifecycle_admission)
         record = self.state_store.get_run_status(run_id, actor_id=actor_id, tenant_id=tenant_id)
         if record is None:
             raise KeyError(f"run 不存在：{run_id}")
@@ -1946,6 +2201,7 @@ class EduAgentService:
                 tenant_id=tenant_id,
                 cancellation_token=cancellation_token,
                 stream_writer=stream_writer,
+                lifecycle_admission=lifecycle_admission,
             )
         if record["status"] != "queued":
             if record["status"] in {"completed", "failed", "interrupted"}:
@@ -1974,6 +2230,7 @@ class EduAgentService:
                     tenant_id=tenant_id,
                     cancellation_token=cancellation_token,
                     stream_writer=stream_writer,
+                    lifecycle_admission=lifecycle_admission,
                 )
             raise RuntimeError(f"run 不能从当前状态恢复：{record['status']}")
         with self.state_store.connect() as connection:
@@ -2091,21 +2348,29 @@ class EduAgentService:
         max_attempts: int = 3,
         retry_backoff_seconds: int = 60,
         idempotency_key: str | None = None,
+        lifecycle_admission: LifecycleAdmission | None = None,
     ) -> str:
-        if role not in {"teacher", "admin"}:
-            raise PermissionError("只有 teacher/admin 可以创建计划任务")
-        return JobStore(self.state_store).create(
-            actor_id=actor_id,
-            tenant_id=tenant_id,
-            role=role,
-            name=name,
-            prompt=prompt,
-            next_run_at=next_run_at,
-            interval_seconds=interval_seconds,
-            max_attempts=max_attempts,
-            retry_backoff_seconds=retry_backoff_seconds,
-            idempotency_key=idempotency_key,
-        )
+        owned_admission = lifecycle_admission is None
+        admission = lifecycle_admission or self.lifecycle.admit("schedule.create")
+        self.lifecycle.assert_admission(admission)
+        try:
+            if role not in {"teacher", "admin"}:
+                raise PermissionError("只有 teacher/admin 可以创建计划任务")
+            return JobStore(self.state_store).create(
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                role=role,
+                name=name,
+                prompt=prompt,
+                next_run_at=next_run_at,
+                interval_seconds=interval_seconds,
+                max_attempts=max_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
+                idempotency_key=idempotency_key,
+            )
+        finally:
+            if owned_admission:
+                admission.close()
 
     def cancel_scheduled_job(
         self,
@@ -2121,13 +2386,20 @@ class EduAgentService:
         )
 
     def scheduler(self, *, worker_id: str | None = None) -> Scheduler:
-        def run_job(job: dict) -> str:
+        def run_job(
+            job: dict,
+            *,
+            cancellation_token: CancellationToken | None = None,
+            lifecycle_admission: LifecycleAdmission | None = None,
+        ) -> str:
             result = self.chat(
                 job["prompt"],
                 actor_id=job["actor_id"],
                 role=job["role"],
                 tenant_id=job["tenant_id"],
                 replay_scope=f"scheduled-job:{job['id']}:{job['execution_key']}",
+                cancellation_token=cancellation_token,
+                lifecycle_admission=lifecycle_admission,
             )
             return result.final_answer or ""
 
@@ -2136,11 +2408,148 @@ class EduAgentService:
             run_job,
             worker_id=worker_id,
             lease_seconds=self.config.scheduler.lease_seconds,
+            lifecycle=self.lifecycle,
         )
 
-    def close(self) -> None:
+    def register_shutdown_hook(self, name: str, callback: Callable[[], None]) -> None:
+        if not isinstance(name, str) or not name.strip() or not callable(callback):
+            raise ValueError("shutdown hook requires a stable name and callable")
+        with self._shutdown_hooks_lock:
+            current = self._shutdown_hooks.get(name)
+            if current is not None and current is not callback:
+                raise ValueError(f"shutdown hook already registered: {name}")
+            self._shutdown_hooks[name] = callback
+
+    @staticmethod
+    def _bounded_call(call: Callable[[], object], timeout: float) -> tuple[bool, Exception | None]:
+        completed = threading.Event()
+        errors: list[Exception] = []
+
+        def invoke() -> None:
+            try:
+                call()
+            except Exception as error:
+                errors.append(error)
+            finally:
+                completed.set()
+
+        worker = threading.Thread(
+            target=invoke,
+            name="edu-agent-shutdown-hook",
+            daemon=True,
+        )
+        worker.start()
+        if not completed.wait(max(0.001, float(timeout))):
+            return False, None
+        return not errors, errors[0] if errors else None
+
+    def _interrupt_blocking_resources(self, timeout: float) -> None:
+        close = getattr(self.tools_provider, "close", None)
+        if callable(close):
+            self._bounded_call(close, timeout)
+
+    def _close_resources(self) -> None:
+        with self._shutdown_hooks_lock:
+            if self._resources_closed:
+                return
+            self._resources_closed = True
         if self._delegation_runtime is not None:
-            self._delegation_runtime.close()
+            self._delegation_runtime.close(wait=False)
         close = getattr(self.tools_provider, "close", None)
         if callable(close):
             close()
+
+    def shutdown(
+        self,
+        *,
+        deadline_seconds: float | None = None,
+        reason: str = "explicit_shutdown",
+    ) -> ShutdownReport:
+        configured = self.config.lifecycle
+        timeout = float(
+            configured.shutdown_deadline_seconds
+            if deadline_seconds is None
+            else deadline_seconds
+        )
+        if timeout <= 0:
+            raise ValueError("shutdown deadline must be positive")
+        with self._shutdown_lock:
+            if self._shutdown_report is not None:
+                return self._shutdown_report
+            started = self.lifecycle.now()
+            hard_deadline = started + timeout
+            flush_reserve = min(configured.final_flush_seconds, timeout * 0.25)
+            cancel_reserve = min(configured.cancellation_grace_seconds, timeout * 0.5)
+            graceful_deadline = max(started, hard_deadline - flush_reserve - cancel_reserve)
+            self.lifecycle.begin_draining(reason)
+
+            normal_drained = self.lifecycle.wait_for_idle(
+                graceful_deadline,
+                extra_active=self.runtime_manager.active_count,
+            )
+            cancellation_requested = False
+            recoverable: list[dict] = []
+            if not normal_drained:
+                cancellation_requested = True
+                self.lifecycle.cancel_active()
+                self.runtime_manager.cancel_all()
+                self._interrupt_blocking_resources(
+                    min(cancel_reserve, max(0.001, hard_deadline - self.lifecycle.now()))
+                )
+                cancel_deadline = max(self.lifecycle.now(), hard_deadline - flush_reserve)
+                completed_after_cancel = self.lifecycle.wait_for_idle(
+                    cancel_deadline,
+                    extra_active=self.runtime_manager.active_count,
+                )
+                if not completed_after_cancel:
+                    recoverable = self.state_store.mark_owner_runs_recoverable(
+                        owner_id=self.runtime_manager.owner_id,
+                    )
+
+            marked_ids = {item["run_id"] for item in recoverable}
+            recoverable.extend(
+                item
+                for item in self.state_store.mark_owner_runs_recoverable(
+                    owner_id=self.runtime_manager.owner_id,
+                )
+                if item["run_id"] not in marked_ids
+            )
+
+            flush_timeout = max(0.001, hard_deadline - self.lifecycle.now())
+            flush_succeeded, flush_error = self._bounded_call(
+                self.state_store.flush,
+                flush_timeout,
+            )
+            flush_timed_out = not flush_succeeded and flush_error is None
+
+            with self._shutdown_hooks_lock:
+                hooks = tuple(self._shutdown_hooks.items())
+            hooks = (("service.resources", self._close_resources),) + hooks
+            close_failures: list[str] = []
+            for name, hook in hooks:
+                remaining = max(0.001, hard_deadline - self.lifecycle.now())
+                succeeded, _ = self._bounded_call(hook, remaining)
+                if not succeeded:
+                    close_failures.append(name)
+
+            self.lifecycle.mark_stopped("shutdown_complete")
+            active_remaining = max(
+                self.lifecycle.active_count(),
+                self.runtime_manager.active_count(),
+            )
+            self._shutdown_report = ShutdownReport(
+                state=self.lifecycle.state.value,
+                normal_drained=normal_drained and not recoverable,
+                cancellation_requested=cancellation_requested,
+                recoverable_runs=len(recoverable),
+                active_remaining=active_remaining,
+                flush_succeeded=flush_succeeded,
+                flush_timed_out=flush_timed_out,
+                resource_close_failures=tuple(close_failures),
+                elapsed_seconds=max(0.0, self.lifecycle.now() - started),
+            )
+            return self._shutdown_report
+
+    def close(self) -> ShutdownReport | None:
+        self._close_resources()
+        return self._shutdown_report

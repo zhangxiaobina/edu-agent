@@ -493,6 +493,35 @@ class ApiConfig:
 
 
 @dataclass(frozen=True)
+class LifecycleConfig:
+    shutdown_deadline_seconds: float = 30.0
+    cancellation_grace_seconds: float = 5.0
+    final_flush_seconds: float = 2.0
+    poll_interval_seconds: float = 0.05
+
+    def __post_init__(self) -> None:
+        values = {
+            "shutdown_deadline_seconds": self.shutdown_deadline_seconds,
+            "cancellation_grace_seconds": self.cancellation_grace_seconds,
+            "final_flush_seconds": self.final_flush_seconds,
+            "poll_interval_seconds": self.poll_interval_seconds,
+        }
+        for name, value in values.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(f"lifecycle.{name} 必须是有限正数")
+        if self.cancellation_grace_seconds + self.final_flush_seconds >= self.shutdown_deadline_seconds:
+            raise ValueError(
+                "lifecycle cancellation_grace_seconds + final_flush_seconds "
+                "必须小于 shutdown_deadline_seconds"
+            )
+
+
+@dataclass(frozen=True)
 class StorageConfig:
     state_path: str = "~/.edu-agent/state.db"
     artifact_path: str | None = None
@@ -612,6 +641,7 @@ class AppConfig:
     code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    lifecycle: LifecycleConfig = field(default_factory=LifecycleConfig)
 
     def __post_init__(self) -> None:
         declared_context = self.model.context_window_tokens
@@ -690,6 +720,7 @@ def load_config(path: str | os.PathLike | None = None) -> AppConfig:
         "code_execution",
         "observability",
         "api",
+        "lifecycle",
     }
     unknown_sections = set(data) - allowed_sections
     if unknown_sections:
@@ -709,4 +740,5 @@ def load_config(path: str | os.PathLike | None = None) -> AppConfig:
         code_execution=_section(data, "code_execution", CodeExecutionConfig),
         observability=_section(data, "observability", ObservabilityConfig),
         api=_section(data, "api", ApiConfig),
+        lifecycle=_section(data, "lifecycle", LifecycleConfig),
     )

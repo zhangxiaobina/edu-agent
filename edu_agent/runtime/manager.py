@@ -223,6 +223,20 @@ class RuntimeManager:
             token = self._cancellation_tokens.get(run_id)
         return token.cancel(reason, source=source) if token is not None else False
 
+    def cancel_all(
+        self,
+        *,
+        reason: str = "process shutdown deadline exceeded",
+        source: str = "process_shutdown",
+    ) -> int:
+        with self._guard:
+            tokens = tuple(self._cancellation_tokens.values())
+        return sum(token.cancel(reason, source=source) for token in tokens)
+
+    def active_count(self) -> int:
+        with self._guard:
+            return len(self._active)
+
     def active_runs(self) -> list[dict]:
         with self._guard:
             return [asdict(run) for run in self._active.values()]

@@ -283,6 +283,15 @@ class MCPToolProvider:
         if self._thread is not None:
             self._thread.join(timeout=10)
 
+    def readiness_check(self) -> bool:
+        with self._catalog_lock:
+            connected = self._connected and not self._registration_errors
+        return bool(
+            connected
+            and self._thread is not None
+            and self._thread.is_alive()
+        )
+
     def __enter__(self) -> "MCPToolProvider":
         return self.start()
 

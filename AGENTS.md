@@ -26,3 +26,12 @@
   `scripts/audit_eval_lineage.py`，跨 split 重复、族重叠、缺 provenance、敏感字段或非确定生成必须失败。
 - 本地完整门禁仍以 `zsh scripts/accept_stage8.sh` 为唯一公开入口；CI 契约见
   `.github/workflows/ci.yml`，评测报告的 candidate/release 模式必须通过真实 Git provenance 门禁。
+
+## 进程生命周期
+
+- API 进程必须通过 `LifecycleController` 维持 `starting/running/draining/stopped` 单调状态；`SIGTERM` 和显式
+  shutdown 先进入 draining，停止接收新 chat/Scheduler claim，再按 `[lifecycle]` deadline 有界收尾。
+- 探针固定为无需认证的 `/health/live` 与 `/health/ready`，只返回聚合状态；不得暴露 Provider endpoint、凭据、
+  异常原文或业务数据。draining 期间 liveness 保持成功、readiness 必须失败。
+- 超时停机必须先持久化未完成 run 的恢复建议并保留 session lease/fencing 边界，不能靠无限 join、提前删除 lease
+  或接受迟到 worker 回调完成停机。

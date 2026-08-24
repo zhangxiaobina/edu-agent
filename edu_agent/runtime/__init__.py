@@ -1,4 +1,4 @@
-from .config import AppConfig, BudgetPricingConfig, PlanningConfig, load_config
+from .config import AppConfig, BudgetPricingConfig, LifecycleConfig, PlanningConfig, load_config
 from .budget import (
     BUDGET_LEDGER_MIGRATION,
     BUDGET_LEDGER_SCHEMA_VERSION,
@@ -33,6 +33,15 @@ from .context_engine import CheckpointContextEngine, CompactionResult, ContextEn
 from .cancellation import Cancellation, CancellationRequested, CancellationToken
 from .models import IterationBudget, RunContext
 from .manager import ActiveRun, LeaseClaim, RuntimeManager
+from .lifecycle import (
+    LifecycleAdmission,
+    LifecycleController,
+    LifecycleRejected,
+    LifecycleStartupError,
+    LifecycleState,
+    LifecycleTransition,
+    ShutdownReport,
+)
 from .recovery import (
     RecoveryAction,
     RecoveryDecision,
@@ -84,6 +93,13 @@ __all__ = [
     "ExecutionPolicy",
     "IterationBudget",
     "LeaseClaim",
+    "LifecycleAdmission",
+    "LifecycleConfig",
+    "LifecycleController",
+    "LifecycleRejected",
+    "LifecycleStartupError",
+    "LifecycleState",
+    "LifecycleTransition",
     "PolicyToolExecutor",
     "PlanningConfig",
     "ModelPriceCatalog",
@@ -95,6 +111,7 @@ __all__ = [
     "RunRecoveryPlanner",
     "STABLE_CURSOR_DECISION_TABLE",
     "RuntimeManager",
+    "ShutdownReport",
     "ToolOutcome",
     "ToolBatchExecutor",
     "ToolBatchPlanner",

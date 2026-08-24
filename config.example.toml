@@ -129,6 +129,13 @@ artifact_path = "~/.edu-agent/artifacts"
 enabled = false
 lease_seconds = 300
 
+[lifecycle]
+# 外部模型短暂故障不影响 readiness；启用的本地隔离 Provider 在启动时必须健康。
+shutdown_deadline_seconds = 30
+cancellation_grace_seconds = 5
+final_flush_seconds = 2
+poll_interval_seconds = 0.05
+
 [transaction]
 approval_ttl_seconds = 900
 outbox_lease_seconds = 30

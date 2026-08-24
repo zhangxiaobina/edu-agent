@@ -184,7 +184,7 @@ release。实际 Provider/child 用量高于预留时仍先完整落账，然后
 operation 保存请求指纹；相同 id 的等价 reserve/commit/release 重放幂等，内容冲突会失败。进程重开通过 ledger
 加载冻结 identity、limits、used、reserved、stop reason 和价目，不刷新 allowance。`TurnFinalizer` 只使用
 `budget-finalizer:<root_run_id>` 结算一次：原子释放尚未使用的 reservation、冻结 root wall time并保存快照；重复
-调用返回同一结果，其他 finalizer id 被拒绝。本阶段不实现 lifecycle/process drain。
+调用返回同一结果，其他 finalizer id 被拒绝。R4.5 的进程 drain 使用这一唯一 finalizer，不另建终态路径。
 
 Provider 返回 usage 时按 actual 结算；缺失时使用 R4.1 request breakdown 估算并标记 `estimated`，只有 total 时
 保留实际 total，input/output 使用估算；流在 error 前已经产生的 usage 也不会丢失。`[pricing]` 必须给出版本和
@@ -194,6 +194,24 @@ route/model 的 input/output 每百万 token USD 价格，root 同时冻结版�
 estimated/cost status、stop reason 与受限 route 元数据，不写 prompt、messages 或 tool arguments。
 
 ## 全局运行管理
+
+`LifecycleController` 管理的是进程状态，不复用 run/session 状态机。Service 初始化期间保持 `starting`；StateStore
+migration、SQLite 真实 INSERT 后 rollback 的写探测，以及启用的本地 Code Execution/MCP Provider 健康均成功后，
+才单调转换到 `running`。外部模型短暂不可用不改变 readiness，由现有 breaker/retry/fallback 处理；这一策略避免
+外部依赖抖动同时摘除所有副本。`/health/live` 与 `/health/ready` 无需认证，但只暴露 lifecycle、检查布尔值和活动
+工作数量，不输出 endpoint、key 或异常原文。
+
+API chat/resume/schedule 与 Scheduler claim 在接收边界原子取得 admission ticket。draining 与 admission 使用同一锁：
+先取得 ticket 的工作继续运行，后到工作返回 503 或不领取任务。`SIGTERM`/显式 shutdown 进入 draining 后 readiness
+立即失败，liveness 在进程仍执行收尾时保持成功；配置节 `[lifecycle]` 给出总 deadline、取消 grace、final flush 和
+轮询间隔。
+
+在 graceful 窗口内，已有 Provider stream、工具、TurnFinalizer、Scheduler runner 和 heartbeat 正常完成。到期后
+广播 cooperative cancellation，并关闭可关闭的 MCP/工具 transport；再次等待有界 grace。仍未完成的本 owner run
+在同一 SQLite 事务中标成可恢复 `abandoned`，不删除 session lease；不确定写进入 `manual_review`，已有 finalizer
+cursor 进入 `resume_finalizer`，其他稳定 cursor 进入 `resume_from_persistent_plan`。之后执行有界 WAL checkpoint 和
+资源 close。旧 worker 返回后仍必须通过 run status/lease/fencing；Scheduler completion 还必须匹配未过期 lease、
+attempt_count 和 execution_key。重复 shutdown/signal 返回同一报告，不重复执行状态转换。
 
 `RuntimeManager` 先用进程内锁提供低成本单飞，再用 `session_leases` 作为跨进程的持久 owner 真相。
 领取在 SQLite `BEGIN IMMEDIATE` 事务内完成；同一 session 只有一个未过期 owner，不同 session
@@ -423,7 +441,8 @@ school-calendar = "school_calendar_plugin"
 ## 任务调度
 
 `JobStore` 保存一次性/周期任务；`Scheduler.tick()` 通过 SQLite `BEGIN IMMEDIATE` 和租约
-原子领取到期任务，runner 执行期间后台 heartbeat 自动续租。状态机为：
+原子领取到期任务；领取前必须持有 lifecycle admission，runner 执行期间后台 heartbeat 自动续租并携带
+attempt/execution fencing。状态机为：
 
 ```text
 pending → running → success
@@ -471,6 +490,7 @@ uv run --frozen python -m pytest tests/test_plan_runtime.py -q
 uv run --frozen python -m pytest tests/test_rag_runtime.py -q
 uv run --frozen python -m pytest tests/test_transactional_tools.py -q
 uv run --frozen python -m pytest tests/test_runtime.py tests/test_extensions_scheduler.py -q
+uv run --frozen --offline python -m pytest tests/test_lifecycle.py tests/test_api_sse_cancellation.py tests/test_extensions_scheduler.py tests/test_r2_recovery.py tests/test_cancellation.py -q
 uv run --frozen --offline python scripts/accept_r1_fake_provider.py
 uv run --frozen python -m pytest tests -q
 uv run --frozen python scripts/production_runtime_demo.py

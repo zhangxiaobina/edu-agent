@@ -888,14 +888,14 @@ def test_repeatable_p95_fixture_shows_parallel_speedup_with_structural_concurren
                 with lock:
                     active += 1
                     maximum = max(maximum, active)
-                gate.wait(0.025)
+                gate.wait(0.05)
                 with lock:
                     active -= 1
                 return {"resource": arguments["resource"]}
 
             provider = ControlledProvider({"read": _spec("read")}, behavior)
             started = time.perf_counter()
-            result = _run(provider, _calls("read", 2), max_workers=max_workers)
+            result = _run(provider, _calls("read", 4), max_workers=max_workers)
             durations.append(time.perf_counter() - started)
             assert all(payload["ok"] for payload in _tool_payloads(result))
             observed_max = max(observed_max, maximum)

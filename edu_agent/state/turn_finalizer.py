@@ -903,7 +903,7 @@ def mark_terminal(store, context, *, expected_cursor: int):
             connection.execute(
                 """
                 UPDATE runs SET status=?, stop_reason=?, budget_json=?, usage_json=?, error=?,
-                    recovery_reason=?, finished_at=?
+                    recovery_reason=?, recovery_recommendation=NULL, finished_at=?
                 WHERE id=? AND status IN ('running', 'cancel_requested', 'queued', 'abandoned')
                 """,
                 (

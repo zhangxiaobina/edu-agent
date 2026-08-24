@@ -7,6 +7,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from .runtime.security import redact_sensitive_text
+from .runtime.cancellation import (
+    CancellationRequested,
+    CancellationToken,
+    accepts_keyword_argument,
+)
+from .runtime.lifecycle import LifecycleAdmission, LifecycleController, LifecycleRejected
 from .state.store import StateStore
 
 
@@ -149,20 +155,33 @@ class JobStore:
         worker_id: str,
         now: datetime | None = None,
         lease_seconds: int = 300,
+        attempt_count: int | None = None,
+        execution_key: str | None = None,
     ) -> bool:
         current = now or datetime.now(UTC)
+        fence_clause = ""
+        fence_values: tuple = ()
+        if attempt_count is not None or execution_key is not None:
+            if attempt_count is None or execution_key is None:
+                raise ValueError("scheduler heartbeat fence requires attempt and execution key")
+            fence_clause = " AND attempt_count=? AND execution_key=?"
+            fence_values = (int(attempt_count), str(execution_key))
         with self.state_store.connect() as connection:
             connection.execute(
-                """
+                f"""
                 UPDATE scheduled_jobs SET lease_until=?, updated_at=?
                 WHERE id=? AND lease_owner=? AND status='running'
                     AND cancel_requested=0
+                    AND lease_until>?
+                    {fence_clause}
                 """,
                 (
                     _iso(current + timedelta(seconds=lease_seconds)),
                     _iso(current),
                     job_id,
                     worker_id,
+                    _iso(current),
+                    *fence_values,
                 ),
             )
             return bool(connection.execute("SELECT changes()").fetchone()[0])
@@ -204,7 +223,7 @@ class JobStore:
         result: str | None = None,
         error: str | None = None,
         now: datetime | None = None,
-    ) -> None:
+    ) -> bool:
         result = redact_sensitive_text(result) if result is not None else None
         error = redact_sensitive_text(error) if error is not None else None
         current = now or datetime.now(UTC)
@@ -212,12 +231,19 @@ class JobStore:
             current_row = connection.execute(
                 """
                 SELECT cancel_requested FROM scheduled_jobs
-                WHERE id=? AND lease_owner=?
+                WHERE id=? AND lease_owner=? AND attempt_count=? AND execution_key=?
+                    AND lease_until>?
                 """,
-                (job["id"], worker_id),
+                (
+                    job["id"],
+                    worker_id,
+                    int(job["attempt_count"]),
+                    str(job["execution_key"]),
+                    _iso(current),
+                ),
             ).fetchone()
             if current_row is None:
-                return
+                return False
             cancelled = bool(current_row["cancel_requested"])
             if cancelled:
                 enabled = 0
@@ -246,7 +272,8 @@ class JobStore:
                         THEN 0 ELSE attempt_count END,
                     execution_key=CASE WHEN ? OR ? THEN NULL ELSE execution_key END,
                     updated_at=?
-                WHERE id=? AND lease_owner=?
+                WHERE id=? AND lease_owner=? AND attempt_count=? AND execution_key=?
+                    AND lease_until>?
                 """,
                 (
                     enabled,
@@ -261,8 +288,12 @@ class JobStore:
                     _iso(current),
                     job["id"],
                     worker_id,
+                    int(job["attempt_count"]),
+                    str(job["execution_key"]),
+                    _iso(current),
                 ),
             )
+            return bool(connection.execute("SELECT changes()").fetchone()[0])
 
 
 class Scheduler:
@@ -273,59 +304,110 @@ class Scheduler:
         *,
         worker_id: str | None = None,
         lease_seconds: int = 300,
+        lifecycle: LifecycleController | None = None,
     ):
         self.jobs = JobStore(state_store)
         self.runner = runner
         self.worker_id = worker_id or uuid.uuid4().hex
         self.lease_seconds = lease_seconds
+        self.lifecycle = lifecycle
 
     def tick(self, *, now: datetime | None = None, limit: int = 10) -> list[dict]:
-        jobs = self.jobs.claim_due(
-            worker_id=self.worker_id,
-            now=now,
-            limit=limit,
-            lease_seconds=self.lease_seconds,
-        )
-        results = []
-        for job in jobs:
-            if self.jobs.is_cancel_requested(job["id"], worker_id=self.worker_id):
-                self.jobs.complete(job, worker_id=self.worker_id, success=False, now=now)
-                results.append({"job_id": job["id"], "status": "cancelled"})
-                continue
+        admission: LifecycleAdmission | None = None
+        if self.lifecycle is not None:
             try:
-                result = self._run_with_heartbeat(job)
-                self.jobs.complete(
-                    job,
-                    worker_id=self.worker_id,
-                    success=True,
-                    result=result,
-                    now=now,
+                admission = self.lifecycle.admit("scheduler.claim")
+            except LifecycleRejected:
+                return []
+        try:
+            jobs = self.jobs.claim_due(
+                worker_id=self.worker_id,
+                now=now,
+                limit=limit,
+                lease_seconds=self.lease_seconds,
+            )
+            results = []
+            for job in jobs:
+                token = CancellationToken()
+                unregister_cancel = (
+                    admission.add_cancel_callback(
+                        lambda token=token: token.cancel(
+                            "process shutdown deadline exceeded",
+                            source="process_shutdown",
+                        )
+                    )
+                    if admission is not None
+                    else lambda: None
                 )
-                with self.jobs.state_store.connect() as connection:
-                    state = connection.execute(
-                        "SELECT status FROM scheduled_jobs WHERE id=?",
-                        (job["id"],),
-                    ).fetchone()["status"]
-                results.append({"job_id": job["id"], "status": state, "result": result})
-            except Exception as error:
-                self.jobs.complete(
-                    job,
-                    worker_id=self.worker_id,
-                    success=False,
-                    error=f"{type(error).__name__}: {error}",
-                    now=now,
-                )
-                with self.jobs.state_store.connect() as connection:
-                    state = connection.execute(
-                        "SELECT status FROM scheduled_jobs WHERE id=?",
-                        (job["id"],),
-                    ).fetchone()["status"]
-                results.append({"job_id": job["id"], "status": state, "error": str(error)})
-        return results
+                try:
+                    if self.jobs.is_cancel_requested(job["id"], worker_id=self.worker_id):
+                        self.jobs.complete(job, worker_id=self.worker_id, success=False, now=now)
+                        results.append({"job_id": job["id"], "status": "cancelled"})
+                        continue
+                    result = self._run_with_heartbeat(
+                        job,
+                        cancellation_token=token,
+                        lifecycle_admission=admission,
+                    )
+                    completed = self.jobs.complete(
+                        job,
+                        worker_id=self.worker_id,
+                        success=True,
+                        result=result,
+                        now=now,
+                    )
+                    state = self._job_state(job["id"]) if completed else "fenced"
+                    results.append({"job_id": job["id"], "status": state, "result": result})
+                except CancellationRequested as error:
+                    if error.cancellation.source == "process_shutdown":
+                        # Keep the durable Scheduler lease for expiry/reclaim.
+                        results.append({"job_id": job["id"], "status": "draining"})
+                        continue
+                    completed = self.jobs.complete(
+                        job,
+                        worker_id=self.worker_id,
+                        success=False,
+                        error=f"{type(error).__name__}: {error}",
+                        now=now,
+                    )
+                    state = self._job_state(job["id"]) if completed else "fenced"
+                    results.append({"job_id": job["id"], "status": state, "error": str(error)})
+                except Exception as error:
+                    completed = self.jobs.complete(
+                        job,
+                        worker_id=self.worker_id,
+                        success=False,
+                        error=f"{type(error).__name__}: {error}",
+                        now=now,
+                    )
+                    state = self._job_state(job["id"]) if completed else "fenced"
+                    results.append({"job_id": job["id"], "status": state, "error": str(error)})
+                finally:
+                    unregister_cancel()
+                    token.close()
+            return results
+        finally:
+            if admission is not None:
+                admission.close()
 
-    def _run_with_heartbeat(self, job: dict) -> str:
+    def _job_state(self, job_id: str) -> str:
+        with self.jobs.state_store.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM scheduled_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+        return str(row["status"]) if row is not None else "fenced"
+
+    def _run_with_heartbeat(
+        self,
+        job: dict,
+        *,
+        cancellation_token: CancellationToken,
+        lifecycle_admission: LifecycleAdmission | None,
+    ) -> str:
         stopped = threading.Event()
         interval = max(0.1, self.lease_seconds / 3)
+        unregister_stop = cancellation_token.register(lambda _: stopped.set())
 
         def renew() -> None:
             while not stopped.wait(interval):
@@ -333,6 +415,8 @@ class Scheduler:
                     job["id"],
                     worker_id=self.worker_id,
                     lease_seconds=self.lease_seconds,
+                    attempt_count=int(job["attempt_count"]),
+                    execution_key=str(job["execution_key"]),
                 ):
                     return
 
@@ -343,7 +427,16 @@ class Scheduler:
         )
         thread.start()
         try:
-            return self.runner(job)
+            cancellation_token.checkpoint("scheduler.before_runner")
+            kwargs = {}
+            if accepts_keyword_argument(self.runner, "cancellation_token"):
+                kwargs["cancellation_token"] = cancellation_token
+            if accepts_keyword_argument(self.runner, "lifecycle_admission"):
+                kwargs["lifecycle_admission"] = lifecycle_admission
+            result = self.runner(job, **kwargs)
+            cancellation_token.checkpoint("scheduler.after_runner")
+            return result
         finally:
             stopped.set()
+            unregister_stop()
             thread.join(timeout=1)

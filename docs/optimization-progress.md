@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R4.4
-- next_prompt: R4.5
+- last_completed_prompt: R4.5
+- next_prompt: R4.6
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0-R3 顶层门禁均 passed，R4.1-R4.4 的 Context Accounting、Artifact-first 可恢复压缩、保真评测、一次 overflow recovery 和全树持久预算已通过；R4 仍需完成 lifecycle/drain 及备份恢复后才能收口
+- stage_gate_reason: R0-R3 顶层门禁均 passed，R4.1-R4.5 的 Context Accounting、Artifact-first 可恢复压缩、保真评测、一次 overflow recovery、全树持久预算及进程 lifecycle/drain 已通过；R4 仍需完成备份恢复与 retention/GC 后才能收口
 
 ## Baseline Reproduction
 
@@ -1147,3 +1147,45 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   可恢复标记留给 R4.5；backup/restore 与 retention/GC 留给 R4.6。
 - gate: `R4.4 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
 - next: R4.5，读取本交接并实现进程级 `starting/running/draining/stopped`、readiness 与有限 drain；不做数据库备份工具。
+
+### R4.5 - 2026-08-24
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `7c26fda560e21de50b9442928d29d2e95f3e55b4` 开始；本次未创建本地提交或推送，未回退用户改动。证据来自当前
+  未提交 development 工作区，不冒充 candidate/release artifact。
+- process lifecycle: 新增线程安全 `LifecycleController`，进程状态只按
+  `starting -> running -> draining -> stopped` 单调推进，并把 sequence/from/to/reason 写入中心脱敏的
+  `audit_events`。migration、SQLite rollback-only 写探测及启用的本地 Code Execution/MCP Provider 均健康后才
+  running；进程 admission 与 run/session 状态机保持正交，并发 drain/重复 shutdown 幂等。
+- admission/readiness: API chat/resume/schedule 与 Scheduler claim 在持久接收边界原子取得 ticket；先取得者继续由
+  本进程负责，draining 后请求稳定返回 503、Scheduler 不再 claim。`/health/live`、`/health/ready` 及兼容别名无需
+  认证，只返回 lifecycle、布尔检查、Provider 策略与活动数量；liveness 不执行 SQLite/Provider I/O。外部模型短暂
+  故障不影响 readiness，由既有 breaker/retry/fallback 处理；启用的本地隔离 Provider 故障会阻断 readiness。
+- bounded shutdown/fencing: `SIGTERM`、`SIGINT` 和显式 shutdown 先 draining，在总 deadline 内等待 admission、
+  RuntimeManager/finalizer、Scheduler runner/heartbeat 及 Provider/tool stream；到期广播 cooperative cancellation，
+  有界关闭 MCP/工具 transport。仍未完成的本 owner run 在单一事务内标为 `abandoned`，按 pending finalizer、稳定计划
+  或不确定写给出 `resume_finalizer`、`resume_from_persistent_plan`、`manual_review`，不先删除 session lease；之后执行
+  有界 WAL checkpoint/资源 hook。run 迟到写继续经 owner/lease/fencing 拒绝，Scheduler completion 额外复验未过期
+  lease、attempt 与 execution key。CLI signal 路径即使 drain 异常也会停止 HTTP accept loop。
+- migrations/config/scope: 没有新增数据库 migration 或 schema version；复用既有 run/recovery/audit 真相，并让
+  readiness 校验现有 001-004、007-014 migration 标记。新增带默认值和有限正数校验的 `[lifecycle]` deadline、取消
+  grace、final flush、poll interval 配置及示例。没有实现数据库备份、retention/GC 或后台 review。
+- tests: 新增 `tests/test_lifecycle.py` 13 项，覆盖注入 clock/event、startup gate、并发/重复 drain、正常 drain、
+  API 接收竞态、deadline 后 Provider fencing、阻塞工具、Scheduler cancellation/迟到完成、final flush 失败、pending
+  finalizer、重启恢复、manual-review/lease 保留、无 heartbeat/session lease 泄漏、Provider 信息脱敏及真实 HTTP
+  liveness/readiness/503。既有
+  tool-batch p95 fixture 在三轮长进程全量中仅时序阈值失败且结构并发始终通过，故只把确定性负载从 2 个 25ms 调整为
+  4 个 50ms，不改生产并发逻辑或阈值。
+- verification: lifecycle 单文件（含真实 HTTP）`13 passed (1.70s)`；lifecycle/API/Scheduler/recovery/cancel/finalizer
+  联合专项 `91 passed (12.06s)`；tool-batch 专项 `15 passed (3.13s)`。全仓 Ruff、`uv lock --check`（91 packages）、
+  `uv pip check`（62 packages）和 `git diff --check` 通过。受限沙箱全量 `629 passed, 13 failed (41.63s)`，13 项全部
+  止于 `127.0.0.1:0` 的 `socket.bind PermissionError`；显式清空真实 Provider 凭据并获准本机回环后，同一全量离线
+  命令在补充 manual-review 恢复边界后最终 `643 passed (40.84s)`。
+- not_verified: 未访问公网、真实模型/Provider、真实教学平台、GitHub-hosted CI 或 Docker/Jobe；R4.5 是普通切片且
+  R4 gate 尚未收口，因此未运行 `zsh scripts/accept_stage8.sh`。未验证进程被不可屏蔽阻塞的第三方同步调用永久卡住时
+  的强制线程终止；当前合同依赖 Provider/tool cancellation/close 协作，deadline 后先持久 fencing 并返回未清项数量。
+- residual_risks: Python 不能安全强杀任意同步线程；部署 supervisor 必须在应用 drain deadline 外保留最终进程终止
+  上限。SQLite readiness 写探测可能在瞬时写竞争下短暂失败，这是有意的 fail-closed 信号。备份一致性、manifest、
+  restore 演练、Artifact retention/GC 与引用关系留给 R4.6。
+- gate: `R4.5 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
+- next: R4.6，读取 R4.1-R4.5 交接并实现 SQLite 一致备份/恢复、retention/GC 与 R4 收口；不得开始候选版包装。

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from .checkpoints import (
     CHECKPOINT_ESTIMATOR_VERSION,
+    CHECKPOINT_MIGRATION,
     CHECKPOINT_SCHEMA_VERSION,
     CHECKPOINT_STRATEGY_VERSION,
     ContextCheckpointConflict,
@@ -28,6 +29,7 @@ from .checkpoints import (
 )
 from .journal import (
     _UNSET as _JOURNAL_UNSET,
+    RUN_JOURNAL_MIGRATION,
     RunJournalFencingError,
     RunJournalIdentityError,
     RunJournalSnapshot,
@@ -37,6 +39,7 @@ from .journal import (
     initialize_run_journal_schema,
 )
 from .tool_messages import (
+    AGENT_TOOL_MESSAGES_MIGRATION,
     ToolMessagePairingError,
     append_assistant_tool_envelope,
     append_tool_result,
@@ -157,6 +160,79 @@ class StateStore:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
         return connection
+
+    def migration_ready(self) -> bool:
+        """Return only the aggregate migration state used by readiness."""
+
+        try:
+            with self.connect() as connection:
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                if version != STATE_SCHEMA_VERSION:
+                    return False
+                required = {
+                    "001_plan_graph_evidence",
+                    "002_course_rag_memory",
+                    "003_transactional_tool_runtime",
+                    "004_distributed_runtime_control",
+                    "007_observability_api",
+                    "008_data_boundaries_api_trace",
+                    RUN_JOURNAL_MIGRATION,
+                    AGENT_TOOL_MESSAGES_MIGRATION,
+                    TURN_FINALIZER_SCHEMA,
+                    "012_r2_recovery",
+                    CHECKPOINT_MIGRATION,
+                    "014_run_budget_ledger",
+                }
+                present = {
+                    str(row["version"])
+                    for row in connection.execute(
+                        "SELECT version FROM state_schema_migrations"
+                    ).fetchall()
+                }
+                return required <= present
+        except (OSError, sqlite3.Error, StateSchemaVersionError):
+            return False
+
+    def writable_ready(self) -> bool:
+        """Probe a rollback-only write transaction without retaining health rows."""
+
+        if self.read_only:
+            return False
+        connection = None
+        try:
+            connection = self.connect()
+            connection.execute("PRAGMA busy_timeout = 100")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO audit_events(
+                    actor_id, tenant_id, action, resource,
+                    decision, details_json, created_at
+                ) VALUES ('system', 'system', 'state.readiness_probe',
+                          'state_db', 'rollback', '{}', ?)
+                """,
+                (self.now_iso(),),
+            )
+            connection.rollback()
+            return True
+        except (OSError, sqlite3.Error):
+            if connection is not None:
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    pass
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def flush(self) -> None:
+        """Bounded callers may use this to flush committed WAL pages at shutdown."""
+
+        if self.read_only:
+            return
+        with self.connect() as connection:
+            connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
 
     def _initialize(self) -> None:
         with self.connect() as connection:
@@ -2945,6 +3021,40 @@ class StateStore:
             )
             return cursor.rowcount == 1
 
+    def request_process_shutdown(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str,
+    ) -> bool:
+        """Persist cooperative process cancellation without exposing internals."""
+
+        now = self.now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT actor_id, tenant_id, status FROM runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            if row["actor_id"] != actor_id or row["tenant_id"] != tenant_id:
+                raise PermissionError("run 不属于当前 actor/tenant")
+            if row["status"] not in {"queued", "running", "cancel_requested"}:
+                return False
+            cursor = connection.execute(
+                """
+                UPDATE runs
+                SET status='cancel_requested', cancel_requested_at=?,
+                    recovery_reason='process_shutdown_requested',
+                    recovery_recommendation=NULL
+                WHERE id=? AND status IN ('queued', 'running', 'cancel_requested')
+                """,
+                (now, run_id),
+            )
+            return cursor.rowcount == 1
+
     def get_run_status(self, run_id: str, *, actor_id: str, tenant_id: str) -> dict | None:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -3080,7 +3190,7 @@ class StateStore:
                 uncertain = connection.execute(
                     """
                     SELECT operation_id FROM tool_operation_refs
-                    WHERE run_id=? AND status='executing'
+                    WHERE run_id=? AND status IN ('executing', 'manual_review')
                     """,
                     (row["id"],),
                 ).fetchall()
@@ -3126,6 +3236,107 @@ class StateStore:
                     }
                 )
         return recovered
+
+    def mark_owner_runs_recoverable(
+        self,
+        *,
+        owner_id: str,
+        reason: str = "process_shutdown_deadline",
+    ) -> list[dict]:
+        """Fence unfinished local runs after drain expiry without deleting leases.
+
+        The run row is persisted before any lease can be released. A blocked old
+        callback then fails the existing run-status/fencing checks, while a new
+        process can reclaim the still-durable lease only after it expires.
+        """
+
+        from ..runtime.security import redact_sensitive_text
+
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            raise ValueError("shutdown owner_id must be non-empty")
+        safe_reason = redact_sensitive_text(reason)
+        now = self.now_iso()
+        marked: list[dict] = []
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT * FROM runs
+                WHERE owner_id=? AND status IN ('queued', 'running', 'cancel_requested')
+                ORDER BY started_at, id
+                """,
+                (owner_id,),
+            ).fetchall()
+            for row in rows:
+                finalizer = connection.execute(
+                    "SELECT cursor, status FROM turn_finalizers WHERE run_id=?",
+                    (row["id"],),
+                ).fetchone()
+                uncertain = connection.execute(
+                    """
+                    SELECT operation_id FROM tool_operation_refs
+                    WHERE run_id=? AND status IN ('executing', 'manual_review')
+                    """,
+                    (row["id"],),
+                ).fetchall()
+                if uncertain:
+                    connection.execute(
+                        """
+                        UPDATE tool_operation_refs
+                        SET status='manual_review', updated_at=?
+                        WHERE run_id=? AND status='executing'
+                        """,
+                        (now, row["id"]),
+                    )
+                    recommendation = "manual_review"
+                elif finalizer is not None and int(finalizer["cursor"]) < 5:
+                    recommendation = "resume_finalizer"
+                else:
+                    recommendation = "resume_from_persistent_plan"
+                cursor = connection.execute(
+                    """
+                    UPDATE runs
+                    SET status='abandoned', finished_at=?, recovery_reason=?,
+                        recovery_recommendation=?
+                    WHERE id=? AND owner_id=?
+                        AND status IN ('queued', 'running', 'cancel_requested')
+                    """,
+                    (now, safe_reason, recommendation, row["id"], owner_id),
+                )
+                if cursor.rowcount:
+                    marked.append(
+                        {
+                            "run_id": row["id"],
+                            "status": "abandoned",
+                            "recovery_reason": safe_reason,
+                            "recovery_recommendation": recommendation,
+                            "manual_review_operations": [
+                                item["operation_id"] for item in uncertain
+                            ],
+                        }
+                    )
+        return marked
+
+    def list_shutdown_recoverable_runs(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, status, recovery_reason, recovery_recommendation
+                FROM runs
+                WHERE status='abandoned'
+                    AND recovery_reason='process_shutdown_deadline'
+                ORDER BY finished_at, id
+                """
+            ).fetchall()
+        return [
+            {
+                "run_id": row["id"],
+                "status": row["status"],
+                "recovery_reason": row["recovery_reason"],
+                "recovery_recommendation": row["recovery_recommendation"],
+            }
+            for row in rows
+        ]
 
     def record_tool_event(
         self,
