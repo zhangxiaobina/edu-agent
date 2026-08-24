@@ -39,6 +39,7 @@ class ScriptedAdapter:
     capabilities = ProviderCapabilities(
         streaming=True,
         context_window_tokens=16_384,
+        max_output_tokens=4_096,
     )
 
     def __init__(self, behavior):

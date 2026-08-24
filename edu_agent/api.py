@@ -31,6 +31,8 @@ from .observability import (
 )
 from .observability.redaction import RedactionPolicy
 from .runtime.cancellation import CancellationRequested, CancellationToken
+from .runtime.context import CurrentUserInputTooLarge
+from .state import ContextCheckpointError
 
 
 @dataclass(frozen=True)
@@ -295,6 +297,13 @@ class EduAgentApi:
                 )
             return record["response"]
         except Exception as error:
+            current_user_too_large = isinstance(error, CurrentUserInputTooLarge)
+            error_code = (
+                "CURRENT_USER_INPUT_TOO_LARGE"
+                if current_user_too_large
+                else getattr(error, "error_code", type(error).__name__)
+            )
+            response_status = 413 if current_user_too_large else 500
             if stream_writer is not None and not stream_writer.bound:
                 try:
                     failed_run = self.service.get_run_status(
@@ -355,10 +364,10 @@ class EduAgentApi:
                     request_id=request_id,
                     status="failed",
                     run_id=run_id,
-                    error={"type": type(error).__name__, "message": str(error)},
+                    error={"type": type(error).__name__, "code": error_code, "message": str(error)},
                     owner_id=owner_id,
                     attempt=attempt,
-                    response_status=500,
+                    response_status=response_status,
                     retention_seconds=self._request_retention_seconds(success=False),
                 )
             except RuntimeError:
@@ -369,6 +378,9 @@ class EduAgentApi:
                         code=(
                             "CANCELLED"
                             if isinstance(error, CancellationRequested)
+                            else error_code
+                            if current_user_too_large
+                            or str(error_code).startswith("CONTEXT_CHECKPOINT_")
                             else "INTERNAL"
                         ),
                         message=f"{type(error).__name__}: {error}",
@@ -844,6 +856,21 @@ class EduAgentApi:
             return ApiResponse(403, ApiError(403, "SCOPE_DENIED", str(error)).payload(request_id))
         except KeyError as error:
             return ApiResponse(404, ApiError(404, "NOT_FOUND", str(error)).payload(request_id))
+        except CurrentUserInputTooLarge as error:
+            return ApiResponse(
+                413,
+                ApiError(
+                    413,
+                    "CURRENT_USER_INPUT_TOO_LARGE",
+                    str(error),
+                ).payload(request_id),
+            )
+        except ContextCheckpointError as error:
+            message = self.redaction.redact_text(str(error))
+            return ApiResponse(
+                500,
+                ApiError(500, error.error_code, message).payload(request_id),
+            )
         except ValueError as error:
             return ApiResponse(409, ApiError(409, "CONFLICT", str(error)).payload(request_id))
         except ApiError as error:

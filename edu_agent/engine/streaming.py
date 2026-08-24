@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from ..data_classification import redact_text
 from .base import EngineResponse, ToolCall
-from ..runtime.cancellation import CancellationToken, accepts_cancellation_token
+from ..runtime.cancellation import (
+    CancellationToken,
+    accepts_cancellation_token,
+    accepts_keyword_argument,
+)
 
 if TYPE_CHECKING:
     from .gateway import ResolvedRoute
@@ -396,6 +400,7 @@ def consume_provider_stream(
     tools: list[dict],
     *,
     cancellation_token: CancellationToken | None = None,
+    max_output_tokens: int | None = None,
     event_sink: Callable[[ProviderStreamEvent], None] | None = None,
 ) -> EngineResponse:
     """Consume one engine stream while exposing the exact normalized events."""
@@ -410,6 +415,8 @@ def consume_provider_stream(
         kwargs = {}
         if cancellation_token is not None and accepts_cancellation_token(chat):
             kwargs["cancellation_token"] = cancellation_token
+        if max_output_tokens is not None and accepts_keyword_argument(chat, "max_output_tokens"):
+            kwargs["max_output_tokens"] = max_output_tokens
         response = chat(messages, tools, **kwargs)
         if cancellation_token is not None:
             cancellation_token.checkpoint("model.after_sync_call")
@@ -418,6 +425,8 @@ def consume_provider_stream(
     kwargs = {"attempt": 1}
     if cancellation_token is not None and accepts_cancellation_token(stream):
         kwargs["cancellation_token"] = cancellation_token
+    if max_output_tokens is not None and accepts_keyword_argument(stream, "max_output_tokens"):
+        kwargs["max_output_tokens"] = max_output_tokens
     iterator = iter(stream(messages, tools, **kwargs))
     aggregator = ProviderStreamAggregator()
     try:

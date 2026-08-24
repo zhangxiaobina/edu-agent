@@ -22,6 +22,7 @@ from ..runtime.cancellation import (
     CancellationRequested,
     CancellationToken,
     accepts_cancellation_token,
+    accepts_keyword_argument,
     call_with_cancellation,
 )
 from .base import Engine, EngineResponse
@@ -551,7 +552,7 @@ class _FallbackCompatibility:
     requirements: ProviderRequestRequirements
     api_mode: str
     context_check: str
-    capabilities: dict[str, bool | int | None]
+    capabilities: dict[str, bool | int | str | None]
 
     def to_event(self) -> dict[str, Any]:
         return {
@@ -759,6 +760,13 @@ class ResilientEngine(Engine):
             if snapshot is not None and snapshot.route is not None
         )
 
+    def capabilities_for_route(self, route: ResolvedRoute) -> ProviderCapabilities:
+        plan = self._turn_route_plan.get() or self._build_route_plan()
+        for snapshot in (plan.primary, plan.fallback):
+            if snapshot is not None and snapshot.identity == route.identity:
+                return snapshot.capabilities or route.capabilities
+        raise ValueError("route is not part of the frozen resilient turn")
+
     @contextlib.contextmanager
     def _chat_route_plan(self) -> Iterator[_TurnRoutePlan]:
         active = self._turn_route_plan.get()
@@ -809,25 +817,40 @@ class ResilientEngine(Engine):
         messages: list[dict],
         tools: list[dict],
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         if route.route is not None:
             routed_chat = getattr(engine, "chat_on_route", None)
             if callable(routed_chat):
+                kwargs = {}
+                if max_output_tokens is not None and accepts_keyword_argument(
+                    routed_chat,
+                    "max_output_tokens",
+                ):
+                    kwargs["max_output_tokens"] = max_output_tokens
                 return call_with_cancellation(
                     routed_chat,
                     route.route,
                     messages,
                     tools,
                     cancellation_token=cancellation_token,
+                    **kwargs,
                 )
             current = _route_snapshot(engine)
             if current.identity != route.identity:
                 raise RuntimeError("provider route changed after turn start")
+        kwargs = {}
+        if max_output_tokens is not None and accepts_keyword_argument(
+            engine.chat,
+            "max_output_tokens",
+        ):
+            kwargs["max_output_tokens"] = max_output_tokens
         return call_with_cancellation(
             engine.chat,
             messages,
             tools,
             cancellation_token=cancellation_token,
+            **kwargs,
         )
 
     @staticmethod
@@ -839,6 +862,7 @@ class ResilientEngine(Engine):
         *,
         attempt: int,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         if route.route is None:
             raise ProviderStreamProtocolError(
@@ -853,6 +877,11 @@ class ResilientEngine(Engine):
                 and accepts_cancellation_token(routed_stream)
             ):
                 kwargs["cancellation_token"] = cancellation_token
+            if max_output_tokens is not None and accepts_keyword_argument(
+                routed_stream,
+                "max_output_tokens",
+            ):
+                kwargs["max_output_tokens"] = max_output_tokens
             return iter(routed_stream(route.route, messages, tools, **kwargs))
         current = _route_snapshot(engine)
         if current.identity != route.identity:
@@ -868,6 +897,11 @@ class ResilientEngine(Engine):
         kwargs = {"attempt": attempt}
         if cancellation_token is not None and accepts_cancellation_token(stream):
             kwargs["cancellation_token"] = cancellation_token
+        if max_output_tokens is not None and accepts_keyword_argument(
+            stream,
+            "max_output_tokens",
+        ):
+            kwargs["max_output_tokens"] = max_output_tokens
         return iter(stream(messages, tools, **kwargs))
 
     @staticmethod
@@ -909,8 +943,19 @@ class ResilientEngine(Engine):
         tools: list[dict],
         *,
         streaming: bool = False,
+        max_output_tokens: int | None = None,
     ) -> _FallbackCompatibility:
-        requirements = infer_request_requirements(messages, tools)
+        requirements = infer_request_requirements(
+            messages,
+            tools,
+            model=fallback.route.model if fallback.route is not None else None,
+            tokenizer=(
+                fallback.capabilities.tokenizer
+                if fallback.capabilities is not None
+                else None
+            ),
+            max_output_tokens=max_output_tokens,
+        )
         if streaming:
             requirements = replace(requirements, streaming=True)
         if fallback.route is None or fallback.capabilities is None:
@@ -934,6 +979,7 @@ class ResilientEngine(Engine):
                 fallback.capabilities,
                 api_mode=fallback.route.api_mode,
                 require_known_context=True,
+                require_known_output=requirements.max_output_tokens is not None,
             )
         )
         validator = getattr(fallback_engine, "validate_request_on_route", None)
@@ -949,9 +995,16 @@ class ResilientEngine(Engine):
         if not gaps and callable(validator):
             try:
                 if validates_frozen_route:
-                    validator(fallback.route, messages, tools)
+                    args = (fallback.route, messages, tools)
                 else:
-                    validator(messages, tools)
+                    args = (messages, tools)
+                kwargs = {}
+                if max_output_tokens is not None and accepts_keyword_argument(
+                    validator,
+                    "max_output_tokens",
+                ):
+                    kwargs["max_output_tokens"] = max_output_tokens
+                validator(*args, **kwargs)
             except ProviderCapabilityError as error:
                 gaps.extend(error.gaps)
             except ValueError:
@@ -959,7 +1012,8 @@ class ResilientEngine(Engine):
 
         fallback_context = fallback.capabilities.context_window_tokens
         if fallback_context is not None:
-            context_check = "sufficient" if requirements.context_tokens <= fallback_context else "insufficient"
+            required = requirements.context_tokens + (requirements.max_output_tokens or 0)
+            context_check = "sufficient" if required <= fallback_context else "insufficient"
         else:
             context_check = "unknown_unverified"
         normalized_gaps = tuple(dict.fromkeys(gaps))
@@ -1032,6 +1086,7 @@ class ResilientEngine(Engine):
         start_attempt: int,
         max_retries: int,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> _RouteExecution:
         attempts = 0
         with self.route_registry.lease(route.identity) as state:
@@ -1069,6 +1124,7 @@ class ResilientEngine(Engine):
                             messages,
                             tools,
                             cancellation_token,
+                            max_output_tokens,
                         )
                     except CancellationRequested:
                         state.breaker.record_non_retryable(permit)
@@ -1199,6 +1255,7 @@ class ResilientEngine(Engine):
         start_attempt: int,
         max_retries: int,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Generator[ProviderStreamEvent, None, _StreamRouteExecution]:
         attempts = 0
         with self.route_registry.lease(route.identity) as state:
@@ -1253,6 +1310,7 @@ class ResilientEngine(Engine):
                             tools,
                             attempt=attempt_number,
                             cancellation_token=cancellation_token,
+                            max_output_tokens=max_output_tokens,
                         )
                         for event in iterator:
                             if cancellation_token is not None:
@@ -1491,6 +1549,7 @@ class ResilientEngine(Engine):
         tools: list[dict],
         *,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         with self._chat_route_plan() as route_plan:
             streamable = self._supports_provider_stream(
@@ -1507,12 +1566,14 @@ class ResilientEngine(Engine):
                         messages,
                         tools,
                         cancellation_token=cancellation_token,
+                        max_output_tokens=max_output_tokens,
                     )
                 )
             return self._chat_sync(
                 messages,
                 tools,
                 cancellation_token=cancellation_token,
+                max_output_tokens=max_output_tokens,
             )
 
     def stream_chat(
@@ -1522,6 +1583,7 @@ class ResilientEngine(Engine):
         *,
         attempt: int = 1,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         if attempt != 1:
             raise ValueError("ResilientEngine stream attempt 必须从 1 开始")
@@ -1533,7 +1595,17 @@ class ResilientEngine(Engine):
                     code="provider_stream_unsupported",
                 )
             requirements = replace(
-                infer_request_requirements(messages, tools),
+                infer_request_requirements(
+                    messages,
+                    tools,
+                    model=(primary_route.route.model if primary_route.route else None),
+                    tokenizer=(
+                        primary_route.capabilities.tokenizer
+                        if primary_route.capabilities is not None
+                        else None
+                    ),
+                    max_output_tokens=max_output_tokens,
+                ),
                 streaming=True,
             )
             self._event(
@@ -1558,6 +1630,7 @@ class ResilientEngine(Engine):
                 start_attempt=0,
                 max_retries=self.max_retries,
                 cancellation_token=cancellation_token,
+                max_output_tokens=max_output_tokens,
             )
             attempts = primary.attempts
             if primary.response is not None:
@@ -1684,6 +1757,7 @@ class ResilientEngine(Engine):
                 messages,
                 tools,
                 streaming=True,
+                max_output_tokens=max_output_tokens,
             )
             if not compatibility.compatible:
                 self._event(
@@ -1758,6 +1832,7 @@ class ResilientEngine(Engine):
                 start_attempt=attempts,
                 max_retries=0,
                 cancellation_token=cancellation_token,
+                max_output_tokens=max_output_tokens,
             )
             attempts += fallback.attempts
             if fallback.response is not None:
@@ -1831,10 +1906,21 @@ class ResilientEngine(Engine):
         tools: list[dict],
         *,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         with self._chat_route_plan() as route_plan:
             primary_route = route_plan.primary
-            requirements = infer_request_requirements(messages, tools)
+            requirements = infer_request_requirements(
+                messages,
+                tools,
+                model=(primary_route.route.model if primary_route.route else None),
+                tokenizer=(
+                    primary_route.capabilities.tokenizer
+                    if primary_route.capabilities is not None
+                    else None
+                ),
+                max_output_tokens=max_output_tokens,
+            )
             self._event(
                 "route_selected",
                 route=primary_route,
@@ -1856,6 +1942,7 @@ class ResilientEngine(Engine):
                 start_attempt=0,
                 max_retries=self.max_retries,
                 cancellation_token=cancellation_token,
+                max_output_tokens=max_output_tokens,
             )
             attempts = primary.attempts
             if primary.response is not None:
@@ -1918,6 +2005,7 @@ class ResilientEngine(Engine):
                 fallback_route,
                 messages,
                 tools,
+                max_output_tokens=max_output_tokens,
             )
             if not compatibility.compatible:
                 self._event(
@@ -1958,6 +2046,7 @@ class ResilientEngine(Engine):
                 start_attempt=attempts,
                 max_retries=0,
                 cancellation_token=cancellation_token,
+                max_output_tokens=max_output_tokens,
             )
             attempts += fallback.attempts
             if fallback.response is not None:

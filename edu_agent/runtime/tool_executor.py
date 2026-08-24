@@ -1298,7 +1298,7 @@ class PolicyToolExecutor:
         if self.result_budget is not None:
             context.check_control("tool.before_result_spill")
             processed = self.result_budget.apply(
-                redact_sensitive(outcome.to_dict()),
+                outcome.to_dict(),
                 context=context,
                 tool_name=name,
             )

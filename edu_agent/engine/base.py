@@ -63,3 +63,7 @@ class Engine(ABC):
     def begin_turn_routes(self) -> tuple[ResolvedRoute, ...]:
         """Freeze provider routes before a turn; engines without providers return none."""
         return ()
+
+    def capabilities_for_route(self, route: ResolvedRoute):
+        """Return effective request limits for a frozen route."""
+        return route.capabilities

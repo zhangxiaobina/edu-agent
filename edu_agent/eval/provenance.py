@@ -227,8 +227,9 @@ def _strip_sensitive_fields(value: Any) -> Any:
 
 def sanitize_artifact(value: Any, *, secrets: tuple[str, ...] = ()) -> Any:
     """Redact values, drop sensitive fields, and remove private absolute paths."""
-    redacted = RedactionPolicy(literal_secrets=secrets).redact(value)
-    return _redact_private_paths(_strip_sensitive_fields(redacted))
+    path_redacted = _redact_private_paths(value)
+    redacted = RedactionPolicy(literal_secrets=secrets).redact(path_redacted)
+    return _strip_sensitive_fields(redacted)
 
 
 __all__ = [

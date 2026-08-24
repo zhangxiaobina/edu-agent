@@ -152,6 +152,8 @@ def get_engine(config=None, **kwargs) -> Engine:
                 capabilities=ProviderCapabilities(
                     streaming=True,
                     context_window_tokens=config.fallback_context_window_tokens,
+                    max_output_tokens=config.fallback_max_output_tokens,
+                    tokenizer=config.fallback_tokenizer,
                 ),
             )
             fallback = GatewayEngine(

@@ -1,4 +1,13 @@
 from .memory import MemoryManager, MemoryProvider, MemorySnapshot
+from .checkpoints import (
+    CHECKPOINT_ESTIMATOR_VERSION,
+    CHECKPOINT_MIGRATION,
+    CHECKPOINT_SCHEMA_VERSION,
+    CHECKPOINT_STRATEGY_VERSION,
+    ContextCheckpointConflict,
+    ContextCheckpointError,
+    ContextCheckpointValidationError,
+)
 from .store import (
     FencingTokenRejected,
     RunCancelled,
@@ -48,6 +57,13 @@ from .turn_finalizer import (
 )
 
 __all__ = [
+    "CHECKPOINT_ESTIMATOR_VERSION",
+    "CHECKPOINT_MIGRATION",
+    "CHECKPOINT_SCHEMA_VERSION",
+    "CHECKPOINT_STRATEGY_VERSION",
+    "ContextCheckpointConflict",
+    "ContextCheckpointError",
+    "ContextCheckpointValidationError",
     "FencingTokenRejected",
     "MemoryManager",
     "MemoryProvider",

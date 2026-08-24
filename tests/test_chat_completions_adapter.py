@@ -413,6 +413,7 @@ def test_factory_keeps_dashscope_primary_and_vllm_fallback_compatible():
         fallback_model="Qwen/Qwen3-14B",
         fallback_base_url="http://127.0.0.1:8001/v1",
         fallback_context_window_tokens=32_768,
+        fallback_max_output_tokens=4_096,
     )
     engine = get_engine(config, client_factory=client_factory)
 

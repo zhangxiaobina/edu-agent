@@ -91,8 +91,9 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   tenant/course/document ACL，Plan 最终门禁复验 citation、作用域及同句主张关系。
 - **长会话可靠性链**：`RuntimeManager` 以进程内锁 + SQLite session lease 保证同 session 跨进程
   单飞；heartbeat、单调 fencing token、actor/tenant cancel 和启动恢复阻止旧 worker 污染新 owner。
-  可插拔 `ContextEngine` 将旧历史原地归档为可恢复 checkpoint，system prompt 保持稳定；超大工具
-  结果按单结果/整轮预算写入 tenant/actor 隔离的 Artifact，并以 SHA-256 校验完整性。该保证限于
+  可插拔 `ContextEngine` 将旧历史软归档为带 source/summary hash 和 scope provenance 的可恢复 checkpoint，
+  system prompt 保持稳定；超大工具结果按单结果/整轮预算写入 tenant/actor/session 隔离的 Artifact，模型只看到
+  typed reference 与脱敏 preview，并以 SHA-256 校验完整性。该保证限于
   共享同一 SQLite 文件的本机 Worker，不宣称跨主机或跨区域共识。
 - **模型与后台任务容错**：模型错误区分连接/超时/429/5xx 与 auth/权限/参数/上下文/输出上限，只重试明确
   瞬态故障；重试遵守有上限的 `Retry-After` 并使用 full jitter，并发和 breaker 按冻结 route 隔离，

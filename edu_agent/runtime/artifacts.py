@@ -6,11 +6,14 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from ..data_classification import content_classifications
 from .models import RunContext
-from .security import redact_sensitive, redact_sensitive_text
+from .security import redact_sensitive, redact_sensitive_preview, redact_sensitive_text
 
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
+ARTIFACT_REFERENCE_TYPE = "edu-agent.scoped-artifact.v1"
 
 
 @dataclass(frozen=True)
@@ -52,7 +55,17 @@ class ArtifactStore:
         directory.mkdir(parents=True, exist_ok=True)
         directory.chmod(0o700)
         path = directory / f"{artifact_id}-{safe_kind}.json"
-        payload = redact_sensitive_text(content).encode("utf-8")
+        try:
+            structured = json.loads(content)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            safe_content = redact_sensitive_text(content)
+        else:
+            safe_content = json.dumps(
+                redact_sensitive(structured),
+                ensure_ascii=False,
+                default=str,
+            )
+        payload = safe_content.encode("utf-8")
         digest = hashlib.sha256(payload).hexdigest()
         path.write_bytes(payload)
         path.chmod(0o600)
@@ -104,6 +117,8 @@ class ArtifactStore:
         )
         if record is None:
             raise PermissionError("artifact 不存在或不属于当前 actor/tenant")
+        if record["session_id"] != context.session_id:
+            raise PermissionError("artifact 不属于当前 session")
         path = Path(record["path"]).resolve()
         if self.root not in path.parents:
             raise ValueError("artifact 索引路径越界")
@@ -142,47 +157,197 @@ class ToolResultBudget:
         self.preview_chars = min(preview_chars, inline_chars)
         self.turn_budget_chars = max(inline_chars, turn_budget_chars)
 
+    @staticmethod
+    def _decode_content(content: str) -> Any:
+        try:
+            return json.loads(content)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return content
+
+    @staticmethod
+    def _classification(value: Any) -> tuple[str, tuple[str, ...]]:
+        classifications = content_classifications(value)
+        return classifications[0], classifications
+
+    def _preview(self, value: Any) -> str:
+        safe = redact_sensitive_preview(value)
+        if isinstance(safe, str):
+            serialized = safe
+        else:
+            serialized = json.dumps(safe, ensure_ascii=False, default=str)
+        return serialized[: self.preview_chars]
+
+    @staticmethod
+    def has_artifact_reference(value: Any) -> bool:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False
+        if isinstance(value, dict):
+            if value.get("type") == ARTIFACT_REFERENCE_TYPE:
+                return True
+            return any(ToolResultBudget.has_artifact_reference(item) for item in value.values())
+        if isinstance(value, list):
+            return any(ToolResultBudget.has_artifact_reference(item) for item in value)
+        return False
+
+    def _replacement(
+        self,
+        outcome: Any,
+        *,
+        artifact: ArtifactRef | None,
+        kind: str,
+        reason: str,
+        original_characters: int,
+        spill_error: OSError | None = None,
+    ) -> dict:
+        normalized = outcome if isinstance(outcome, dict) else {
+            "ok": True,
+            "data": outcome,
+            "error": None,
+            "meta": {},
+        }
+        classification, classifications = self._classification(outcome)
+        safe_receipt = redact_sensitive_preview(normalized)
+        reference = None
+        if artifact is not None:
+            reference = {
+                "type": ARTIFACT_REFERENCE_TYPE,
+                "artifact_id": artifact.id,
+                "kind": kind,
+                "sha256": artifact.sha256,
+                "size_bytes": artifact.size_bytes,
+                "classification": classification,
+                "classifications": list(classifications),
+            }
+        data = {
+            "preview": self._preview(outcome),
+            "truncated": True,
+            "original_characters": original_characters,
+            "classification": classification,
+            "classifications": list(classifications),
+        }
+        if reference is not None:
+            data.update(
+                {
+                    "artifact_ref": reference,
+                    # Compatibility fields remain while readers migrate to artifact_ref.
+                    "artifact_id": artifact.id,
+                    "sha256": artifact.sha256,
+                }
+            )
+        meta = dict(safe_receipt.get("meta") or {})
+        meta.update(
+            {
+                "spilled": artifact is not None,
+                "spill_reason": reason,
+                "artifact_reference_type": ARTIFACT_REFERENCE_TYPE,
+                "classification": classification,
+            }
+        )
+        if spill_error is not None:
+            meta["spill_error"] = type(spill_error).__name__
+        return {
+            "ok": bool(safe_receipt.get("ok", True)),
+            "data": data,
+            "error": safe_receipt.get("error"),
+            "meta": meta,
+        }
+
+    def _write_spill(
+        self,
+        content: str,
+        value: Any,
+        *,
+        context: RunContext,
+        tool_name: str | None,
+        kind: str,
+        reason: str,
+        metadata: dict | None = None,
+    ) -> tuple[ArtifactRef, dict]:
+        classification, classifications = self._classification(value)
+        artifact = self.artifact_store.write_text(
+            content,
+            context=context,
+            kind=kind,
+            metadata={
+                "tool": tool_name,
+                "characters": len(content),
+                "classification": classification,
+                "classifications": list(classifications),
+                "reference_type": ARTIFACT_REFERENCE_TYPE,
+                **(metadata or {}),
+            },
+        )
+        return artifact, self._replacement(
+            value,
+            artifact=artifact,
+            kind=kind,
+            reason=reason,
+            original_characters=len(content),
+        )
+
     def apply(self, outcome: dict, *, context: RunContext, tool_name: str) -> dict:
+        original = outcome
         outcome = redact_sensitive(outcome)
         serialized = json.dumps(outcome, ensure_ascii=False, default=str)
         if len(serialized) <= self.inline_chars:
             return outcome
         try:
-            artifact = self.artifact_store.write_text(
+            _, replacement = self._write_spill(
                 serialized,
+                original,
                 context=context,
+                tool_name=tool_name,
                 kind="tool-result",
-                metadata={"tool": tool_name, "characters": len(serialized)},
+                reason="single_result_budget",
             )
         except OSError as error:
-            return {
-                "ok": outcome.get("ok", True),
-                "data": {
-                    "preview": serialized[: self.preview_chars],
-                    "truncated": True,
-                    "original_characters": len(serialized),
-                },
-                "error": outcome.get("error"),
-                "meta": {
-                    **outcome.get("meta", {}),
-                    "spilled": False,
-                    "spill_error": type(error).__name__,
-                },
-            }
-        preview = serialized[: self.preview_chars]
-        return {
-            "ok": outcome.get("ok", True),
-            "data": {
-                "preview": preview,
-                "truncated": True,
-                "artifact_id": artifact.id,
-                "artifact_path": artifact.path,
-                "sha256": artifact.sha256,
-                "original_characters": len(serialized),
-            },
-            "error": outcome.get("error"),
-            "meta": {**outcome.get("meta", {}), "spilled": True},
-        }
+            return self._replacement(
+                original,
+                artifact=None,
+                kind="tool-result",
+                reason="single_result_budget",
+                original_characters=len(serialized),
+                spill_error=error,
+            )
+        return replacement
+
+    def externalize_message(
+        self,
+        message: dict,
+        *,
+        context: RunContext,
+        kind: str = "tool-turn-result",
+        reason: str = "turn_budget",
+        metadata: dict | None = None,
+        fallback_on_error: bool = True,
+    ) -> dict:
+        content = str(message.get("content") or "")
+        value = self._decode_content(content)
+        try:
+            _, replacement = self._write_spill(
+                content,
+                value,
+                context=context,
+                tool_name=message.get("name"),
+                kind=kind,
+                reason=reason,
+                metadata=metadata,
+            )
+        except OSError as error:
+            if not fallback_on_error:
+                raise
+            replacement = self._replacement(
+                value,
+                artifact=None,
+                kind=kind,
+                reason=reason,
+                original_characters=len(content),
+                spill_error=error,
+            )
+        return {**message, "content": json.dumps(replacement, ensure_ascii=False)}
 
     def enforce_turn(self, messages: list[dict], *, context: RunContext) -> list[dict]:
         total = sum(len(message.get("content", "")) for message in messages)
@@ -197,37 +362,19 @@ class ToolResultBudget:
             if total <= self.turn_budget_chars:
                 break
             content = message.get("content", "")
-            if not content or '"spilled": true' in content:
+            if (
+                message.get("role") != "tool"
+                or not content
+                or self.has_artifact_reference(content)
+            ):
                 continue
-            try:
-                artifact = self.artifact_store.write_text(
-                    content,
-                    context=context,
-                    kind="tool-turn-result",
-                    metadata={"tool": message.get("name"), "characters": len(content)},
-                )
-            except OSError:
-                message["content"] = content[: self.preview_chars] + "\n[tool result truncated]"
-                total += len(message["content"]) - len(content)
-                continue
-            replacement = json.dumps(
-                {
-                    "ok": True,
-                    "data": {
-                        "preview": content[: self.preview_chars],
-                        "truncated": True,
-                        "artifact_id": artifact.id,
-                        "artifact_path": artifact.path,
-                        "sha256": artifact.sha256,
-                        "original_characters": len(content),
-                    },
-                    "error": None,
-                    "meta": {"spilled": True, "reason": "turn_budget"},
-                },
-                ensure_ascii=False,
+            replacement = self.externalize_message(
+                message,
+                context=context,
+                reason="turn_budget",
             )
-            message["content"] = replacement
-            total += len(replacement) - len(content)
+            message["content"] = replacement["content"]
+            total += len(message["content"]) - len(content)
         return messages
 
     def enforce_incremental(
@@ -240,53 +387,9 @@ class ToolResultBudget:
         """Apply the turn cap without rewriting results already durably committed."""
         content = message.get("content", "")
         used = sum(len(item.get("content", "")) for item in prior_messages)
-        if used + len(content) <= self.turn_budget_chars or '"spilled": true' in content:
+        if (
+            used + len(content) <= self.turn_budget_chars
+            or self.has_artifact_reference(content)
+        ):
             return message
-        try:
-            outcome = json.loads(content)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            outcome = {"ok": True, "data": None, "error": None, "meta": {}}
-        if not isinstance(outcome, dict):
-            outcome = {"ok": True, "data": outcome, "error": None, "meta": {}}
-        try:
-            artifact = self.artifact_store.write_text(
-                content,
-                context=context,
-                kind="tool-turn-result",
-                metadata={"tool": message.get("name"), "characters": len(content)},
-            )
-        except OSError as error:
-            replacement = {
-                "ok": outcome.get("ok", True),
-                "data": {
-                    "preview": content[: self.preview_chars],
-                    "truncated": True,
-                    "original_characters": len(content),
-                },
-                "error": outcome.get("error"),
-                "meta": {
-                    **(outcome.get("meta") or {}),
-                    "spilled": False,
-                    "spill_error": type(error).__name__,
-                    "reason": "turn_budget",
-                },
-            }
-        else:
-            replacement = {
-                "ok": outcome.get("ok", True),
-                "data": {
-                    "preview": content[: self.preview_chars],
-                    "truncated": True,
-                    "artifact_id": artifact.id,
-                    "artifact_path": artifact.path,
-                    "sha256": artifact.sha256,
-                    "original_characters": len(content),
-                },
-                "error": outcome.get("error"),
-                "meta": {
-                    **(outcome.get("meta") or {}),
-                    "spilled": True,
-                    "reason": "turn_budget",
-                },
-            }
-        return {**message, "content": json.dumps(replacement, ensure_ascii=False)}
+        return self.externalize_message(message, context=context, reason="turn_budget")

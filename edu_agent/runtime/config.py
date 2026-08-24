@@ -16,6 +16,11 @@ from ..engine.gateway import (
 )
 
 
+_KNOWN_MODEL_LIMITS = {
+    "qwen-plus": (131_072, 8_192),
+}
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     provider: str = "openai"
@@ -36,13 +41,32 @@ class ModelConfig:
     fallback_base_url: str | None = None
     fallback_api_mode: ApiMode | str | None = None
     fallback_context_window_tokens: int | None = None
+    fallback_max_output_tokens: int | None = None
+    fallback_tokenizer: str | None = None
     api_mode: ApiMode | str | None = None
     vendor: str | None = None
     deployment: str | None = None
     endpoint: str | None = None
     credential_env: str = "EDU_AGENT_API_KEY"
+    context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
+    tokenizer: str | None = None
 
     def __post_init__(self) -> None:
+        known_limits = _KNOWN_MODEL_LIMITS.get(self.model.lower())
+        if known_limits is not None:
+            if self.context_window_tokens is None:
+                object.__setattr__(self, "context_window_tokens", known_limits[0])
+            if self.max_output_tokens is None:
+                object.__setattr__(self, "max_output_tokens", known_limits[1])
+            if self.context_window_tokens > known_limits[0]:
+                raise ValueError(
+                    "model.context_window_tokens 不能超过已知 Provider 能力"
+                )
+            if self.max_output_tokens > known_limits[1]:
+                raise ValueError(
+                    "model.max_output_tokens 不能超过已知 Provider 能力"
+                )
         if (
             isinstance(self.max_retries, bool)
             or not isinstance(self.max_retries, int)
@@ -98,10 +122,24 @@ class ModelConfig:
             credential=CredentialRef(self.credential_env),
         )
         object.__setattr__(self, "api_mode", spec.api_mode)
+        if (
+            self.context_window_tokens is not None
+            and self.max_output_tokens is not None
+            and self.max_output_tokens > self.context_window_tokens
+        ):
+            raise ValueError("model.max_output_tokens 不能超过 context_window_tokens")
+        ProviderCapabilities(
+            streaming=True,
+            context_window_tokens=self.context_window_tokens,
+            max_output_tokens=self.max_output_tokens,
+            tokenizer=self.tokenizer,
+        )
         if self.fallback_model is None and (
             self.fallback_base_url is not None
             or self.fallback_api_mode is not None
             or self.fallback_context_window_tokens is not None
+            or self.fallback_max_output_tokens is not None
+            or self.fallback_tokenizer is not None
         ):
             raise ValueError(
                 "model.fallback_* 字段需要 fallback_model"
@@ -111,6 +149,29 @@ class ModelConfig:
                 raise ValueError(
                     "model.fallback_context_window_tokens 必须为 fallback 声明已知上下文上限"
                 )
+            if self.fallback_max_output_tokens is None:
+                raise ValueError(
+                    "model.fallback_max_output_tokens 必须为 fallback 声明已知输出上限"
+                )
+            fallback_known_limits = _KNOWN_MODEL_LIMITS.get(self.fallback_model.lower())
+            if (
+                fallback_known_limits is not None
+                and self.fallback_context_window_tokens > fallback_known_limits[0]
+            ):
+                raise ValueError(
+                    "model.fallback_context_window_tokens 不能超过已知 Provider 能力"
+                )
+            if (
+                fallback_known_limits is not None
+                and self.fallback_max_output_tokens > fallback_known_limits[1]
+            ):
+                raise ValueError(
+                    "model.fallback_max_output_tokens 不能超过已知 Provider 能力"
+                )
+            if self.fallback_max_output_tokens > self.fallback_context_window_tokens:
+                raise ValueError(
+                    "model.fallback_max_output_tokens 不能超过 fallback_context_window_tokens"
+                )
             fallback_spec = ProviderSpec(
                 model=self.fallback_model,
                 endpoint=self.fallback_base_url or effective_endpoint,
@@ -119,6 +180,8 @@ class ModelConfig:
                 capabilities=ProviderCapabilities(
                     streaming=True,
                     context_window_tokens=self.fallback_context_window_tokens,
+                    max_output_tokens=self.fallback_max_output_tokens,
+                    tokenizer=self.fallback_tokenizer,
                 ),
             )
             object.__setattr__(self, "fallback_api_mode", fallback_spec.api_mode)
@@ -135,6 +198,14 @@ class ModelConfig:
 
     def provider_spec(self, environ: Mapping[str, str] | None = None) -> ProviderSpec:
         source = os.environ if environ is None else environ
+        declared = any(
+            value is not None
+            for value in (
+                self.context_window_tokens,
+                self.max_output_tokens,
+                self.tokenizer,
+            )
+        )
         return ProviderSpec(
             model=self.model,
             endpoint=self.configured_endpoint or source.get("EDU_AGENT_BASE_URL") or None,
@@ -142,6 +213,16 @@ class ModelConfig:
             provider=self.vendor or source.get("EDU_AGENT_PROVIDER") or None,
             deployment=self.deployment or source.get("EDU_AGENT_DEPLOYMENT") or None,
             credential=CredentialRef(self.credential_env),
+            capabilities=(
+                ProviderCapabilities(
+                    streaming=True,
+                    context_window_tokens=self.context_window_tokens,
+                    max_output_tokens=self.max_output_tokens,
+                    tokenizer=self.tokenizer,
+                )
+                if declared
+                else None
+            ),
         )
 
 
@@ -152,6 +233,7 @@ class RuntimeConfig:
     tool_batch_max_workers: int = 4
     tool_call_timeout_seconds: float = 120.0
     context_token_budget: int = 12_000
+    output_token_reserve: int | None = None
     recent_message_limit: int = 80
     compression_enabled: bool = True
     compression_trigger_ratio: float = 0.7
@@ -165,6 +247,22 @@ class RuntimeConfig:
     run_stall_seconds: float = 90.0
 
     def __post_init__(self) -> None:
+        if self.output_token_reserve is None:
+            object.__setattr__(
+                self,
+                "output_token_reserve",
+                min(2_048, max(1, self.context_token_budget // 4)),
+            )
+        for name in ("context_token_budget", "output_token_reserve"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"runtime {name} 必须是正整数")
+        if self.context_token_budget < 256:
+            raise ValueError("runtime context_token_budget 不能小于 256")
+        if self.output_token_reserve >= self.context_token_budget:
+            raise ValueError(
+                "runtime output_token_reserve 必须小于 context_token_budget"
+            )
         if (
             isinstance(self.tool_batch_max_workers, bool)
             or not isinstance(self.tool_batch_max_workers, int)
@@ -408,6 +506,40 @@ class AppConfig:
     code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+
+    def __post_init__(self) -> None:
+        declared_context = self.model.context_window_tokens
+        if (
+            declared_context is not None
+            and self.runtime.context_token_budget > declared_context
+        ):
+            raise ValueError(
+                "runtime.context_token_budget 不能超过 model.context_window_tokens"
+            )
+        declared_output = self.model.max_output_tokens
+        if (
+            declared_output is not None
+            and self.runtime.output_token_reserve > declared_output
+        ):
+            raise ValueError(
+                "runtime.output_token_reserve 不能超过 model.max_output_tokens"
+            )
+        fallback_context = self.model.fallback_context_window_tokens
+        if (
+            fallback_context is not None
+            and self.runtime.context_token_budget > fallback_context
+        ):
+            raise ValueError(
+                "runtime.context_token_budget 不能超过 fallback Provider 上下文能力"
+            )
+        fallback_output = self.model.fallback_max_output_tokens
+        if (
+            fallback_output is not None
+            and self.runtime.output_token_reserve > fallback_output
+        ):
+            raise ValueError(
+                "runtime.output_token_reserve 不能超过 fallback Provider 输出能力"
+            )
 
     @property
     def state_path(self) -> Path:

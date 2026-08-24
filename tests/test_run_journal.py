@@ -12,6 +12,7 @@ from edu_agent.runtime.models import RunContext
 from edu_agent.state import (
     RUN_JOURNAL_MIGRATION,
     RUN_JOURNAL_SCHEMA_VERSION,
+    STATE_SCHEMA_VERSION,
     RunJournalConflict,
     RunJournalCorrupt,
     RunJournalCursorError,
@@ -178,7 +179,7 @@ def test_new_database_has_minimal_journal_schema_and_strict_snapshot(tmp_path):
             "SELECT COUNT(*) FROM state_schema_migrations WHERE version=?",
             (RUN_JOURNAL_MIGRATION,),
         ).fetchone()[0]
-    assert user_version == 12 and migration_count == 1
+    assert user_version == STATE_SCHEMA_VERSION and migration_count == 1
     assert not {
         "plan_json",
         "evidence_json",
@@ -644,7 +645,7 @@ def test_old_database_migration_is_idempotent_and_recovers_missing_marker(tmp_pa
     assert marker_count == table_count == 1
     assert recovery_marker_count == 1
     assert "stream_event_sequence" in run_columns
-    assert user_version == 12
+    assert user_version == STATE_SCHEMA_VERSION
     assert reopened.get_messages("legacy") == [{"role": "user", "content": "preserve-me"}]
     assert reopened.get_run_journal_snapshot(
         interrupted_context.run_id,
@@ -657,12 +658,15 @@ def test_old_database_migration_is_idempotent_and_recovers_missing_marker(tmp_pa
 def test_newer_database_schema_is_never_downgraded(tmp_path):
     path = tmp_path / "future.db"
     with sqlite3.connect(path) as connection:
-        connection.execute("PRAGMA user_version = 13")
+        connection.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION + 1}")
 
     with pytest.raises(StateSchemaVersionError, match="newer than supported"):
         StateStore(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert (
+            connection.execute("PRAGMA user_version").fetchone()[0]
+            == STATE_SCHEMA_VERSION + 1
+        )
     with pytest.raises(StateSchemaVersionError, match="newer than supported"):
         StateStore(path, read_only=True)
 
@@ -673,10 +677,10 @@ def test_newer_database_schema_is_never_downgraded(tmp_path):
             CREATE TABLE state_schema_migrations(
                 version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
             );
-            INSERT INTO state_schema_migrations VALUES ('013_future', 't0');
+            INSERT INTO state_schema_migrations VALUES ('014_future', 't0');
             """
         )
-    with pytest.raises(StateSchemaVersionError, match="013_future"):
+    with pytest.raises(StateSchemaVersionError, match="014_future"):
         StateStore(marker_path)
 
 

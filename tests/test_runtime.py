@@ -13,7 +13,11 @@ from edu_agent.engine.mock import MockEngine, final
 from edu_agent.runtime.config import AppConfig, MemoryConfig, RuntimeConfig, SecurityConfig, StorageConfig
 from edu_agent.runtime.artifacts import ArtifactStore, ToolResultBudget
 from edu_agent.runtime.context import ContextBudgetExceeded, ContextManager
-from edu_agent.runtime.context_engine import CheckpointContextEngine
+from edu_agent.runtime.context_engine import (
+    CheckpointContextEngine,
+    CompactionResult,
+    ContextEngine,
+)
 from edu_agent.runtime.manager import RuntimeManager
 from edu_agent.runtime.models import RunContext
 from edu_agent.runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor
@@ -222,6 +226,35 @@ def test_service_recalls_history_and_memory_and_persists_run(tmp_path):
     assert service.state_store.count("runs") == 2
 
 
+def test_service_accepts_pre_r42_context_engine_signature(tmp_path):
+    class LegacyContextEngine(ContextEngine):
+        def __init__(self):
+            self.compacted = False
+
+        def compact_if_needed(self, session_id, history):
+            self.compacted = True
+            return CompactionResult(None, 0, None, 0, 0)
+
+        def checkpoint_summary(self, session_id):
+            return "legacy checkpoint"
+
+    legacy = LegacyContextEngine()
+    engine = InspectingEngine()
+    config = AppConfig(
+        runtime=RuntimeConfig(max_model_calls=4, max_tool_calls=4),
+        memory=MemoryConfig(enabled=False),
+        security=SecurityConfig(),
+        storage=StorageConfig(state_path=str(tmp_path / "state.db")),
+    )
+    service = EduAgentService(engine, config=config, context_engine=legacy)
+
+    result = service.chat("继续", actor_id="teacher-1", role="teacher")
+
+    assert result.final_answer == "收到"
+    assert legacy.compacted is True
+    assert "legacy checkpoint" in engine.calls[-1][-1]["content"]
+
+
 def test_budget_stops_unbounded_model_loop():
     def endless_policy(messages, tools, step):
         return EngineResponse(tool_calls=[ToolCall(id=f"c{step}", name="list_exams", arguments={})])
@@ -317,7 +350,13 @@ def test_tool_result_spills_to_scoped_artifact_and_redacts_secrets(tmp_path):
         tool_name="large_query",
     )
     assert processed["meta"]["spilled"] is True
-    artifact_path = processed["data"]["artifact_path"]
+    assert "artifact_path" not in processed["data"]
+    artifact_record = store.get_artifact(
+        processed["data"]["artifact_id"],
+        actor_id=context.actor_id,
+        tenant_id=context.tenant_id,
+    )
+    artifact_path = artifact_record["path"]
     assert str(tmp_path / "artifacts" / "school-1" / "teacher-1" / "s1") in artifact_path
     assert "should-not-leak" not in open(artifact_path, encoding="utf-8").read()
     assert store.count("artifacts") == 1
@@ -364,7 +403,13 @@ def test_tool_result_spills_to_scoped_artifact_and_redacts_secrets(tmp_path):
         ).fetchone()
     assert "secret-value" not in event["arguments_json"]
     assert "secret-value" not in event["outcome_json"]
-    assert "secret-value" not in open(outcome.data["artifact_path"], encoding="utf-8").read()
+    outcome_artifact = store.get_artifact(
+        outcome.data["artifact_id"],
+        actor_id=context.actor_id,
+        tenant_id=context.tenant_id,
+    )
+    assert "artifact_path" not in outcome.data
+    assert "secret-value" not in open(outcome_artifact["path"], encoding="utf-8").read()
 
     assert budget.artifact_store.read_text(
         outcome.data["artifact_id"],
@@ -378,7 +423,7 @@ def test_tool_result_spills_to_scoped_artifact_and_redacts_secrets(tmp_path):
     )
     with pytest.raises(PermissionError):
         budget.artifact_store.read_text(outcome.data["artifact_id"], context=other)
-    with open(outcome.data["artifact_path"], "a", encoding="utf-8") as artifact:
+    with open(outcome_artifact["path"], "a", encoding="utf-8") as artifact:
         artifact.write("tampered")
     with pytest.raises(RuntimeError, match="完整性"):
         budget.artifact_store.read_text(outcome.data["artifact_id"], context=context)

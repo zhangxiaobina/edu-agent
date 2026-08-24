@@ -172,12 +172,16 @@ class CancellationToken:
 
 
 def accepts_cancellation_token(call: Callable[..., Any]) -> bool:
+    return accepts_keyword_argument(call, "cancellation_token")
+
+
+def accepts_keyword_argument(call: Callable[..., Any], name: str) -> bool:
     try:
         parameters = inspect.signature(call).parameters.values()
     except (TypeError, ValueError):
         return False
     return any(
-        parameter.name == "cancellation_token"
+        parameter.name == name
         or parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters
     )

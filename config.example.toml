@@ -6,6 +6,10 @@ vendor = "dashscope"
 deployment = "dashscope-compatible"
 model = "qwen-plus"
 endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# Provider 能力声明；未知时省略并在 Trace 中明确标记 unknown，不能视为无限。
+context_window_tokens = 131072
+max_output_tokens = 8192
+# tokenizer = "registered:qwen-plus" # 仅填写进程中已注册/可用的 tokenizer 标识
 # 旧字段 base_url 仍兼容，但不能与 endpoint 同时配置。
 # 这里只保存环境变量名；凭据值不得写入 TOML。
 credential_env = "EDU_AGENT_API_KEY"
@@ -26,6 +30,8 @@ circuit_cooldown_seconds = 30.0
 # fallback_base_url = "http://127.0.0.1:8001/v1"
 # fallback_api_mode = "chat_completions" # 默认继承 primary 的冻结 mode
 # fallback_context_window_tokens = 32768 # 配置 fallback 时必填，未知不视为无限
+# fallback_max_output_tokens = 8192
+# fallback_tokenizer = "registered:fallback"
 # fallback key 使用 EDU_AGENT_FALLBACK_API_KEY，不写入 TOML。
 
 [runtime]
@@ -36,6 +42,8 @@ tool_batch_max_workers = 4
 # 每个工具仍受 Manifest timeout 限制；这里是运行时全局上限。
 tool_call_timeout_seconds = 120
 context_token_budget = 12000
+# 每次模型请求都会真实设置该最大输出值，并从 context window 中预留。
+output_token_reserve = 2048
 recent_message_limit = 80
 compression_enabled = true
 compression_trigger_ratio = 0.7

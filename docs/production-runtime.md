@@ -122,8 +122,9 @@ tie-break；`hybrid_rerank` 当前只有确定性词项重叠重排。未配置�
 
 ## 上下文管理
 
-`ContextManager` 负责近似 Token 预算和近期窗口。assistant `tool_calls` 与对应的全部
-`tool result` 被视为一个原子组：要么全部保留，要么全部移除，不会制造孤立工具消息。
+`ContextManager` 通过 `ContextBreakdown` 分列 system、冻结工具 schema、普通历史、当前 user、
+Plan/Evidence、tool result、memory/checkpoint、协议开销和最大输出预留。请求前优先使用已注册 tokenizer，
+否则使用版本化保守 estimator；assistant `tool_calls` 与对应的全部 `tool result` 始终作为原子组处理，
 构建后还会执行配对不变量校验。
 
 稳定 system prompt 和当前真实 user turn 是不可裁剪区；如果两者本身已超过预算，运行时抛出
@@ -131,14 +132,21 @@ tie-break；`hybrid_rerank` 当前只有确定性词项重叠重排。未配置�
 
 `ContextEngine` 是可替换接口，内置 `CheckpointContextEngine` 在历史达到配置阈值后：
 
-1. 按 assistant tool call + 全部 tool result 原子组确定边界；
-2. 将旧消息原地标为 inactive，而非删除；
-3. 创建包含范围、原消息数和压缩前估算 Token 的滚动 checkpoint；
-4. checkpoint 与长期记忆一起放入当前真实 user turn，system prompt 不变；
-5. 原文仍可通过 `get_messages(..., include_compacted=True)` 恢复。
+1. 先把超过结果预算的旧 tool result 写入现有 scoped Artifact；消息只保留 typed reference、SHA-256、
+   脱敏 preview、classification、原长度和业务回执，写入失败的原子组不参与本次压缩；
+2. 按 assistant tool call + 全部 tool result 原子组选择旧 exchange，并显式保留 system、当前 turn、近期消息、
+   未完成 Plan、审批/operation receipt、citation、Artifact ref、用户约束和未配对工具组；
+3. 仅将选中的原消息标为 `active=0` 并关联 checkpoint，不删除或重写原文；精确 sequence 清单即使不连续也可恢复；
+4. checkpoint schema v2 保存首尾 sequence、逐消息与整体 source hash、策略/estimator 版本、summary hash、
+   压缩前后 Token、保留项、Artifact/citation/operation 引用、创建 run 和父 checkpoint；
+5. 每次注入或恢复前复验 session/actor/tenant、创建 run、source/summary/parent hash、软归档状态以及 Artifact/
+   operation 引用。缺失、篡改或 scope 不符会返回 `CONTEXT_CHECKPOINT_*` 并写 denied audit，不会继续生成答案；
+6. checkpoint 与长期记忆一起放入当前真实 user turn，system prompt 保持逐字节稳定。原消息可通过
+   `restore_context_checkpoint_messages()` 恢复，Artifact 引用也可在完整性复验后解引用。
 
-当前摘要是确定性有损检查点，不声称等价于 Hermes 的辅助 LLM 高质量摘要与反压缩抖动体系；
-后续 ContextEngine 可以替换实现，但不得破坏工具配对、角色语义和缓存稳定性。
+`013_context_checkpoint_provenance` 将旧范围型 checkpoint 幂等迁移为可兼容读取的 schema v1，并回填可取得的
+scope、sequence 和 hash；新 checkpoint 使用严格 schema v2。当前摘要仍是确定性有损检查点，压缩触发阈值继续使用
+R4.1 前的 estimator；反抖动、摘要保真评测和 Provider context overflow 单次恢复属于 R4.3，尚未在这里实现。
 
 ## 全局运行管理
 
@@ -287,10 +295,10 @@ payload hash、scope、有效期和 approver，不保存 token 或明文凭据�
 坏 JSON、未知工具、参数错误、越权、审批拒绝、工具异常都会作为结构化 tool result 回灌，
 模型可以修正参数，但不能绕过运行时策略。
 
-大结果还会经过 `ToolResultBudget`：单结果和单轮总字符预算超限时，完整 JSON 在敏感字段脱敏后
-写入 Artifact，模型只接收 preview、artifact id/path、原长度和 SHA-256。Artifact 按
-tenant/actor/session 分目录，读取必须匹配 owner 并通过路径与 hash 校验；写盘失败会安全降级为
-内联预览，而不是让整个 turn 失败。
+大结果还会经过 `ToolResultBudget`：单结果和单轮总字符预算超限时，完整 JSON 在凭据脱敏后写入 Artifact，
+模型只接收 `edu-agent.scoped-artifact.v1` 引用、脱敏 preview、classification、Artifact id、原长度和 SHA-256，
+不会接收服务端绝对路径。Artifact 按 tenant/actor/session 分目录，读取必须匹配 owner/session 并通过路径与 hash
+校验；普通工具执行写盘失败会安全降级为内联预览，压缩前写盘失败则保留该完整工具原子组。
 
 ## 状态与可观测性
 
@@ -303,7 +311,7 @@ tenant/actor/session 分目录，读取必须匹配 owner 并通过路径与 has
 - session_leases（当前 owner、单调 fencing token、active run、heartbeat 和 expiry）
 - tool_events（tool call / operation 关联、参数、结果、耗时）
 - tool_operation_refs（operation owner、调用关联和当前状态）
-- context_checkpoints（压缩范围、滚动摘要、压缩前估算）
+- context_checkpoints（source sequence/hash、策略/estimator、summary hash、压缩前后 Token、保留项、引用和创建 run）
 - artifacts（owner、路径、大小、SHA-256）
 - provider_events（重试、熔断、fallback、恢复）
 - plans / plan_steps / evidence（DAG、步骤游标/重试、真实证据绑定）
@@ -340,6 +348,8 @@ R2.7 的 `012_r2_recovery` 将 schema version 提升到 12，增加 `runs.stream
 `continue/replay-read/reuse-operation/manual-review/terminal-replay`，resume 前复验冻结 manifest/route 并恢复
 预算 snapshot。五个 fault fixture 都关闭崩溃 Service、推进 lease 时钟，再以同一 SQLite 文件构造新 Service；
 EventBus 仍不保存历史 delta，工具并发不改变原序消息和恢复游标。
+R4.2 的 `013_context_checkpoint_provenance` 将 schema version 提升到 13，新增 checkpoint provenance、引用和父链字段；
+迁移可重复执行，旧 checkpoint 保持 schema v1 兼容读取，新写入使用严格 schema v2。
 
 ## 可插拔扩展
 

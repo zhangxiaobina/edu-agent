@@ -15,6 +15,7 @@ from ..planning.planner import ModelPlanGenerator, PlanGenerationError, should_c
 from ..planning.runtime import PlanCoordinator, PlanningOptions
 from ..planning.verifier import EvidenceVerifier
 from ..runtime.cancellation import CancellationRequested
+from ..runtime.context import ContextBudgetExceeded
 from ..runtime.models import BudgetExceeded, RunContext
 from ..runtime.tool_batch import ToolBatchExecutor, ToolBatchPlanner, ToolBatchSegment
 from ..runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor
@@ -119,6 +120,29 @@ def _scope_tools(tools: list[dict], step) -> list[dict]:
     return selected
 
 
+def _base_tools_for_step(tools: list[dict], step) -> list[dict]:
+    if step is None:
+        return []
+    return [
+        tool
+        for tool in tools
+        if tool["function"]["name"] in step.allowed_tools
+    ]
+
+
+def _plan_accounting_payload(step) -> dict | None:
+    if step is None:
+        return None
+    return {
+        "step_id": step.id,
+        "goal": step.goal,
+        "completion_conditions": [
+            condition.model_dump(mode="json")
+            for condition in step.completion_conditions
+        ],
+    }
+
+
 def _validate_tool_schema_subset(
     tool_schemas: list[dict], manifest: ToolManifest,
 ) -> None:
@@ -175,6 +199,7 @@ def build_agent(
     tool_batch_max_workers: int = 4,
     tool_call_timeout_seconds: float = 120.0,
     tool_connection_factory=None,
+    context_accounting=None,
 ):
     """编译 Agent 图；生产控制由 RunContext 和 ToolExecutor 承担。"""
     provider = tools_provider if tools_provider is not None else registry
@@ -222,6 +247,8 @@ def build_agent(
         context.emit_run_event("run.phase", {"phase": "model"})
         active_step = None
         current_tools = tools
+        base_current_tools = tools
+        plan_injection = None
         if plan_coordinator is not None:
             if not plan_coordinator.consume_iteration():
                 reason = "计划迭代预算已耗尽"
@@ -240,6 +267,29 @@ def build_agent(
                 }
             active_step = plan_coordinator.active_or_ready_step()
             current_tools = _scope_tools(tools, active_step)
+            base_current_tools = _base_tools_for_step(tools, active_step)
+            plan_injection = _plan_accounting_payload(active_step)
+        request_breakdown = None
+        route_breakdowns = []
+        if context_accounting is not None:
+            for route in context_accounting.routes:
+                route_breakdowns.append(
+                    context_accounting.measure(
+                        messages=state["messages"],
+                        tools=current_tools,
+                        phase="agent_model",
+                        route=route,
+                        base_tool_schema=base_current_tools,
+                        plan_evidence_injection=plan_injection,
+                        event="context_request_accounted",
+                    )
+                )
+            request_breakdown = route_breakdowns[0]
+            if request_breakdown.decision != "send":
+                raise ContextBudgetExceeded(
+                    "agent model request exceeds the reserved context budget",
+                    breakdown=request_breakdown,
+                )
         try:
             context.budget.consume_model_call()
         except BudgetExceeded as error:
@@ -259,13 +309,38 @@ def build_agent(
         model_attempt = (
             loop_journal.start_model_attempt() if loop_journal is not None else None
         )
-        response = consume_provider_stream(
-            engine,
-            state["messages"],
-            current_tools,
-            cancellation_token=context.cancellation_token,
-            event_sink=context.emit_provider_event if context.streams_events else None,
-        )
+        try:
+            response = consume_provider_stream(
+                engine,
+                state["messages"],
+                current_tools,
+                cancellation_token=context.cancellation_token,
+                max_output_tokens=(
+                    context_accounting.max_output_reserve_tokens
+                    if context_accounting is not None
+                    else None
+                ),
+                event_sink=context.emit_provider_event if context.streams_events else None,
+            )
+        except Exception as error:
+            if request_breakdown is not None:
+                context_accounting.settle(
+                    request_breakdown,
+                    getattr(error, "usage", None),
+                    phase="agent_model",
+                )
+            raise
+        if request_breakdown is not None:
+            selected_breakdown = context_accounting.select_breakdown(
+                route_breakdowns,
+                response_model=response.model,
+                usage=response.usage,
+            )
+            context_accounting.settle(
+                selected_breakdown,
+                response.usage,
+                phase="agent_model",
+            )
         context.check_control("model.after_call")
         if loop_journal is not None:
             loop_journal.model_returned()
@@ -610,6 +685,7 @@ def run_agent(
     tool_batch_max_workers: int = 4,
     tool_call_timeout_seconds: float = 120.0,
     tool_connection_factory=None,
+    context_accounting=None,
 ) -> dict:
     """运行一次 Agent turn，返回回答、轨迹、消息、预算和模型 usage。"""
     context = run_context or RunContext.create(
@@ -676,7 +752,15 @@ def run_agent(
             context,
             options=planning,
         )
-        generator = plan_generator or ModelPlanGenerator(engine)
+        generator = plan_generator or ModelPlanGenerator(
+            engine,
+            context_accounting=context_accounting,
+            max_output_tokens=(
+                context_accounting.max_output_reserve_tokens
+                if context_accounting is not None
+                else None
+            ),
+        )
         try:
             coordinator.ensure_plan(
                 task,
@@ -752,6 +836,7 @@ def run_agent(
         tool_batch_max_workers=tool_batch_max_workers,
         tool_call_timeout_seconds=tool_call_timeout_seconds,
         tool_connection_factory=tool_connection_factory,
+        context_accounting=context_accounting,
     )
     messages = initial_messages or [
         {"role": "system", "content": system_prompt},

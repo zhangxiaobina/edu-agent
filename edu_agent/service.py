@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import uuid
 from collections.abc import Callable, Mapping
@@ -19,7 +20,13 @@ from .planning.runtime import PlanningOptions
 from .planning.runtime import PlanCoordinator
 from .planning.verifier import EvidenceVerifier
 from .runtime.config import AppConfig, load_config
-from .runtime.context import ContextBudgetExceeded, ContextManager
+from .runtime.context import (
+    ContextAccountant,
+    ContextAccountingSession,
+    ContextBudgetExceeded,
+    ContextManager,
+    ContextRouteLimits,
+)
 from .runtime.artifacts import ArtifactStore, ToolResultBudget
 from .runtime.context_engine import CheckpointContextEngine, ContextEngine
 from .runtime.cancellation import CancellationRequested, CancellationToken
@@ -65,6 +72,7 @@ class EduAgentService:
         runtime_manager: RuntimeManager | None = None,
         memory_provider: MemoryProvider | None = None,
         context_engine: ContextEngine | None = None,
+        context_accountant: ContextAccountant | None = None,
         plan_generator=None,
         loop_fault_injector=None,
         finalizer_fault_injector=None,
@@ -110,9 +118,20 @@ class EduAgentService:
             max_items=self.config.memory.max_recalled_items,
             max_item_chars=self.config.memory.max_item_chars,
         )
+        self.context_accountant = context_accountant or ContextAccountant()
         self.context_manager = ContextManager(
             token_budget=self.config.runtime.context_token_budget,
             recent_message_limit=self.config.runtime.recent_message_limit,
+            accountant=self.context_accountant,
+            output_reserve_tokens=self.config.runtime.output_token_reserve,
+        )
+        self._validate_context_route_limits()
+        self.artifact_store = ArtifactStore(self.config.artifact_path, self.state_store)
+        self.result_budget = ToolResultBudget(
+            self.artifact_store,
+            inline_chars=self.config.runtime.tool_result_inline_chars,
+            preview_chars=self.config.runtime.tool_result_preview_chars,
+            turn_budget_chars=self.config.runtime.tool_turn_budget_chars,
         )
         self.context_engine = context_engine or (
             CheckpointContextEngine(
@@ -121,6 +140,7 @@ class EduAgentService:
                 trigger_ratio=self.config.runtime.compression_trigger_ratio,
                 keep_recent=self.config.runtime.compression_keep_recent,
                 summary_max_chars=self.config.runtime.compression_summary_max_chars,
+                result_budget=self.result_budget,
             )
             if self.config.runtime.compression_enabled
             else None
@@ -130,21 +150,91 @@ class EduAgentService:
         self.finalizer_fault_injector = finalizer_fault_injector
         self.post_process_hooks = post_process_hooks
         self.finalizer_cleanup = finalizer_cleanup
-        self.artifact_store = ArtifactStore(self.config.artifact_path, self.state_store)
         self.trace_repository = TraceRepository(
             self.state_store,
             redaction=RedactionPolicy(),
-        )
-        self.result_budget = ToolResultBudget(
-            self.artifact_store,
-            inline_chars=self.config.runtime.tool_result_inline_chars,
-            preview_chars=self.config.runtime.tool_result_preview_chars,
-            turn_budget_chars=self.config.runtime.tool_turn_budget_chars,
         )
         self._delegation_runtime = None
         self._teaching_delegation = None
         if hasattr(self.engine, "event_sink") and self.engine.event_sink is None:
             self.engine.event_sink = lambda event: self.state_store.record_provider_event(**event)
+
+    def _context_route_limits(
+        self,
+        routes=None,
+    ) -> tuple[ContextRouteLimits, ...]:
+        provider_routes = self._begin_turn_routes() if routes is None else tuple(routes)
+        if not provider_routes:
+            name = str(getattr(self.engine, "name", type(self.engine).__name__))
+            model = str(getattr(self.engine, "model", name))
+            return (ContextRouteLimits(provider=name, model=model),)
+        resolver = getattr(self.engine, "capabilities_for_route", None)
+        result = []
+        for route in provider_routes:
+            capabilities = resolver(route) if callable(resolver) else route.capabilities
+            result.append(
+                ContextRouteLimits(
+                    provider=route.provider,
+                    model=route.model,
+                    context_window_tokens=capabilities.context_window_tokens,
+                    max_output_tokens=capabilities.max_output_tokens,
+                    tokenizer=capabilities.tokenizer,
+                    route_identity=tuple(route.identity),
+                )
+            )
+        return tuple(result)
+
+    def _begin_turn_routes(self):
+        freezer = getattr(self.engine, "begin_turn_routes", None)
+        return tuple(freezer()) if callable(freezer) else ()
+
+    def _validate_context_route_limits(self) -> None:
+        context_budget = self.config.runtime.context_token_budget
+        output_reserve = self.config.runtime.output_token_reserve
+        for route in self._context_route_limits():
+            if (
+                route.context_window_tokens is not None
+                and context_budget > route.context_window_tokens
+            ):
+                raise ValueError(
+                    "runtime.context_token_budget cannot exceed effective Provider "
+                    f"context capability for {route.provider}:{route.model}"
+                )
+            if (
+                route.max_output_tokens is not None
+                and output_reserve > route.max_output_tokens
+            ):
+                raise ValueError(
+                    "runtime.output_token_reserve cannot exceed effective Provider "
+                    f"output capability for {route.provider}:{route.model}"
+                )
+
+    def _context_accounting_session(
+        self,
+        context: RunContext,
+        *,
+        routes,
+        tool_manifest_hash: str,
+    ) -> ContextAccountingSession:
+        def event_sink(event, route, sequence, details):
+            self.state_store.record_provider_event(
+                run_id=context.run_id,
+                provider=route.provider,
+                event=event,
+                attempt=sequence,
+                details=details,
+            )
+
+        session = ContextAccountingSession(
+            self.context_accountant,
+            routes=self._context_route_limits(routes),
+            configured_context_limit_tokens=self.config.runtime.context_token_budget,
+            max_output_reserve_tokens=self.config.runtime.output_token_reserve,
+            event_sink=event_sink,
+            tool_manifest_hash=tool_manifest_hash,
+        )
+        context.bind_context_accounting(session)
+        return session
 
     def _build_code_execution_provider(self):
         return build_code_execution_provider(self.config.code_execution)
@@ -276,7 +366,7 @@ class EduAgentService:
             value = getattr(capabilities, "tool_calling", None)
             if value is not None:
                 return bool(value)
-        routes = self.engine.begin_turn_routes()
+        routes = self._begin_turn_routes()
         if routes:
             value = getattr(getattr(routes[0], "capabilities", None), "tool_calling", None)
             if value is not None:
@@ -456,7 +546,41 @@ class EduAgentService:
             "memory_ids": [],
             "checkpoint_id": None,
             "compacted_messages": 0,
+            "breakdown": None,
+            "accounting": [],
         }
+
+    def _failure_context_payload(self, context: RunContext) -> dict:
+        payload = self._default_turn_context()
+        accounting = context.context_accounting
+        if accounting is None:
+            return payload
+        records = accounting.records()
+        payload["accounting"] = records
+        for record in reversed(records):
+            breakdown = record.get("breakdown")
+            if isinstance(breakdown, dict):
+                payload["breakdown"] = breakdown
+                payload["estimated_tokens"] = int(
+                    breakdown.get("estimated_input_tokens", 0)
+                )
+                payload["omitted_messages"] = int(
+                    breakdown.get("omitted_messages", 0)
+                )
+                break
+        return payload
+
+    @staticmethod
+    def _call_context_engine(method, *args, context: RunContext):
+        """Pass run scope when supported while retaining the pre-R4.2 plugin API."""
+
+        parameters = inspect.signature(method).parameters.values()
+        accepts_context = any(
+            parameter.name == "context"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        return method(*args, context=context) if accepts_context else method(*args)
 
     def _plan_finalizer_components(self, context: RunContext):
         """Load the persisted Plan/Evidence verifiers for the final re-check."""
@@ -581,6 +705,8 @@ class EduAgentService:
         )
         if existing_finalizer is not None:
             return
+        if context_payload is None:
+            context_payload = self._failure_context_payload(context)
         error_text = f"{type(error).__name__}: {error}"
         self._finalize_turn(
             context,
@@ -619,6 +745,7 @@ class EduAgentService:
                     resume=resume,
                 )
         except (RunCancelled, CancellationRequested) as error:
+            context_payload = self._failure_context_payload(context)
             finalization = self._finalize_turn(
                 context,
                 result={
@@ -631,8 +758,12 @@ class EduAgentService:
                 },
                 stop_reason="interrupted",
                 error=str(error),
+                context_payload=context_payload,
             )
-            return self._chat_result_from_finalization(finalization)
+            return self._chat_result_from_finalization(
+                finalization,
+                context_payload=context_payload,
+            )
         except FencingTokenRejected:
             raise
         except Exception as error:
@@ -650,9 +781,17 @@ class EduAgentService:
         session_id = context.session_id
         context.check_control("turn.start")
         context.emit_run_event(RunEventType.RUN_PHASE.value, {"phase": "planning"})
-        routes = self.engine.begin_turn_routes()
+        routes = self._begin_turn_routes()
+        route_limits = self._context_route_limits(routes)
         for index, route in enumerate(routes):
             details = route.to_event()
+            effective = route_limits[index]
+            details["capabilities"] = {
+                **details.get("capabilities", {}),
+                "context_window_tokens": effective.context_window_tokens,
+                "max_output_tokens": effective.max_output_tokens,
+                "tokenizer": effective.tokenizer,
+            }
             details["route_role"] = "primary" if index == 0 else "fallback"
             details["selection_reason"] = (
                 "configured_primary"
@@ -727,7 +866,8 @@ class EduAgentService:
                 item for item in run_messages if item.get("role") in {"assistant", "tool"}
             ]
         compaction = (
-            self.context_engine.compact_if_needed(
+            self._call_context_engine(
+                self.context_engine.compact_if_needed,
                 session_id,
                 history,
                 context=context,
@@ -736,12 +876,25 @@ class EduAgentService:
             else None
         )
         if compaction and compaction.compacted_messages:
+            context.emit_run_event(
+                RunEventType.CONTEXT_COMPACTED.value,
+                {
+                    "checkpoint_id": compaction.checkpoint_id,
+                    "compacted_messages": compaction.compacted_messages,
+                    "estimated_tokens_before": compaction.estimated_tokens_before,
+                    "estimated_tokens_after": compaction.estimated_tokens_after,
+                },
+            )
             history = self.state_store.get_messages(
                 session_id,
                 limit=None,
             )
         checkpoint_summary = (
-            self.context_engine.checkpoint_summary(session_id)
+            self._call_context_engine(
+                self.context_engine.checkpoint_summary,
+                session_id,
+                context=context,
+            )
             if self.context_engine is not None
             else None
         )
@@ -750,12 +903,28 @@ class EduAgentService:
             if self.config.memory.enabled
             else None
         )
+        policy = self._execution_policy()
+        manifest = _select_tool_manifest(
+            self.tools_provider,
+            context,
+            policy,
+            model_tool_calling=self._model_supports_tool_calling(),
+        )
+        context.bind_tool_manifest(manifest)
+        frozen_tools = manifest.to_openai_tools()
+        accounting = self._context_accounting_session(
+            context,
+            routes=routes,
+            tool_manifest_hash=manifest.manifest_hash,
+        )
         snapshot = self.context_manager.prepare(
             system_prompt=self.system_prompt,
             history=history,
             user_message=message,
             memory_items=memory_snapshot.items if memory_snapshot else [],
             context_checkpoint=checkpoint_summary,
+            tools=frozen_tools,
+            accounting=accounting,
         )
         agent_messages = [*snapshot.messages, *resumed_protocol_messages]
         if not resume or not self.state_store.get_run_messages(context.run_id):
@@ -772,14 +941,6 @@ class EduAgentService:
             omitted_messages=snapshot.omitted_messages,
             context=context,
         )
-        policy = self._execution_policy()
-        manifest = _select_tool_manifest(
-            self.tools_provider,
-            context,
-            policy,
-            model_tool_calling=self._model_supports_tool_calling(),
-        )
-        context.bind_tool_manifest(manifest)
         executor = PolicyToolExecutor(
             self.tools_provider,
             policy=policy,
@@ -794,6 +955,10 @@ class EduAgentService:
             "memory_ids": memory_snapshot.ids if memory_snapshot else [],
             "checkpoint_id": compaction.checkpoint_id if compaction else None,
             "compacted_messages": compaction.compacted_messages if compaction else 0,
+            "breakdown": (
+                snapshot.breakdown.to_trace() if snapshot.breakdown is not None else None
+            ),
+            "accounting": accounting.records(),
         }
         try:
             result = run_agent(
@@ -826,7 +991,9 @@ class EduAgentService:
                 tool_call_timeout_seconds=(
                     self.config.runtime.tool_call_timeout_seconds
                 ),
+                context_accounting=accounting,
             )
+            context_payload["accounting"] = accounting.records()
             context.check_control("messages.before_final_commit")
             context.emit_run_event(
                 RunEventType.RUN_PHASE.value,
@@ -852,6 +1019,7 @@ class EduAgentService:
                 context_payload=context_payload,
             )
         except (RunCancelled, CancellationRequested) as error:
+            context_payload["accounting"] = accounting.records()
             finalization = self._finalize_turn(
                 context,
                 result={
@@ -873,6 +1041,7 @@ class EduAgentService:
         except FencingTokenRejected:
             raise
         except Exception as error:
+            context_payload["accounting"] = accounting.records()
             # A failure raised by a finalizer step is a deliberate recovery
             # boundary.  Do not immediately start a second finalizer from
             # this worker; the persisted cursor is for the next owner.

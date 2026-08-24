@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R3.6
-- next_prompt: R4.1
+- last_completed_prompt: R4.2
+- next_prompt: R4.3
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
-- stage_gate: passed
-- stage_gate_reason: R0-R3 顶层门禁均 passed；16 工具契约、冻结 Manifest、Canonical Provider、参数 corpus、安全有界只读并发以及 plugin/MCP 信任与断线边界均通过专项、全量回归、MCP demo 和完整 Stage 8 验收
+- stage_gate: in_progress
+- stage_gate_reason: R0-R3 顶层门禁均 passed，R4.1-R4.2 的 Context Accounting、Artifact-first compaction 与 checkpoint provenance 已通过；R4 仍需完成压缩反抖动/overflow recovery、全树预算、lifecycle/drain 及备份恢复后才能收口
 
 ## Baseline Reproduction
 
@@ -977,3 +977,85 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   幂等/outbox/补偿映射留给 L1 `TeachingPlatformProvider`。
 - gate: `R3 passed`；R0-R3 顶层 stage gate 为 `passed`。
 - next: R4.1，读取本交接并只实现可解释 Context Accounting；不得在本 R3.6 会话提前开始上下文压缩优化。
+
+### R4.1 - 2026-08-23
+
+- commit/evidence: 前置 `R3 gate=passed` 已由 R3.6 源码、交接和 Stage 8 证据共同确认；会话从与
+  `origin/main` 同步且工作区干净的 `1e70a5a20554f18b913c3ddd6ff80bad1303efe7` 开始。本次未创建本地
+  提交或推送，未覆盖用户既有改动。
+- prior accounting: 起始 `ContextManager` 将 system、history 和 current user 各消息序列化后按
+  `max(1, len(JSON) // 4)` 累加；tool schema 完全未计入，也没有 output reserve。memory/checkpoint 被拼入
+  current user，Plan/Evidence 没有独立口径，tool result 仅作为 history 内消息；`ContextEngine` 的压缩触发也复用
+  同一个近似值。Provider adapter 另有局部 `len(bytes)/4` 检查，不能形成请求级可解释结算。
+- accounting: 新增冻结 `ContextBreakdown`、`ContextSettlement` 和 turn-bound `ContextAccountingSession`；分别记录
+  system prompt、冻结 ToolManifest schema、普通 history、当前原始 user turn、Plan/Evidence、tool results、
+  memory/checkpoint、协议开销及最大输出预留。分类之和严格等于 estimated input，input 加 reserve 严格等于总预留；
+  system/tool schema 另存 byte count、SHA-256 与 Manifest hash，不保存完整 prompt。history 截断继续以完整 assistant
+  multi-call + 全部 result 为原子组，system bytes 在准备后逐字节复验。
+- tokenizer/settlement: 新增窄 `TokenizerRegistry`；进程已注册 tokenizer 和可选的现有 `tiktoken` 优先用于请求前计数，
+  未知/不可用模型使用固定版本 `edu-agent-conservative@2026-08-23.v1`，不新增依赖或模型矩阵。估算包含显式安全系数，
+  Provider 返回的 input/output/total usage 用于结算 absolute error/percentage error，并按冻结 route identity、model 和
+  tokenizer 版本隔离，只向更保守方向校准；usage 缺失明确标记 `estimated`，fallback usage 按 `fallback_used` 或返回
+  model 选择结算 route。
+- route/output contract: `ProviderCapabilities`、`ResolvedRoute` 和 request requirements 现在携带 context window、最大输出
+  与 tokenizer 标识；有效能力取 route/adapter 的较小上限。`qwen-plus` 配置上界固定为 context `131072`、output
+  `8192`；显式 fallback 必须声明 context/output，AppConfig 和 Service 均拒绝 runtime budget/reserve 超过 Provider
+  能力。Chat Completions 写入 `max_tokens`，Responses 写入 `max_output_tokens`，同步/流式/fallback 全链路传播同一 reserve。
+- runtime/trace/error: Service 在首次 context prepare 前冻结 Manifest，并在 planner 和 Agent 每次模型请求前按每条冻结
+  route 重新核算，响应或异常后结算 usage。breakdown、决策、估算误差和版本化元数据经中心分类器脱敏后写入 Provider
+  Trace 与 finalizer context；新增 token 数值字段保持数值，tokenizer 标识仅按精确白名单保留。当前 user turn 自身加输出
+  预留即超限时抛出 `CurrentUserInputTooLarge`；同步 API 返回 `413 CURRENT_USER_INPUT_TOO_LARGE`，已接受的 SSE 以同一
+  专用 code 终止且持久 request envelope 记录 `413`。固定 system、ToolManifest schema 或注入导致的超限仍是普通
+  context budget error，不会删减固定内容强行发送。
+- scope/config/migrations: `config.example.toml` 增加 primary/fallback context/output/tokenizer 示例与
+  `runtime.output_token_reserve`；未新增环境变量、依赖或数据库 migration。R4.1 未改变摘要内容、checkpoint schema、
+  Artifact 策略或压缩阈值；`context_engine` 明确保留 R4.1 前的 `len(JSON)//4` 压缩触发口径。未实现 Provider overflow
+  retry，相关策略留给 R4.3。
+- verification: context/provider/agent/Plan 专项分组 `172 passed (2.63s)`；恢复、RAG legacy engine 与新增 accounting
+  联合回归 `34 passed (1.53s)`；全量离线 pytest `572 passed (31.69s)`。全仓 Ruff、`uv lock --check`、
+  `uv pip check` 和 `git diff --check` 通过。R4.1 不是阶段收口会话，按通用协议未重复运行完整
+  `zsh scripts/accept_stage8.sh`。
+- not_verified: 未访问公网、真实模型/Provider、真实 tokenizer 服务、真实教学平台或 GitHub-hosted CI；Provider usage、
+  fallback model alias 和 context limits 由离线 wire/fixture 验证。可选 `tiktoken` 不在锁定依赖中，缺失时按合同进入
+  版本化保守 estimator，而不是运行时下载词表。
+- residual_risks: 校准目前是进程内、按冻结 route identity 隔离的保守因子，进程重启后从版本化基线重新开始；真实
+  Provider 若不返回 usage 只能保留 estimated 口径。大 tool result 外置与 checkpoint provenance 属于 R4.2；压缩反抖动、
+  fidelity 和单次 overflow recovery 属于 R4.3，均未提前实现。
+- gate: `R4.1 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
+- next: R4.2，读取本交接并升级压缩前 Artifact 外置和 checkpoint provenance；保持现有压缩触发阈值，不处理
+  Provider context overflow。
+
+### R4.2 - 2026-08-24
+
+- commit/evidence: 会话继续基于尚未提交的 R4.1 工作区，当前 HEAD 与 `origin/main` 均为
+  `1e70a5a20554f18b913c3ddd6ff80bad1303efe7`；本次未创建提交或推送，也未回退 R4.1 改动。
+- artifact-first compaction: 压缩触发后先扫描持久 active history，将超过单结果预算的 tool result 写入既有
+  `ArtifactStore`。模型消息使用 `edu-agent.scoped-artifact.v1` typed reference，携带 Artifact id/kind/SHA-256/大小、
+  原始数据 classification、PII/凭据/私有路径脱敏 preview、原长度和必要 `ok/error/meta` 回执；不再暴露服务端
+  `artifact_path`。Artifact 仍按 tenant/actor/session scope、文件权限和完整 hash 读取，没有新增第二套 blob store。
+- preservation/selection: checkpoint 选择支持非连续 sequence，但 assistant multi-call 与全部 tool result 仍是原子组；
+  system、当前 run、近期消息、未完成 Plan/step、审批与 operation receipt、citation、Artifact ref、显式用户约束、
+  spill 失败和未配对工具组均进入显式保留清单。选择前先验证 session/actor/tenant，阻断跨 scope 读取或 Artifact 外置；
+  旧消息仅置 `active=0` 并写 `compaction_id`，可按精确 sequence 和 Artifact 内容恢复。
+- checkpoint provenance: 新 schema v2 保存 source 首尾与完整 sequence 清单、逐消息及整体 SHA-256、压缩策略和
+  estimator 版本、summary SHA-256、Token before/after、保留项、Artifact/citation/operation 引用、创建 run、父 checkpoint
+  与父 summary hash。每次读取和恢复都复验 scope、创建 run、source/summary/parent hash、软归档状态、Artifact 文件
+  hash/owner/session 及 operation owner/payload hash；缺失、篡改、未来 schema 或 scope 不符返回结构化
+  `CONTEXT_CHECKPOINT_*`，写 denied audit，并停止答案生成。相同 source hash 的重复 checkpoint 幂等返回既有记录。
+- compatibility/API: `013_context_checkpoint_provenance` 将 SQLite `user_version` 提升到 13，幂等增加 provenance 列与
+  source 唯一索引，并为旧范围型 checkpoint 回填 scope、sequence/source hash、summary hash、版本和 Token after；旧记录
+  保持 schema v1 兼容读取。Service 对 R4.2 前不接受 `context=` 的自定义 `ContextEngine` 签名保持兼容；同步 HTTP、SSE
+  和持久 API request error 均保留 checkpoint 结构化 code。共享 CI provenance path marker 回归已恢复。
+- policy/config: 压缩触发阈值和 `legacy-json-chars-div4` 判定口径未改变；未新增配置、环境变量或依赖。没有实现
+  trigger/release 反抖动、摘要保真评测、Provider context overflow 识别/重试或全树预算，避免提前进入 R4.3/R4.4。
+- verification: R4.2 核心、API 及 runtime/CI provenance 联合回归 `36 passed (3.56s)`；artifact/context/state/security、
+  recovery、tool message 与 scope 组合专项 `230 passed (7.54s)`；受限沙箱全量为 `569 passed, 13 failed`，其中 12 项
+  为 `127.0.0.1:0` bind 禁止，1 项共享 path marker 回归已修复。获准回环环境最终全量离线 pytest
+  `586 passed (32.73s)`。全仓 Ruff、`uv lock --check`、`uv pip check` 和 `git diff --check` 通过。
+- not_verified: 未访问公网、真实模型/Provider、真实教学平台、GitHub-hosted CI 或 Docker/Jobe；未运行阶段收口专用
+  `zsh scripts/accept_stage8.sh`，因为 R4.2 是普通切片且 R4 gate 尚未收口。Artifact 恢复与 tamper/scope 故障均由本地
+  SQLite/文件 fault injection 验证。
+- residual_risks: 当前摘要仍为有损确定性文本，父 checkpoint 验证成本随链长增长；trigger/release 反抖动、保真集和
+  单次 Provider overflow recovery 留给 R4.3。Artifact retention/GC 与备份恢复关系留给 R4.6。
+- gate: `R4.2 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
+- next: R4.3，读取本交接并实现压缩反抖动、摘要保真评测与至多一次同 route Provider context overflow recovery。

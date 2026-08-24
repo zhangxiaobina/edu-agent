@@ -33,15 +33,29 @@ SCOPE_KEYS = frozenset({
 })
 METRIC_KEYS = frozenset({
     "accepted_prediction_tokens", "audio_tokens", "cached_tokens",
+    "actual_input_tokens", "actual_minus_estimate_tokens", "actual_output_tokens",
+    "actual_total_tokens", "available_input_tokens", "base_estimated_input_tokens",
     "completion_tokens", "completion_tokens_details", "context_tokens",
-    "estimated_tokens", "fencing_token", "input_tokens", "input_tokens_details",
-    "max_tokens", "output_tokens", "output_tokens_details", "prompt_tokens",
+    "configured_context_limit_tokens", "current_user_turn_tokens",
+    "effective_context_limit_tokens", "estimated_input_tokens",
+    "estimated_output_reserve_tokens", "estimated_tokens", "fencing_token",
+    "history_message_tokens", "input_tokens", "input_tokens_details",
+    "max_output_reserve_tokens", "max_tokens", "memory_checkpoint_tokens",
+    "output_tokens", "output_tokens_details", "plan_evidence_tokens",
+    "prompt_tokens", "protocol_overhead_tokens", "provider_context_limit_tokens",
+    "provider_max_output_tokens", "requested_tokenizer",
     "prompt_tokens_details", "reasoning_tokens", "rejected_prediction_tokens",
-    "token_count", "total_tokens", "tokens",
+    "system_prompt_tokens", "token_count", "tokenizer_fallback_reason",
+    "tool_result_tokens", "tool_schema_tokens", "total_reserved_tokens",
+    "total_tokens", "tokens",
     "model_calls", "max_model_calls", "tool_calls", "max_tool_calls",
     "duration_ms", "size_bytes", "attempt", "attempt_count", "sequence",
 })
-_STRICT_METRIC_KEYS = METRIC_KEYS - {"tool_calls"}
+_STRICT_METRIC_KEYS = METRIC_KEYS - {
+    "requested_tokenizer",
+    "tokenizer_fallback_reason",
+    "tool_calls",
+}
 CREDENTIAL_KEYS = frozenset({
     "access_token", "api_key", "apikey", "approval_secret", "auth",
     "authorization", "client_secret", "cookie", "jwt", "key_material",
@@ -55,6 +69,10 @@ PII_KEYS = frozenset({
 _CREDENTIAL_PARTS = ("password", "passwd", "secret", "token", "cookie", "authorization")
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _PHONE = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
+_PRIVATE_PATH_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9:])/(?:Users|home|private|tmp|var/folders)/[^\s\"'<>]*"),
+    re.compile(r"(?i)\b[A-Z]:\\(?:Users|Documents and Settings|Temp)\\[^\s\"'<>]*"),
+)
 _VALUE_PATTERNS = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
     re.compile(r"\b(?:sk|ghp|github_pat|xox[baprs]|pypi|npm|hf)[-_][A-Za-z0-9_.-]{8,}\b"),
@@ -81,7 +99,13 @@ def classify_key(key: Any) -> DataClass:
     return DataClass.BUSINESS
 
 
-def redact_text(value: str, *, include_pii: bool = False, literal_secrets: tuple[str, ...] = ()) -> str:
+def redact_text(
+    value: str,
+    *,
+    include_pii: bool = False,
+    include_private_paths: bool = False,
+    literal_secrets: tuple[str, ...] = (),
+) -> str:
     redacted = value
     for secret in literal_secrets:
         if secret:
@@ -91,6 +115,9 @@ def redact_text(value: str, *, include_pii: bool = False, literal_secrets: tuple
     if include_pii:
         redacted = _EMAIL.sub(REDACTED, redacted)
         redacted = _PHONE.sub(REDACTED, redacted)
+    if include_private_paths:
+        for pattern in _PRIVATE_PATH_PATTERNS:
+            redacted = pattern.sub(REDACTED, redacted)
     return redacted
 
 
@@ -98,6 +125,7 @@ def _redact_metric(
     value: Any,
     *,
     include_pii: bool,
+    include_private_paths: bool,
     literal_secrets: tuple[str, ...],
 ) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
@@ -107,6 +135,7 @@ def _redact_metric(
             str(key): _redact_metric(
                 item,
                 include_pii=include_pii,
+                include_private_paths=include_private_paths,
                 literal_secrets=literal_secrets,
             )
             for key, item in value.items()
@@ -116,6 +145,7 @@ def _redact_metric(
             _redact_metric(
                 item,
                 include_pii=include_pii,
+                include_private_paths=include_private_paths,
                 literal_secrets=literal_secrets,
             )
             for item in value
@@ -123,9 +153,20 @@ def _redact_metric(
     return REDACTED
 
 
-def redact(value: Any, *, include_pii: bool = False, literal_secrets: tuple[str, ...] = ()) -> Any:
+def redact(
+    value: Any,
+    *,
+    include_pii: bool = False,
+    include_private_paths: bool = False,
+    literal_secrets: tuple[str, ...] = (),
+) -> Any:
     if isinstance(value, str):
-        return redact_text(value, include_pii=include_pii, literal_secrets=literal_secrets)
+        return redact_text(
+            value,
+            include_pii=include_pii,
+            include_private_paths=include_private_paths,
+            literal_secrets=literal_secrets,
+        )
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
@@ -137,24 +178,47 @@ def redact(value: Any, *, include_pii: bool = False, literal_secrets: tuple[str,
                     _redact_metric(
                         item,
                         include_pii=include_pii,
+                        include_private_paths=include_private_paths,
                         literal_secrets=literal_secrets,
                     )
                     if normalize_key(key) in _STRICT_METRIC_KEYS
                     else redact(
                         item,
                         include_pii=include_pii,
+                        include_private_paths=include_private_paths,
                         literal_secrets=literal_secrets,
                     )
                 )
             elif category is DataClass.CREDENTIAL or (include_pii and category is DataClass.STUDENT_PII):
                 result[str(key)] = REDACTED
             else:
-                result[str(key)] = redact(item, include_pii=include_pii, literal_secrets=literal_secrets)
+                result[str(key)] = redact(
+                    item,
+                    include_pii=include_pii,
+                    include_private_paths=include_private_paths,
+                    literal_secrets=literal_secrets,
+                )
         return result
     if isinstance(value, list):
-        return [redact(item, include_pii=include_pii, literal_secrets=literal_secrets) for item in value]
+        return [
+            redact(
+                item,
+                include_pii=include_pii,
+                include_private_paths=include_private_paths,
+                literal_secrets=literal_secrets,
+            )
+            for item in value
+        ]
     if isinstance(value, tuple):
-        return tuple(redact(item, include_pii=include_pii, literal_secrets=literal_secrets) for item in value)
+        return tuple(
+            redact(
+                item,
+                include_pii=include_pii,
+                include_private_paths=include_private_paths,
+                literal_secrets=literal_secrets,
+            )
+            for item in value
+        )
     return value
 
 
@@ -165,6 +229,8 @@ def contains_sensitive(value: Any, *, include_pii: bool = True, secrets: tuple[s
     if any(pattern.search(serialized) for pattern in _VALUE_PATTERNS):
         return True
     if include_pii and (_EMAIL.search(serialized) or _PHONE.search(serialized)):
+        return True
+    if any(pattern.search(serialized) for pattern in _PRIVATE_PATH_PATTERNS):
         return True
 
     def walk(item: Any) -> bool:
@@ -181,8 +247,45 @@ def contains_sensitive(value: Any, *, include_pii: bool = True, secrets: tuple[s
     return walk(value)
 
 
+def content_classifications(value: Any) -> tuple[str, ...]:
+    """Return deterministic data classes present in a value without exposing values."""
+
+    found: set[DataClass] = set()
+
+    def walk(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                category = classify_key(key)
+                found.add(category)
+                walk(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+        elif isinstance(item, str):
+            if any(pattern.search(item) for pattern in _VALUE_PATTERNS):
+                found.add(DataClass.CREDENTIAL)
+            if _EMAIL.search(item) or _PHONE.search(item):
+                found.add(DataClass.STUDENT_PII)
+            if any(pattern.search(item) for pattern in _PRIVATE_PATH_PATTERNS):
+                found.add(DataClass.PRIVATE_PATH)
+
+    walk(value)
+    if not found:
+        found.add(DataClass.BUSINESS)
+    priority = {
+        DataClass.CREDENTIAL: 0,
+        DataClass.STUDENT_PII: 1,
+        DataClass.PRIVATE_PATH: 2,
+        DataClass.OWNER_SCOPE: 3,
+        DataClass.FREE_TEXT: 4,
+        DataClass.BUSINESS: 5,
+        DataClass.METRIC: 6,
+    }
+    return tuple(item.value for item in sorted(found, key=priority.__getitem__))
+
+
 __all__ = [
     "CREDENTIAL_KEYS", "DataClass", "METRIC_KEYS", "PII_KEYS", "REDACTED",
-    "SCOPE_KEYS", "classify_key", "contains_sensitive", "normalize_key", "redact",
-    "redact_text",
+    "SCOPE_KEYS", "classify_key", "contains_sensitive", "content_classifications",
+    "normalize_key", "redact", "redact_text",
 ]

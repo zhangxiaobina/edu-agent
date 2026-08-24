@@ -93,6 +93,7 @@ class RunContext:
     _tool_manifest_hash_override: str | None = field(default=None, repr=False, compare=False)
     _provider_route: object | None = field(default=None, repr=False, compare=False)
     _trace_context: object | None = field(default=None, repr=False, compare=False)
+    _context_accounting: object | None = field(default=None, repr=False, compare=False)
     _argument_retry_calls: set[str] = field(default_factory=set, repr=False, compare=False)
     _argument_retry_lock: threading.Lock = field(
         default_factory=threading.Lock,
@@ -257,6 +258,15 @@ class RunContext:
                 run_id=self.run_id,
             )
         self._trace_context = frozen
+
+    @property
+    def context_accounting(self):
+        return self._context_accounting
+
+    def bind_context_accounting(self, accounting) -> None:
+        if self._context_accounting is not None and self._context_accounting is not accounting:
+            raise RuntimeError("run context accounting session cannot be replaced")
+        self._context_accounting = accounting
 
     def for_tool_worker(self, *, cancellation_token: CancellationToken) -> RunContext:
         """Build an explicit worker context without relying on thread-local state."""

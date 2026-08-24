@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from ipaddress import ip_address
@@ -12,9 +13,11 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
 
 from .base import Engine, EngineResponse
+from ..tokenization import DEFAULT_TOKENIZER_REGISTRY
 from ..runtime.cancellation import (
     CancellationToken,
     accepts_cancellation_token,
+    accepts_keyword_argument,
     call_with_cancellation,
 )
 
@@ -58,6 +61,7 @@ class ProviderCapabilities:
     streaming: bool = False
     context_window_tokens: int | None = None
     max_output_tokens: int | None = None
+    tokenizer: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("tool_calling", "structured_output", "usage", "streaming"):
@@ -69,8 +73,19 @@ class ProviderCapabilities:
                 isinstance(value, bool) or not isinstance(value, int) or value <= 0
             ):
                 raise ValueError(f"provider capability {name} 必须大于 0")
+        if (
+            self.context_window_tokens is not None
+            and self.max_output_tokens is not None
+            and self.max_output_tokens > self.context_window_tokens
+        ):
+            raise ValueError("provider capability max_output_tokens 不能超过 context_window_tokens")
+        if self.tokenizer is not None and (
+            not isinstance(self.tokenizer, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", self.tokenizer) is None
+        ):
+            raise ValueError("provider capability tokenizer 必须是稳定标识符")
 
-    def to_event(self) -> dict[str, bool | int | None]:
+    def to_event(self) -> dict[str, bool | int | str | None]:
         return {
             "tool_calling": self.tool_calling,
             "structured_output": self.structured_output,
@@ -78,6 +93,7 @@ class ProviderCapabilities:
             "streaming": self.streaming,
             "context_window_tokens": self.context_window_tokens,
             "max_output_tokens": self.max_output_tokens,
+            "tokenizer": self.tokenizer,
         }
 
 
@@ -136,6 +152,7 @@ class ProviderCapabilityError(ValueError):
         labels = {
             "context_window": "context window",
             "context_window_unknown": "context window unknown",
+            "max_output_tokens_unknown": "max output tokens unknown",
             "structured_output": "structured output",
             "tool_calling": "不支持 tool calling",
         }
@@ -143,20 +160,33 @@ class ProviderCapabilityError(ValueError):
         super().__init__("provider route capability 不兼容: " + rendered)
 
 
-def estimate_request_tokens(messages: list[dict], tools: list[dict]) -> int:
-    """Return the shared conservative byte-based estimate used for route checks."""
+def estimate_request_tokens(
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    model: str | None = None,
+    tokenizer: str | None = None,
+) -> int:
+    """Return the shared tokenizer-first conservative estimate for route checks."""
     payload = json.dumps(
         {"messages": messages, "tools": tools},
         ensure_ascii=False,
         default=str,
+        sort_keys=True,
         separators=(",", ":"),
-    ).encode("utf-8")
-    return max(1, (len(payload) + 3) // 4)
+    )
+    resolution = DEFAULT_TOKENIZER_REGISTRY.resolve(model=model, tokenizer=tokenizer)
+    safety = 1.02 if resolution.method == "model_tokenizer" else 1.08
+    return max(1, math.ceil((resolution.counter.count(payload) + 4) * safety))
 
 
 def infer_request_requirements(
     messages: list[dict],
     tools: list[dict],
+    *,
+    model: str | None = None,
+    tokenizer: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> ProviderRequestRequirements:
     tool_history = any(
         isinstance(message, Mapping)
@@ -180,8 +210,13 @@ def infer_request_requirements(
         # providers that omit it. Stream entry points elevate the streaming bit.
         usage=False,
         streaming=False,
-        context_tokens=estimate_request_tokens(messages, tools),
-        max_output_tokens=None,
+        context_tokens=estimate_request_tokens(
+            messages,
+            tools,
+            model=model,
+            tokenizer=tokenizer,
+        ),
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -206,6 +241,7 @@ def effective_capabilities(
             route.max_output_tokens,
             adapter.max_output_tokens,
         ),
+        tokenizer=route.tokenizer or adapter.tokenizer,
     )
 
 
@@ -215,6 +251,7 @@ def capability_gaps(
     *,
     api_mode: ApiMode,
     require_known_context: bool = False,
+    require_known_output: bool = False,
 ) -> tuple[str, ...]:
     gaps: list[str] = []
     if api_mode not in requirements.api_modes:
@@ -223,14 +260,19 @@ def capability_gaps(
         if getattr(requirements, name) and not getattr(capabilities, name):
             gaps.append(name)
     context_limit = capabilities.context_window_tokens
-    if context_limit is not None and requirements.context_tokens > context_limit:
+    reserved_context = requirements.context_tokens + (requirements.max_output_tokens or 0)
+    if context_limit is not None and reserved_context > context_limit:
         gaps.append("context_window")
     if require_known_context and context_limit is None:
         gaps.append("context_window_unknown")
     requested_output = requirements.max_output_tokens
     output_limit = capabilities.max_output_tokens
-    if requested_output is not None and (
-        output_limit is None or requested_output > output_limit
+    if requested_output is not None and require_known_output and output_limit is None:
+        gaps.append("max_output_tokens_unknown")
+    if (
+        requested_output is not None
+        and output_limit is not None
+        and requested_output > output_limit
     ):
         gaps.append("max_output_tokens")
     return tuple(dict.fromkeys(gaps))
@@ -382,6 +424,7 @@ class ProviderAdapter(Protocol):
         tools: list[dict],
         *,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         ...
 
@@ -396,6 +439,7 @@ class ProviderStreamAdapter(ProviderAdapter, Protocol):
         *,
         attempt: int = 1,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         ...
 
@@ -617,12 +661,21 @@ class ProviderGateway:
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        max_output_tokens: int | None = None,
     ) -> ProviderRequestRequirements:
         """Validate one route without creating a client or issuing provider I/O."""
-        requirements = infer_request_requirements(messages, tools)
+        effective = self.capabilities_for(route)
+        requirements = infer_request_requirements(
+            messages,
+            tools,
+            model=route.model,
+            tokenizer=effective.tokenizer,
+            max_output_tokens=max_output_tokens,
+        )
         gaps = capability_gaps(
             requirements,
-            self.capabilities_for(route),
+            effective,
             api_mode=route.api_mode,
         )
         if gaps:
@@ -630,7 +683,13 @@ class ProviderGateway:
         adapter = self.adapter_for(route)
         validator = getattr(adapter, "validate_request", None)
         if callable(validator):
-            validator(route, messages, tools)
+            kwargs = {}
+            if max_output_tokens is not None and accepts_keyword_argument(
+                validator,
+                "max_output_tokens",
+            ):
+                kwargs["max_output_tokens"] = max_output_tokens
+            validator(route, messages, tools, **kwargs)
         return requirements
 
     def chat(
@@ -640,15 +699,29 @@ class ProviderGateway:
         tools: list[dict],
         *,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         """Dispatch one normalized synchronous request without changing Engine.chat."""
-        self.validate_request(route, messages, tools)
+        self.validate_request(
+            route,
+            messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
+        adapter_chat = self.adapter_for(route).chat
+        kwargs = {}
+        if max_output_tokens is not None and accepts_keyword_argument(
+            adapter_chat,
+            "max_output_tokens",
+        ):
+            kwargs["max_output_tokens"] = max_output_tokens
         return call_with_cancellation(
-            self.adapter_for(route).chat,
+            adapter_chat,
             route,
             messages,
             tools,
             cancellation_token=cancellation_token,
+            **kwargs,
         )
 
     def stream_events(
@@ -659,9 +732,15 @@ class ProviderGateway:
         *,
         attempt: int = 1,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         """Dispatch one validated provider event stream."""
-        self.validate_request(route, messages, tools)
+        self.validate_request(
+            route,
+            messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
         if not self.capabilities_for(route).streaming:
             raise ProviderCapabilityError(("streaming",))
         stream_events = getattr(self.adapter_for(route), "stream_events", None)
@@ -673,6 +752,11 @@ class ProviderGateway:
             and accepts_cancellation_token(stream_events)
         ):
             kwargs["cancellation_token"] = cancellation_token
+        if max_output_tokens is not None and accepts_keyword_argument(
+            stream_events,
+            "max_output_tokens",
+        ):
+            kwargs["max_output_tokens"] = max_output_tokens
         return stream_events(route, messages, tools, **kwargs)
 
     def begin_turn(self, spec: ProviderSpec) -> ResolvedRoute:
@@ -785,20 +869,37 @@ class GatewayEngine(Engine):
     def effective_capabilities(self) -> ProviderCapabilities:
         return self.gateway.capabilities_for(self.route)
 
+    def capabilities_for_route(self, route: ResolvedRoute) -> ProviderCapabilities:
+        return self.gateway.capabilities_for(route)
+
     def validate_request(
         self,
         messages: list[dict],
         tools: list[dict],
+        *,
+        max_output_tokens: int | None = None,
     ) -> ProviderRequestRequirements:
-        return self.gateway.validate_request(self.route, messages, tools)
+        return self.gateway.validate_request(
+            self.route,
+            messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
 
     def validate_request_on_route(
         self,
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        max_output_tokens: int | None = None,
     ) -> ProviderRequestRequirements:
-        return self.gateway.validate_request(route, messages, tools)
+        return self.gateway.validate_request(
+            route,
+            messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
 
     def chat_on_route(
         self,
@@ -807,12 +908,14 @@ class GatewayEngine(Engine):
         tools: list[dict],
         *,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         return self.gateway.chat(
             route,
             messages,
             tools,
             cancellation_token=cancellation_token,
+            max_output_tokens=max_output_tokens,
         )
 
     def stream_chat_on_route(
@@ -823,6 +926,7 @@ class GatewayEngine(Engine):
         *,
         attempt: int = 1,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         return self.gateway.stream_events(
             route,
@@ -830,6 +934,7 @@ class GatewayEngine(Engine):
             tools,
             attempt=attempt,
             cancellation_token=cancellation_token,
+            max_output_tokens=max_output_tokens,
         )
 
     def stream_chat(
@@ -839,6 +944,7 @@ class GatewayEngine(Engine):
         *,
         attempt: int = 1,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         return self.gateway.stream_events(
             self.route,
@@ -846,6 +952,7 @@ class GatewayEngine(Engine):
             tools,
             attempt=attempt,
             cancellation_token=cancellation_token,
+            max_output_tokens=max_output_tokens,
         )
 
     stream_events = stream_chat
@@ -856,12 +963,14 @@ class GatewayEngine(Engine):
         tools: list[dict],
         *,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         return self.gateway.chat(
             self.route,
             messages,
             tools,
             cancellation_token=cancellation_token,
+            max_output_tokens=max_output_tokens,
         )
 
 

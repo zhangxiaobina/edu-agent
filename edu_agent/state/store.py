@@ -11,6 +11,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+from .checkpoints import (
+    CHECKPOINT_ESTIMATOR_VERSION,
+    CHECKPOINT_SCHEMA_VERSION,
+    CHECKPOINT_STRATEGY_VERSION,
+    ContextCheckpointConflict,
+    ContextCheckpointValidationError,
+    canonical_json as _checkpoint_json,
+    decode_checkpoint,
+    initialize_context_checkpoint_schema,
+    message_from_row as _checkpoint_message_from_row,
+    sha256_text as _checkpoint_sha256,
+    source_digest as _checkpoint_source_digest,
+    source_hashes as _checkpoint_source_hashes,
+    validate_checkpoint,
+)
 from .journal import (
     _UNSET as _JOURNAL_UNSET,
     RunJournalFencingError,
@@ -47,7 +62,7 @@ from .turn_finalizer import (
 
 
 _UNSET = object()
-STATE_SCHEMA_VERSION = 12
+STATE_SCHEMA_VERSION = 13
 
 
 class SessionLeaseUnavailable(RuntimeError):
@@ -186,6 +201,23 @@ class StateStore:
                     last_sequence INTEGER NOT NULL,
                     source_messages INTEGER NOT NULL,
                     estimated_tokens_before INTEGER NOT NULL,
+                    estimated_tokens_after INTEGER,
+                    schema_version INTEGER NOT NULL DEFAULT 1,
+                    actor_id TEXT,
+                    tenant_id TEXT,
+                    created_run_id TEXT,
+                    source_sequences_json TEXT,
+                    source_hashes_json TEXT,
+                    source_sha256 TEXT,
+                    strategy_version TEXT,
+                    estimator_version TEXT,
+                    summary_sha256 TEXT,
+                    preserved_items_json TEXT,
+                    artifact_refs_json TEXT,
+                    citation_refs_json TEXT,
+                    operation_refs_json TEXT,
+                    parent_checkpoint_id TEXT,
+                    parent_summary_sha256 TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -668,6 +700,7 @@ class StateStore:
             initialize_run_journal_schema(connection, now=self.now_iso())
             initialize_agent_tool_message_schema(connection, now=self.now_iso())
             initialize_turn_finalizer_schema(connection, now=self.now_iso())
+            initialize_context_checkpoint_schema(connection, now=self.now_iso())
             connection.execute(
                 """
                 INSERT OR IGNORE INTO state_schema_migrations(version, applied_at)
@@ -1807,6 +1840,87 @@ class StateStore:
             messages.append(message)
         return messages
 
+    def get_message_records(
+        self,
+        session_id: str,
+        *,
+        include_compacted: bool = False,
+    ) -> list[dict]:
+        """Return message payloads with persistence metadata for checkpoint selection."""
+
+        active_clause = "" if include_compacted else "AND active=1"
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM messages
+                WHERE session_id=? {active_clause}
+                ORDER BY sequence ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return [
+            {**dict(row), **_checkpoint_message_from_row(row, include_sequence=True)}
+            for row in rows
+        ]
+
+    def replace_active_tool_message(
+        self,
+        session_id: str,
+        sequence: int,
+        *,
+        expected_content: str,
+        replacement_content: str,
+        context=None,
+    ) -> dict:
+        """Replace one active tool payload with its scoped Artifact reference."""
+
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if context is not None:
+                if context.session_id != session_id:
+                    raise PermissionError("tool message replacement session scope mismatch")
+                self._assert_fence(
+                    connection,
+                    context,
+                    boundary="context.artifact_externalize",
+                )
+            row = connection.execute(
+                "SELECT * FROM messages WHERE session_id=? AND sequence=?",
+                (session_id, sequence),
+            ).fetchone()
+            if row is None or row["role"] != "tool" or not bool(row["active"]):
+                raise ContextCheckpointConflict(
+                    "tool message changed before Artifact externalization",
+                    session_id=session_id,
+                    sequence=sequence,
+                )
+            if (row["content"] or "") != expected_content:
+                if (row["content"] or "") == replacement_content:
+                    return _checkpoint_message_from_row(row, include_sequence=True)
+                raise ContextCheckpointConflict(
+                    "tool message content changed before Artifact externalization",
+                    session_id=session_id,
+                    sequence=sequence,
+                )
+            connection.execute(
+                """
+                UPDATE messages SET content=?
+                WHERE session_id=? AND sequence=? AND active=1 AND content=?
+                """,
+                (replacement_content, session_id, sequence, expected_content),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise ContextCheckpointConflict(
+                    "tool message replacement lost a concurrent update",
+                    session_id=session_id,
+                    sequence=sequence,
+                )
+            updated = connection.execute(
+                "SELECT * FROM messages WHERE session_id=? AND sequence=?",
+                (session_id, sequence),
+            ).fetchone()
+        return _checkpoint_message_from_row(updated, include_sequence=True)
+
     def get_run_messages(self, run_id: str) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -1828,16 +1942,335 @@ class StateStore:
             messages.append(message)
         return messages
 
-    def latest_context_checkpoint(self, session_id: str) -> dict | None:
+    @staticmethod
+    def _checkpoint_reader_scope(
+        connection: sqlite3.Connection,
+        session_id: str,
+        *,
+        context=None,
+        actor_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> tuple[str, str]:
+        session = connection.execute(
+            "SELECT actor_id, tenant_id FROM sessions WHERE id=?",
+            (session_id,),
+        ).fetchone()
+        if session is None:
+            raise ContextCheckpointValidationError(
+                "scope_mismatch",
+                "checkpoint session does not exist",
+                session_id=session_id,
+            )
+        requested_actor = actor_id or getattr(context, "actor_id", None) or session["actor_id"]
+        requested_tenant = tenant_id or getattr(context, "tenant_id", None) or session["tenant_id"]
+        if context is not None and getattr(context, "session_id", None) != session_id:
+            raise ContextCheckpointValidationError(
+                "scope_mismatch",
+                "checkpoint reader session does not match run context",
+                session_id=session_id,
+            )
+        if requested_actor != session["actor_id"] or requested_tenant != session["tenant_id"]:
+            raise ContextCheckpointValidationError(
+                "scope_mismatch",
+                "checkpoint reader does not own the session",
+                session_id=session_id,
+            )
+        return requested_actor, requested_tenant
+
+    def _audit_checkpoint_failure(
+        self,
+        error: ContextCheckpointValidationError,
+        *,
+        actor_id: str,
+        tenant_id: str,
+    ) -> None:
+        if self.read_only:
+            return
+        self.record_audit_event(
+            actor_id=actor_id,
+            tenant_id=tenant_id,
+            action="context.checkpoint.validate",
+            resource=str(error.details.get("checkpoint_id") or error.details.get("session_id")),
+            decision="denied",
+            details={
+                "code": error.error_code,
+                "reason": error.reason,
+                **{
+                    key: value
+                    for key, value in error.details.items()
+                    if key in {
+                        "checkpoint_id",
+                        "session_id",
+                        "artifact_id",
+                        "operation_id",
+                        "field",
+                        "sequence",
+                        "error_class",
+                    }
+                },
+            },
+        )
+
+    def latest_context_checkpoint(
+        self,
+        session_id: str,
+        *,
+        context=None,
+        actor_id: str | None = None,
+        tenant_id: str | None = None,
+        verify: bool = True,
+    ) -> dict | None:
+        audit_actor = actor_id or getattr(context, "actor_id", None) or "unknown"
+        audit_tenant = tenant_id or getattr(context, "tenant_id", None) or "unknown"
+        try:
+            with self.connect() as connection:
+                resolved_actor, resolved_tenant = self._checkpoint_reader_scope(
+                    connection,
+                    session_id,
+                    context=context,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                )
+                audit_actor, audit_tenant = resolved_actor, resolved_tenant
+                row = connection.execute(
+                    """
+                    SELECT * FROM context_checkpoints
+                    WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                return (
+                    validate_checkpoint(
+                        connection,
+                        row,
+                        session_id=session_id,
+                        actor_id=resolved_actor,
+                        tenant_id=resolved_tenant,
+                    )
+                    if verify
+                    else decode_checkpoint(row)
+                )
+        except ContextCheckpointValidationError as error:
+            self._audit_checkpoint_failure(
+                error,
+                actor_id=audit_actor,
+                tenant_id=audit_tenant,
+            )
+            raise
+
+    def get_context_checkpoint(
+        self,
+        checkpoint_id: str,
+        *,
+        session_id: str,
+        context=None,
+        actor_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> dict | None:
+        audit_actor = actor_id or getattr(context, "actor_id", None) or "unknown"
+        audit_tenant = tenant_id or getattr(context, "tenant_id", None) or "unknown"
+        try:
+            with self.connect() as connection:
+                resolved_actor, resolved_tenant = self._checkpoint_reader_scope(
+                    connection,
+                    session_id,
+                    context=context,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                )
+                audit_actor, audit_tenant = resolved_actor, resolved_tenant
+                row = connection.execute(
+                    "SELECT * FROM context_checkpoints WHERE id=? AND session_id=?",
+                    (checkpoint_id, session_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                return validate_checkpoint(
+                    connection,
+                    row,
+                    session_id=session_id,
+                    actor_id=resolved_actor,
+                    tenant_id=resolved_tenant,
+                )
+        except ContextCheckpointValidationError as error:
+            self._audit_checkpoint_failure(
+                error,
+                actor_id=audit_actor,
+                tenant_id=audit_tenant,
+            )
+            raise
+
+    def context_checkpoint_state(self, session_id: str, *, context=None) -> dict:
+        """Return scoped durable state that compaction is required to preserve."""
+
         with self.connect() as connection:
-            row = connection.execute(
+            actor_id, tenant_id = self._checkpoint_reader_scope(
+                connection,
+                session_id,
+                context=context,
+            )
+            plans = connection.execute(
                 """
-                SELECT * FROM context_checkpoints
-                WHERE session_id=? ORDER BY created_at DESC LIMIT 1
+                SELECT id, run_id, status, goal FROM plans
+                WHERE session_id=? AND actor_id=? AND tenant_id=? AND status!='completed'
+                ORDER BY created_at, id
                 """,
-                (session_id,),
-            ).fetchone()
-        return dict(row) if row else None
+                (session_id, actor_id, tenant_id),
+            ).fetchall()
+            plan_ids = [row["id"] for row in plans]
+            steps = []
+            evidence = []
+            if plan_ids:
+                placeholders = ",".join("?" for _ in plan_ids)
+                steps = connection.execute(
+                    f"""
+                    SELECT plan_id, step_id, status, goal FROM plan_steps
+                    WHERE plan_id IN ({placeholders}) AND status!='completed'
+                    ORDER BY plan_id, position
+                    """,
+                    plan_ids,
+                ).fetchall()
+                evidence = connection.execute(
+                    f"""
+                    SELECT artifact_id, citation, operation_id FROM evidence
+                    WHERE plan_id IN ({placeholders}) AND status='accepted'
+                    ORDER BY id
+                    """,
+                    plan_ids,
+                ).fetchall()
+            operations = connection.execute(
+                """
+                SELECT operation_id, run_id, tool_call_id, status, payload_hash
+                FROM tool_operation_refs
+                WHERE session_id=? AND actor_id=? AND tenant_id=?
+                ORDER BY updated_at, operation_id
+                """,
+                (session_id, actor_id, tenant_id),
+            ).fetchall()
+            artifacts = connection.execute(
+                """
+                SELECT id, run_id, sha256, size_bytes, kind
+                FROM artifacts
+                WHERE session_id=? AND actor_id=? AND tenant_id=?
+                ORDER BY created_at, id
+                """,
+                (session_id, actor_id, tenant_id),
+            ).fetchall()
+        step_map: dict[str, list[dict]] = {}
+        for row in steps:
+            step_map.setdefault(row["plan_id"], []).append(
+                {
+                    "step_id": row["step_id"],
+                    "status": row["status"],
+                    "goal": row["goal"],
+                }
+            )
+        return {
+            "unfinished_plans": [
+                {
+                    "plan_id": row["id"],
+                    "run_id": row["run_id"],
+                    "status": row["status"],
+                    "goal": row["goal"],
+                    "steps": step_map.get(row["id"], []),
+                }
+                for row in plans
+            ],
+            "evidence": [dict(row) for row in evidence],
+            "operations": {row["operation_id"]: dict(row) for row in operations},
+            "artifacts": {row["id"]: dict(row) for row in artifacts},
+        }
+
+    def restore_context_checkpoint_messages(
+        self,
+        checkpoint_id: str,
+        *,
+        context,
+        artifact_store=None,
+    ) -> list[dict]:
+        checkpoint = self.get_context_checkpoint(
+            checkpoint_id,
+            session_id=context.session_id,
+            context=context,
+        )
+        if checkpoint is None:
+            raise ContextCheckpointValidationError(
+                "checkpoint_missing",
+                "context checkpoint does not exist",
+                checkpoint_id=checkpoint_id,
+                session_id=context.session_id,
+            )
+        sequences = checkpoint["source_sequences"]
+        if not sequences:
+            return []
+        placeholders = ",".join("?" for _ in sequences)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM messages
+                WHERE session_id=? AND sequence IN ({placeholders})
+                ORDER BY sequence
+                """,
+                (context.session_id, *sequences),
+            ).fetchall()
+        messages = [_checkpoint_message_from_row(row) for row in rows]
+        if artifact_store is None:
+            return messages
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            try:
+                payload = json.loads(message.get("content") or "")
+                reference = payload["data"]["artifact_ref"]
+                artifact_id = reference["artifact_id"]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            message["content"] = artifact_store.read_text(artifact_id, context=context)
+        return messages
+
+    @staticmethod
+    def _validate_tool_group_selection(rows, selected_sequences: set[int]) -> None:
+        index = 0
+        while index < len(rows):
+            row = rows[index]
+            if row["role"] == "assistant" and row["tool_calls_json"]:
+                try:
+                    calls = json.loads(row["tool_calls_json"])
+                except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    raise ContextCheckpointConflict(
+                        "assistant tool-call envelope is invalid",
+                        sequence=int(row["sequence"]),
+                    ) from error
+                call_ids = {
+                    item.get("id") for item in calls if isinstance(item, dict) and item.get("id")
+                }
+                group = [row]
+                matched: set[str] = set()
+                cursor = index + 1
+                while cursor < len(rows) and rows[cursor]["role"] == "tool":
+                    candidate = rows[cursor]
+                    if candidate["tool_call_id"] not in call_ids:
+                        break
+                    group.append(candidate)
+                    matched.add(candidate["tool_call_id"])
+                    cursor += 1
+                group_sequences = {int(item["sequence"]) for item in group}
+                selected = group_sequences & selected_sequences
+                if selected and (matched != call_ids or selected != group_sequences):
+                    raise ContextCheckpointConflict(
+                        "unpaired or partial tool group cannot be compacted",
+                        sequences=sorted(group_sequences),
+                    )
+                index = cursor
+                continue
+            if row["role"] == "tool" and int(row["sequence"]) in selected_sequences:
+                raise ContextCheckpointConflict(
+                    "orphan tool result cannot be compacted",
+                    sequence=int(row["sequence"]),
+                )
+            index += 1
 
     def compact_messages(
         self,
@@ -1846,55 +2279,210 @@ class StateStore:
         summary: str,
         message_count: int,
         estimated_tokens_before: int,
+        estimated_tokens_after: int | None = None,
         active_message_count: int | None = None,
+        source_sequences: list[int] | tuple[int, ...] | None = None,
+        strategy_version: str = CHECKPOINT_STRATEGY_VERSION,
+        estimator_version: str = CHECKPOINT_ESTIMATOR_VERSION,
+        preserved_items: list[dict] | None = None,
+        artifact_refs: list[dict] | None = None,
+        citation_refs: list[str] | None = None,
+        operation_refs: list[dict] | None = None,
+        parent_checkpoint_id: str | None = None,
         context=None,
     ) -> dict:
-        from ..runtime.security import redact_sensitive_text
+        audit_actor = getattr(context, "actor_id", None) or "unknown"
+        audit_tenant = getattr(context, "tenant_id", None) or "unknown"
+        if context is None:
+            with self.connect() as connection:
+                session = connection.execute(
+                    "SELECT actor_id, tenant_id FROM sessions WHERE id=?",
+                    (session_id,),
+                ).fetchone()
+            if session is not None:
+                audit_actor, audit_tenant = session["actor_id"], session["tenant_id"]
+        try:
+            return self._compact_messages_once(
+                session_id,
+                summary=summary,
+                message_count=message_count,
+                estimated_tokens_before=estimated_tokens_before,
+                estimated_tokens_after=estimated_tokens_after,
+                active_message_count=active_message_count,
+                source_sequences=source_sequences,
+                strategy_version=strategy_version,
+                estimator_version=estimator_version,
+                preserved_items=preserved_items,
+                artifact_refs=artifact_refs,
+                citation_refs=citation_refs,
+                operation_refs=operation_refs,
+                parent_checkpoint_id=parent_checkpoint_id,
+                context=context,
+            )
+        except ContextCheckpointValidationError as error:
+            self._audit_checkpoint_failure(
+                error,
+                actor_id=audit_actor,
+                tenant_id=audit_tenant,
+            )
+            raise
+
+    def _compact_messages_once(
+        self,
+        session_id: str,
+        *,
+        summary: str,
+        message_count: int,
+        estimated_tokens_before: int,
+        estimated_tokens_after: int | None = None,
+        active_message_count: int | None = None,
+        source_sequences: list[int] | tuple[int, ...] | None = None,
+        strategy_version: str = CHECKPOINT_STRATEGY_VERSION,
+        estimator_version: str = CHECKPOINT_ESTIMATOR_VERSION,
+        preserved_items: list[dict] | None = None,
+        artifact_refs: list[dict] | None = None,
+        citation_refs: list[str] | None = None,
+        operation_refs: list[dict] | None = None,
+        parent_checkpoint_id: str | None = None,
+        context=None,
+    ) -> dict:
+        from ..runtime.security import redact_sensitive, redact_sensitive_preview
 
         if message_count <= 0:
             raise ValueError("message_count 必须大于 0")
-        summary = redact_sensitive_text(summary)
+        if estimated_tokens_before < 0:
+            raise ValueError("estimated_tokens_before 不能为负数")
+        summary = str(redact_sensitive_preview(summary))
+        estimated_tokens_after = (
+            max(1, len(summary) // 4)
+            if estimated_tokens_after is None
+            else estimated_tokens_after
+        )
+        if estimated_tokens_after < 0:
+            raise ValueError("estimated_tokens_after 不能为负数")
+        preserved_items = redact_sensitive(preserved_items or [])
+        artifact_refs = redact_sensitive(artifact_refs or [])
+        citation_refs = [str(item) for item in (citation_refs or [])]
+        operation_refs = redact_sensitive(operation_refs or [])
         checkpoint_id = uuid.uuid4().hex
         now = _now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            actor_id, tenant_id = self._checkpoint_reader_scope(
+                connection,
+                session_id,
+                context=context,
+            )
             if context is not None:
                 self._assert_fence(connection, context, boundary="context.compact")
-            if active_message_count is not None:
-                actual_count = connection.execute(
-                    "SELECT COUNT(*) FROM messages WHERE session_id=? AND active=1",
-                    (session_id,),
-                ).fetchone()[0]
-                if actual_count != active_message_count:
-                    raise RuntimeError("待压缩消息已被并发修改")
-            rows = connection.execute(
-                """
-                SELECT sequence FROM messages
-                WHERE session_id=? AND active=1
-                ORDER BY sequence ASC LIMIT ?
-                """,
-                (session_id, message_count),
+            active_rows = connection.execute(
+                "SELECT * FROM messages WHERE session_id=? AND active=1 ORDER BY sequence",
+                (session_id,),
             ).fetchall()
+            if source_sequences is None:
+                rows = active_rows[:message_count]
+            else:
+                normalized_sequences = sorted(set(source_sequences))
+                if (
+                    len(normalized_sequences) != len(source_sequences)
+                    or any(isinstance(item, bool) or not isinstance(item, int) or item < 0
+                           for item in normalized_sequences)
+                ):
+                    raise ValueError("source_sequences 必须是唯一非负整数序列")
+                placeholders = ",".join("?" for _ in normalized_sequences)
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM messages
+                    WHERE session_id=? AND sequence IN ({placeholders})
+                    ORDER BY sequence
+                    """,
+                    (session_id, *normalized_sequences),
+                ).fetchall()
             if len(rows) != message_count:
-                raise RuntimeError("待压缩消息已被并发修改")
-            first_sequence = int(rows[0]["sequence"])
-            last_sequence = int(rows[-1]["sequence"])
-            connection.execute(
+                raise ContextCheckpointConflict(
+                    "messages changed before context compaction",
+                    expected=message_count,
+                    actual=len(rows),
+                )
+            hashes = _checkpoint_source_hashes(rows)
+            source_sha256 = _checkpoint_source_digest(hashes)
+            duplicate = connection.execute(
                 """
-                UPDATE messages SET active=0, compaction_id=?
-                WHERE session_id=? AND active=1
-                    AND sequence BETWEEN ? AND ?
+                SELECT * FROM context_checkpoints
+                WHERE session_id=? AND source_sha256=? AND schema_version>=2
                 """,
-                (checkpoint_id, session_id, first_sequence, last_sequence),
+                (session_id, source_sha256),
+            ).fetchone()
+            if duplicate is not None:
+                return validate_checkpoint(
+                    connection,
+                    duplicate,
+                    session_id=session_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                )
+            if active_message_count is not None and len(active_rows) != active_message_count:
+                raise ContextCheckpointConflict(
+                    "messages changed before context compaction",
+                    expected=active_message_count,
+                    actual=len(active_rows),
+                )
+            if any(not bool(row["active"]) for row in rows):
+                raise ContextCheckpointConflict("checkpoint source is no longer active")
+            selected_sequences = {int(row["sequence"]) for row in rows}
+            self._validate_tool_group_selection(active_rows, selected_sequences)
+            first_sequence = min(selected_sequences)
+            last_sequence = max(selected_sequences)
+            if parent_checkpoint_id is None:
+                parent = connection.execute(
+                    """
+                    SELECT * FROM context_checkpoints
+                    WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1
+                    """,
+                    (session_id,),
+                ).fetchone()
+            else:
+                parent = connection.execute(
+                    "SELECT * FROM context_checkpoints WHERE id=? AND session_id=?",
+                    (parent_checkpoint_id, session_id),
+                ).fetchone()
+                if parent is None:
+                    raise ContextCheckpointValidationError(
+                        "parent_missing",
+                        "checkpoint parent is missing",
+                        checkpoint_id=parent_checkpoint_id,
+                        session_id=session_id,
+                    )
+            if parent is not None:
+                parent_checkpoint_id = parent["id"]
+                parent_summary_sha256 = _checkpoint_sha256(parent["summary"])
+            else:
+                parent_summary_sha256 = None
+            placeholders = ",".join("?" for _ in selected_sequences)
+            connection.execute(
+                f"""
+                UPDATE messages SET active=0, compaction_id=?
+                WHERE session_id=? AND active=1 AND sequence IN ({placeholders})
+                """,
+                (checkpoint_id, session_id, *sorted(selected_sequences)),
             )
             if connection.execute("SELECT changes()").fetchone()[0] != message_count:
-                raise RuntimeError("上下文压缩提交发生并发冲突")
+                raise ContextCheckpointConflict("context compaction lost a concurrent update")
+            schema_version = CHECKPOINT_SCHEMA_VERSION if context is not None else 1
             connection.execute(
                 """
                 INSERT INTO context_checkpoints(
                     id, session_id, summary, first_sequence, last_sequence,
-                    source_messages, estimated_tokens_before, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    source_messages, estimated_tokens_before, created_at,
+                    schema_version, actor_id, tenant_id, created_run_id,
+                    source_sequences_json, source_hashes_json, source_sha256,
+                    strategy_version, estimator_version, summary_sha256,
+                    estimated_tokens_after, preserved_items_json,
+                    artifact_refs_json, citation_refs_json, operation_refs_json,
+                    parent_checkpoint_id, parent_summary_sha256
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     checkpoint_id,
@@ -1905,15 +2493,36 @@ class StateStore:
                     message_count,
                     estimated_tokens_before,
                     now,
+                    schema_version,
+                    actor_id,
+                    tenant_id,
+                    getattr(context, "run_id", None),
+                    _checkpoint_json(sorted(selected_sequences)),
+                    _checkpoint_json(hashes),
+                    source_sha256,
+                    strategy_version,
+                    estimator_version,
+                    _checkpoint_sha256(summary),
+                    estimated_tokens_after,
+                    _checkpoint_json(preserved_items),
+                    _checkpoint_json(artifact_refs),
+                    _checkpoint_json(sorted(set(citation_refs))),
+                    _checkpoint_json(operation_refs),
+                    parent_checkpoint_id,
+                    parent_summary_sha256,
                 ),
             )
-        return {
-            "id": checkpoint_id,
-            "summary": summary,
-            "source_messages": message_count,
-            "first_sequence": first_sequence,
-            "last_sequence": last_sequence,
-        }
+            inserted = connection.execute(
+                "SELECT * FROM context_checkpoints WHERE id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            return validate_checkpoint(
+                connection,
+                inserted,
+                session_id=session_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            )
 
     def record_artifact(
         self,

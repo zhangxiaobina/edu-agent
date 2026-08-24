@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from ..engine.base import Engine
 from ..runtime.cancellation import call_with_cancellation
+from ..runtime.cancellation import accepts_keyword_argument
+from ..runtime.context import ContextBudgetExceeded
 from ..runtime.models import RunContext
 from .models import PlanSpec, PlanValidationError, validate_plan_graph
 
@@ -37,8 +39,16 @@ PLANNER_SYSTEM_PROMPT = """你是教学 Agent 的计划编译器。只输出一�
 
 
 class ModelPlanGenerator:
-    def __init__(self, engine: Engine):
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        context_accounting=None,
+        max_output_tokens: int | None = None,
+    ):
         self.engine = engine
+        self.context_accounting = context_accounting
+        self.max_output_tokens = max_output_tokens
 
     def generate(
         self,
@@ -54,22 +64,77 @@ class ModelPlanGenerator:
             "max_steps": max_steps,
             "output_schema": PlanSpec.model_json_schema(),
         }
-        response = call_with_cancellation(
-            self.engine.chat,
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        f"{PLANNER_SYSTEM_PROMPT}\n\n"
-                        f"<planning_context>{json.dumps(planning_context, ensure_ascii=False)}"
-                        "</planning_context>"
-                    ),
-                },
-                {"role": "user", "content": task},
-            ],
-            [],
-            cancellation_token=context.cancellation_token,
+        planning_injection = (
+            f"<planning_context>{json.dumps(planning_context, ensure_ascii=False)}"
+            "</planning_context>"
         )
+        messages = [
+            {
+                "role": "system",
+                "content": f"{PLANNER_SYSTEM_PROMPT}\n\n{planning_injection}",
+            },
+            {"role": "user", "content": task},
+        ]
+        context_accounting = self.context_accounting or context.context_accounting
+        max_output_tokens = self.max_output_tokens
+        if max_output_tokens is None and context_accounting is not None:
+            max_output_tokens = context_accounting.max_output_reserve_tokens
+        accounting = None
+        route_accounting = []
+        if context_accounting is not None:
+            for route in context_accounting.routes:
+                route_accounting.append(
+                    context_accounting.measure(
+                        messages=messages,
+                        tools=[],
+                        phase="planner",
+                        route=route,
+                        current_user_turn=task,
+                        current_user_wire_content=task,
+                        base_system_prompt=PLANNER_SYSTEM_PROMPT,
+                        memory_checkpoint_injection="",
+                        plan_evidence_injection=planning_injection,
+                    )
+                )
+            accounting = route_accounting[0]
+            if accounting.decision != "send":
+                raise ContextBudgetExceeded(
+                    "planner request exceeds the reserved context budget",
+                    breakdown=accounting,
+                )
+        kwargs = {}
+        if max_output_tokens is not None and accepts_keyword_argument(
+            self.engine.chat,
+            "max_output_tokens",
+        ):
+            kwargs["max_output_tokens"] = max_output_tokens
+        try:
+            response = call_with_cancellation(
+                self.engine.chat,
+                messages,
+                [],
+                cancellation_token=context.cancellation_token,
+                **kwargs,
+            )
+        except Exception as error:
+            if accounting is not None:
+                context_accounting.settle(
+                    accounting,
+                    getattr(error, "usage", None),
+                    phase="planner",
+                )
+            raise
+        if accounting is not None:
+            selected_accounting = context_accounting.select_breakdown(
+                route_accounting,
+                response_model=response.model,
+                usage=response.usage,
+            )
+            context_accounting.settle(
+                selected_accounting,
+                response.usage,
+                phase="planner",
+            )
         if response.tool_calls:
             raise PlanGenerationError(
                 "PLANNER_TOOL_CALL",

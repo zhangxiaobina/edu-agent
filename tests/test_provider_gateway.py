@@ -429,7 +429,10 @@ def test_trace_records_frozen_candidates_switch_reason_and_selected_result(
             endpoint="https://primary.example/v1",
             api_mode=ApiMode.CHAT_COMPLETIONS,
             credential=CredentialRef("R15_PRIMARY_CREDENTIAL"),
-            capabilities=ProviderCapabilities(context_window_tokens=16_384),
+            capabilities=ProviderCapabilities(
+                context_window_tokens=16_384,
+                max_output_tokens=4_096,
+            ),
         ),
     )
     fallback = GatewayEngine(
@@ -439,7 +442,10 @@ def test_trace_records_frozen_candidates_switch_reason_and_selected_result(
             endpoint="https://fallback.example/v1",
             api_mode=ApiMode.CHAT_COMPLETIONS,
             credential=CredentialRef("R15_FALLBACK_CREDENTIAL"),
-            capabilities=ProviderCapabilities(context_window_tokens=16_384),
+            capabilities=ProviderCapabilities(
+                context_window_tokens=16_384,
+                max_output_tokens=4_096,
+            ),
         ),
     )
     config = AppConfig(

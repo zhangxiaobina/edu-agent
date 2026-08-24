@@ -8,12 +8,14 @@ future RunEvent/SSE wiring; text-format structured output remains unsupported.
 from __future__ import annotations
 
 import json
+import math
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from ..runtime.cancellation import CancellationRequested, CancellationToken
+from ..tokenization import DEFAULT_TOKENIZER_REGISTRY
 from .base import EngineResponse, ToolCall
 from .gateway import (
     ApiMode,
@@ -114,13 +116,22 @@ def _normalize_usage(value: Any) -> dict:
     return normalized
 
 
-def _estimate_context_tokens(input_items: list[dict], tools: list[dict]) -> int:
+def _estimate_context_tokens(
+    input_items: list[dict],
+    tools: list[dict],
+    *,
+    model: str,
+    tokenizer: str | None,
+) -> int:
     payload = json.dumps(
         {"input": input_items, "tools": tools},
         ensure_ascii=False,
+        sort_keys=True,
         separators=(",", ":"),
-    ).encode("utf-8")
-    return max(1, (len(payload) + 3) // 4)
+    )
+    resolution = DEFAULT_TOKENIZER_REGISTRY.resolve(model=model, tokenizer=tokenizer)
+    safety = 1.02 if resolution.method == "model_tokenizer" else 1.08
+    return max(1, math.ceil((resolution.counter.count(payload) + 4) * safety))
 
 
 class ResponsesAPIError(RuntimeError):
@@ -339,16 +350,31 @@ class ResponsesAdapter:
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        max_output_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Build the shared minimal Responses request before stream controls."""
         if route.api_mode is not self.api_mode:
             raise ValueError(f"ResponsesAdapter 不能处理 {route.api_mode.value} route")
         input_items = self._convert_messages(messages)
         response_tools = self._convert_tools(route, tools)
-        estimated_tokens = _estimate_context_tokens(input_items, response_tools)
+        estimated_tokens = _estimate_context_tokens(
+            input_items,
+            response_tools,
+            model=route.model,
+            tokenizer=route.capabilities.tokenizer,
+        )
         context_limit = route.capabilities.context_window_tokens
-        if context_limit is not None and estimated_tokens > context_limit:
+        if (
+            context_limit is not None
+            and estimated_tokens + (max_output_tokens or 0) > context_limit
+        ):
             raise ProviderCapabilityError(("context_window",))
+        output_limit = route.capabilities.max_output_tokens
+        if max_output_tokens is not None and (
+            output_limit is not None and max_output_tokens > output_limit
+        ):
+            raise ProviderCapabilityError(("max_output_tokens",))
         request: dict[str, Any] = {
             "model": route.model,
             "input": input_items,
@@ -357,6 +383,8 @@ class ResponsesAdapter:
         if response_tools:
             request["tools"] = response_tools
             request["tool_choice"] = "auto"
+        if max_output_tokens is not None:
+            request["max_output_tokens"] = max_output_tokens
         return request
 
     def validate_request(
@@ -364,8 +392,15 @@ class ResponsesAdapter:
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        max_output_tokens: int | None = None,
     ) -> None:
-        self.build_request(route, messages, tools)
+        self.build_request(
+            route,
+            messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
 
     def chat(
         self,
@@ -374,6 +409,7 @@ class ResponsesAdapter:
         tools: list[dict],
         *,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         return aggregate_provider_stream(
             self.stream_events(
@@ -382,6 +418,7 @@ class ResponsesAdapter:
                 tools,
                 attempt=1,
                 cancellation_token=cancellation_token,
+                max_output_tokens=max_output_tokens,
             )
         )
 
@@ -393,10 +430,16 @@ class ResponsesAdapter:
         *,
         attempt: int = 1,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         if cancellation_token is not None:
             cancellation_token.checkpoint("responses.before_request")
-        request = self.build_request(route, messages, tools)
+        request = self.build_request(
+            route,
+            messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
         if not (self.capabilities.streaming and route.capabilities.streaming):
             raise ProviderCapabilityError(("streaming",))
         request["stream"] = True

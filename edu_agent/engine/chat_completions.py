@@ -150,6 +150,8 @@ class ChatCompletionsAdapter:
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        max_output_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Build the shared Chat Completions request before stream controls."""
         if route.api_mode is not self.api_mode:
@@ -173,9 +175,21 @@ class ChatCompletionsAdapter:
         context_limit = route.capabilities.context_window_tokens
         if (
             context_limit is not None
-            and estimate_request_tokens(messages, tools) > context_limit
+            and estimate_request_tokens(
+                messages,
+                tools,
+                model=route.model,
+                tokenizer=route.capabilities.tokenizer,
+            )
+            + (max_output_tokens or 0)
+            > context_limit
         ):
             raise ProviderCapabilityError(("context_window",))
+        output_limit = route.capabilities.max_output_tokens
+        if max_output_tokens is not None and (
+            output_limit is not None and max_output_tokens > output_limit
+        ):
+            raise ProviderCapabilityError(("max_output_tokens",))
         request: dict[str, Any] = {
             "model": route.model,
             "messages": messages,
@@ -184,6 +198,8 @@ class ChatCompletionsAdapter:
         if tools:
             request["tools"] = tools
             request["tool_choice"] = "auto"
+        if max_output_tokens is not None:
+            request["max_tokens"] = max_output_tokens
         return request
 
     def validate_request(
@@ -191,8 +207,15 @@ class ChatCompletionsAdapter:
         route: ResolvedRoute,
         messages: list[dict],
         tools: list[dict],
+        *,
+        max_output_tokens: int | None = None,
     ) -> None:
-        self.build_request(route, messages, tools)
+        self.build_request(
+            route,
+            messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
 
     def chat(
         self,
@@ -201,6 +224,7 @@ class ChatCompletionsAdapter:
         tools: list[dict],
         *,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> EngineResponse:
         return aggregate_provider_stream(
             self.stream_events(
@@ -209,6 +233,7 @@ class ChatCompletionsAdapter:
                 tools,
                 attempt=1,
                 cancellation_token=cancellation_token,
+                max_output_tokens=max_output_tokens,
             )
         )
 
@@ -220,10 +245,16 @@ class ChatCompletionsAdapter:
         *,
         attempt: int = 1,
         cancellation_token: CancellationToken | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[ProviderStreamEvent]:
         if cancellation_token is not None:
             cancellation_token.checkpoint("chat_completions.before_request")
-        request = self.build_request(route, messages, tools)
+        request = self.build_request(
+            route,
+            messages,
+            tools,
+            max_output_tokens=max_output_tokens,
+        )
         if not (self.capabilities.streaming and route.capabilities.streaming):
             raise ProviderCapabilityError(("streaming",))
         request.update(stream=True, stream_options={"include_usage": True})

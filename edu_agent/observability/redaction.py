@@ -17,10 +17,20 @@ class RedactionPolicy:
     literal_secrets: tuple[str, ...] = field(default_factory=tuple)
 
     def redact_text(self, value: str) -> str:
-        return redact_text(value, include_pii=True, literal_secrets=self.literal_secrets)
+        return redact_text(
+            value,
+            include_pii=True,
+            include_private_paths=True,
+            literal_secrets=self.literal_secrets,
+        )
 
     def redact(self, value: Any) -> Any:
-        return redact(value, include_pii=True, literal_secrets=self.literal_secrets)
+        return redact(
+            value,
+            include_pii=True,
+            include_private_paths=True,
+            literal_secrets=self.literal_secrets,
+        )
 
 
 def contains_sensitive_data(value: Any, *, secrets: tuple[str, ...] = ()) -> bool:

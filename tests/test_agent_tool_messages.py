@@ -26,6 +26,7 @@ from edu_agent.state import (
     AGENT_TOOL_MESSAGES_MIGRATION,
     FencingTokenRejected,
     RunCancelled,
+    STATE_SCHEMA_VERSION,
     StateStore,
     ToolMessageConflict,
     ToolMessagePairingError,
@@ -933,7 +934,7 @@ def test_legacy_database_gets_r23_schema_without_losing_messages(tmp_path):
             )
         }
         assert {"agent_tool_envelopes", "agent_tool_calls"} <= tables
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == STATE_SCHEMA_VERSION
         assert connection.execute(
             "SELECT COUNT(*) FROM state_schema_migrations WHERE version=?",
             (AGENT_TOOL_MESSAGES_MIGRATION,),

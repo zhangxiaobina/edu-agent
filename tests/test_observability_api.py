@@ -393,6 +393,51 @@ def test_api_auth_idempotency_status_and_cross_scope_denial(tmp_path):
     assert denied_export.status == 403
 
 
+def test_api_returns_structured_checkpoint_validation_error(tmp_path):
+    service = _service(tmp_path)
+    api = _api(service)
+    service.state_store.ensure_session(
+        "damaged-session",
+        actor_id="alice",
+        tenant_id="school-a",
+        role="teacher",
+        course_ids=set(),
+    )
+    service.state_store.append_messages(
+        "damaged-session",
+        [
+            {"role": "user", "content": "archive"},
+            {"role": "assistant", "content": "keep"},
+        ],
+    )
+    checkpoint = service.state_store.compact_messages(
+        "damaged-session",
+        summary="trusted summary",
+        message_count=1,
+        estimated_tokens_before=10,
+    )
+    with service.state_store.connect() as connection:
+        connection.execute(
+            "UPDATE context_checkpoints SET summary='tampered' WHERE id=?",
+            (checkpoint["id"],),
+        )
+
+    try:
+        response = _post(
+            api,
+            "/v1/chat",
+            {"message": "continue", "session_id": "damaged-session"},
+            request_id="checkpoint-error-1",
+        )
+        assert response.status == 500
+        assert response.body["error"]["code"] == (
+            "CONTEXT_CHECKPOINT_SUMMARY_HASH_MISMATCH"
+        )
+    finally:
+        api.close()
+        service.close()
+
+
 def test_http_server_serves_openapi_and_authenticated_chat(tmp_path):
     service = _service(tmp_path)
     api = _api(service)

@@ -915,6 +915,7 @@ def test_model_resilience_config_defaults_validation_and_factory_wiring():
             fallback_model="fallback",
             fallback_api_mode="unknown",
             fallback_context_window_tokens=16_384,
+            fallback_max_output_tokens=4_096,
         )
 
     config = ModelConfig(
@@ -949,6 +950,7 @@ def test_factory_fallback_mode_is_explicit_or_inherits_primary_at_startup():
             fallback_model="fallback",
             fallback_base_url="https://fallback.example/v1",
             fallback_context_window_tokens=16_384,
+            fallback_max_output_tokens=4_096,
             max_retries=0,
         ),
         client=SimpleNamespace(),
@@ -967,6 +969,7 @@ def test_factory_fallback_mode_is_explicit_or_inherits_primary_at_startup():
             fallback_base_url="https://fallback.example/v1",
             fallback_api_mode=ApiMode.CHAT_COMPLETIONS,
             fallback_context_window_tokens=16_384,
+            fallback_max_output_tokens=4_096,
             max_retries=0,
         ),
         client=SimpleNamespace(),
@@ -983,6 +986,7 @@ def test_factory_fallback_mode_is_explicit_or_inherits_primary_at_startup():
                 endpoint="https://same.example/v1",
                 fallback_model="same-model",
                 fallback_context_window_tokens=16_384,
+                fallback_max_output_tokens=4_096,
                 max_retries=0,
             ),
             client=SimpleNamespace(),
