@@ -267,7 +267,7 @@ def test_budget_stops_unbounded_model_loop():
         max_tool_calls=2,
     )
     result = run_agent("一直调用", MockEngine(endless_policy), run_context=context)
-    assert result["stop_reason"] == "budget_exceeded"
+    assert result["stop_reason"] == "budget_exhausted:model_calls"
     assert result["budget"]["model_calls"] == 2
 
 

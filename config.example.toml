@@ -37,6 +37,13 @@ circuit_cooldown_seconds = 30.0
 [runtime]
 max_model_calls = 12
 max_tool_calls = 24
+# RunBudgetLedger 在父级、planner、retry/fallback 和所有 child 间共享这些上限。
+max_input_tokens = 96000
+max_output_tokens = 24000
+max_total_tokens = 120000
+# 未知价格保持 unknown；只有配置明确价格后才启用可执行的成本上限。
+# max_cost_usd = 0.40
+max_wall_time_seconds = 1800
 # 同一 assistant 回合只并发冻结 Manifest 明确允许的只读、无冲突调用。
 tool_batch_max_workers = 4
 # 每个工具仍受 Manifest timeout 限制；这里是运行时全局上限。
@@ -147,6 +154,15 @@ allowed_models = ["deterministic-readonly-v1"]
 allowed_child_roles = ["student", "teacher"]
 default_model = "deterministic-readonly-v1"
 allow_child_delegation = false
+
+[pricing]
+# 修改任何价格时必须升级 version；运行中的 root 会冻结版本与具体价目。
+version = "example-prices@2026-08-24.v1"
+
+[pricing.prices."dashscope:qwen-plus"]
+# 示例值仅展示显式配置格式，部署前应替换为已核验的供应商价格。
+input_per_million_usd = 0.40
+output_per_million_usd = 1.20
 
 [observability]
 # 本地 Trace/JSON(L) 始终可用；第三方遥测默认关闭且不会导入 OTel 包。

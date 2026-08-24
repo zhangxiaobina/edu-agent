@@ -270,7 +270,11 @@ class PolicyToolExecutor:
             context.check_control("tool.before_call")
             if not budget_reserved:
                 try:
-                    context.budget.consume_tool_call()
+                    context.budget.consume_tool_call(
+                        f"tool:{context.run_id}:{tool_call_id}"
+                        if tool_call_id
+                        else None
+                    )
                 except BudgetExceeded as budget_error:
                     return self._finish(
                         context,
@@ -332,7 +336,11 @@ class PolicyToolExecutor:
         context.check_control("tool.before_call")
         if not _budget_reserved:
             try:
-                context.budget.consume_tool_call()
+                context.budget.consume_tool_call(
+                    f"tool:{context.run_id}:{tool_call_id}"
+                    if tool_call_id
+                    else None
+                )
             except BudgetExceeded as error:
                 return self._finish(
                     context,
@@ -651,7 +659,12 @@ class PolicyToolExecutor:
                 )
             else:
                 outcome = ToolOutcome(True, data=result)
-        except (FencingTokenRejected, RunCancelled, CancellationRequested):
+        except (
+            BudgetExceeded,
+            FencingTokenRejected,
+            RunCancelled,
+            CancellationRequested,
+        ):
             raise
         except TeachingProviderRejected as error:
             outcome = self._teaching_provider_error(error.error)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 import uuid
@@ -10,6 +11,7 @@ from typing import Any, Callable
 
 from ..data import db
 from ..runtime.artifacts import ArtifactStore
+from ..runtime.budget import BudgetLimits, ModelPriceCatalog, RunBudgetLedger
 from ..runtime.cancellation import CancellationRequested, CancellationToken
 from ..runtime.models import RunContext
 from ..runtime.tool_executor import ExecutionPolicy, PolicyToolExecutor, ToolOutcome
@@ -211,6 +213,7 @@ class DelegationRuntime:
         connection_factory: Callable[[], Any] | None = None,
         child_runner: Callable[[ChildExecution], dict[str, Any]] | None = None,
         result_inline_chars: int = 4_000,
+        pricing: ModelPriceCatalog | None = None,
     ):
         self.state_store = state_store
         self.provider = provider
@@ -221,6 +224,7 @@ class DelegationRuntime:
         self.connection_factory = connection_factory or db.connect
         self.child_runner = child_runner or self._run_teaching_task
         self.result_inline_chars = max(256, int(result_inline_chars))
+        self.pricing = pricing
         self.state = DelegationState(state_store)
         self.worker_id = f"delegation:{uuid.uuid4().hex}"
         self._pool = ThreadPoolExecutor(
@@ -279,6 +283,7 @@ class DelegationRuntime:
             raise ValueError("只有 required_quorum 策略可以设置 quorum")
         started = time.monotonic()
         entries = [self._prepare_entry(parent_context, task) for task in tasks]
+        root_ledger = self._root_ledger(parent_context)
         records = self.state.create_batch(
             parent_context=parent_context,
             entries=entries,
@@ -286,6 +291,7 @@ class DelegationRuntime:
             child_budget=self.policy.child_budget(),
             max_depth=self.policy.max_depth,
             max_children_per_parent=self.policy.max_children_per_parent,
+            ledger=root_ledger,
         )
         by_key = {record["task_key"]: record for record in records}
         futures: dict[Future, str] = {}
@@ -432,6 +438,92 @@ class DelegationRuntime:
             elapsed_ms=round((time.monotonic() - started) * 1000, 2),
         )
 
+    def _root_ledger(self, parent_context: RunContext) -> RunBudgetLedger:
+        parent = self.state.get_run(
+            parent_context.run_id,
+            actor_id=parent_context.actor_id,
+            tenant_id=parent_context.tenant_id,
+        )
+        root_run_id = parent["root_run_id"] if parent else parent_context.run_id
+        bound = parent_context.budget.ledger
+        if bound is not None:
+            if bound.root_run_id != root_run_id:
+                raise DelegationLimitExceeded("parent budget ledger root mismatch")
+            return bound
+        with self.state_store.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM run_budget_ledgers WHERE root_run_id=?",
+                (root_run_id,),
+            ).fetchone()
+        if exists is not None:
+            ledger = RunBudgetLedger.open(
+                self.state_store,
+                root_run_id=root_run_id,
+                pricing=self.pricing,
+            )
+            if parent is None:
+                parent_context.budget.bind_ledger(
+                    ledger,
+                    owner_run_id=parent_context.run_id,
+                )
+            return ledger
+        root_context = parent_context
+        if parent is not None:
+            tree = self.state.tree(
+                root_run_id,
+                actor_id=parent_context.actor_id,
+                tenant_id=parent_context.tenant_id,
+            )
+            root_context = RunContext.create(
+                session_id=tree["session_id"],
+                run_id=root_run_id,
+                actor_id=tree["actor_id"],
+                tenant_id=tree["tenant_id"],
+                role=tree["role"],
+                course_ids=set(tree["course_ids"]),
+            )
+        tokens = int(self.policy.max_root_tokens)
+        ledger = RunBudgetLedger(
+            self.state_store,
+            root_run_id=root_run_id,
+            session_id=root_context.session_id,
+            actor_id=root_context.actor_id,
+            tenant_id=root_context.tenant_id,
+            limits=BudgetLimits(
+                max_model_calls=min(
+                    int(parent_context.budget.max_model_calls),
+                    int(self.policy.max_root_model_calls),
+                ),
+                max_tool_calls=min(
+                    int(parent_context.budget.max_tool_calls),
+                    int(self.policy.max_root_tool_calls),
+                ),
+                max_input_tokens=tokens,
+                max_output_tokens=tokens,
+                max_total_tokens=tokens,
+                max_cost_microusd=int(
+                    math.ceil(float(self.policy.max_root_cost_usd) * 1_000_000)
+                ),
+                max_wall_time_ms=max(
+                    1_800_000,
+                    int(
+                        math.ceil(
+                            self.policy.child_timeout_seconds
+                            * self.policy.max_children_per_parent
+                            * 1_000
+                        )
+                    ),
+                ),
+            ),
+            pricing=self.pricing or ModelPriceCatalog(),
+        )
+        if parent is None:
+            parent_context.budget.bind_ledger(
+                ledger,
+                owner_run_id=parent_context.run_id,
+            )
+        return ledger
+
     def _prepare_entry(self, parent_context: RunContext, task: TeachingSubtask) -> dict[str, Any]:
         role = self._child_role(parent_context.role, task.requested_role)
         if not task.course_ids:
@@ -565,6 +657,20 @@ class DelegationRuntime:
             citations.append(citation)
         return evidence, citations
 
+    def _ledger_for_record(self, record: dict[str, Any]) -> RunBudgetLedger | None:
+        with self.state_store.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM run_budget_ledgers WHERE root_run_id=?",
+                (record["root_run_id"],),
+            ).fetchone()
+        if exists is None:
+            return None
+        return RunBudgetLedger.open(
+            self.state_store,
+            root_run_id=record["root_run_id"],
+            pricing=self.pricing,
+        )
+
     def _execute_child(
         self,
         record: dict[str, Any],
@@ -603,6 +709,8 @@ class DelegationRuntime:
         connection = None
         heartbeat_stop = threading.Event()
         heartbeat = None
+        ledger = None
+        settled_usage = None
         child_started = time.monotonic()
         try:
             child_token = CancellationToken(parent=parent_token)
@@ -617,6 +725,13 @@ class DelegationRuntime:
                 max_tool_calls=int(record["budget"]["max_tool_calls"]),
                 cancellation_token=child_token,
             )
+            if parent_ledger := self._ledger_for_record(claimed):
+                ledger = parent_ledger
+                context.budget.bind_ledger(
+                    parent_ledger,
+                    owner_run_id=record["id"],
+                    reservation_operation_id=f"delegation:{record['id']}:reservation",
+                )
             child_input = SubagentInput(
                 system_prompt=input_payload["system_prompt"],
                 messages=tuple(input_payload["messages"]),
@@ -658,16 +773,8 @@ class DelegationRuntime:
             child_started = time.monotonic()
             payload = self.child_runner(execution) or {}
             execution.checkpoint("child.before_result")
-            payload.setdefault(
-                "usage",
-                {
-                    "input_tokens": max(
-                        1,
-                        len(json.dumps(input_payload, ensure_ascii=False, default=str)) // 4,
-                    )
-                },
-            )
             usage = self._usage(context, payload, child_started)
+            settled_usage = usage
             self._enforce_actual_budget(record, usage)
             evidence_ids = tuple(
                 int(item["id"])
@@ -716,6 +823,7 @@ class DelegationRuntime:
                 usage=usage.to_dict(),
                 result=result_payload,
                 result_artifact_id=result_artifact_id,
+                ledger=ledger,
             )
         except DelegationTimedOut as error:
             if context is None:
@@ -723,7 +831,7 @@ class DelegationRuntime:
                     record["id"], worker_owner=self.worker_id, reason=str(error)
                 )
             else:
-                usage = self._usage(context, {}, child_started)
+                usage = settled_usage or self._usage(context, {}, child_started)
                 self.state.finish(
                     record["id"],
                     worker_owner=self.worker_id,
@@ -731,6 +839,7 @@ class DelegationRuntime:
                     usage=usage.to_dict(),
                     result=None,
                     failure_reason=str(error),
+                    ledger=ledger,
                 )
         except (RunCancelled, CancellationRequested) as error:
             if context is None:
@@ -738,7 +847,7 @@ class DelegationRuntime:
                     record["id"], worker_owner=self.worker_id, reason=str(error)
                 )
             else:
-                usage = self._usage(context, {}, child_started)
+                usage = settled_usage or self._usage(context, {}, child_started)
                 self.state.finish(
                     record["id"],
                     worker_owner=self.worker_id,
@@ -746,6 +855,7 @@ class DelegationRuntime:
                     usage=usage.to_dict(),
                     result=None,
                     cancel_reason=str(error),
+                    ledger=ledger,
                 )
         except Exception as error:
             reason = f"{type(error).__name__}: {error}"
@@ -754,7 +864,7 @@ class DelegationRuntime:
                     record["id"], worker_owner=self.worker_id, reason=reason
                 )
             else:
-                usage = self._usage(context, {}, child_started)
+                usage = settled_usage or self._usage(context, {}, child_started)
                 self.state.finish(
                     record["id"],
                     worker_owner=self.worker_id,
@@ -762,6 +872,7 @@ class DelegationRuntime:
                     usage=usage.to_dict(),
                     result=None,
                     failure_reason=reason,
+                    ledger=ledger,
                 )
         finally:
             heartbeat_stop.set()
@@ -816,22 +927,47 @@ class DelegationRuntime:
         started: float,
     ) -> SubtaskUsage:
         usage = payload.get("usage", {})
+        accounted = context.budget.usage()
         model_calls = max(
-            context.budget.model_calls,
+            int(accounted.get("model_calls", context.budget.model_calls)),
             int(usage.get("model_calls", 0)),
         )
         tool_calls = max(
-            context.budget.tool_calls,
+            int(accounted.get("tool_calls", context.budget.tool_calls)),
             int(usage.get("tool_calls", 0)),
         )
-        input_tokens = int(usage.get("input_tokens", 0))
-        output_tokens = int(usage.get("output_tokens", 0))
+        input_tokens = max(
+            int(accounted.get("input_tokens", 0)),
+            int(usage.get("input_tokens", 0)),
+        )
+        output_tokens = max(
+            int(accounted.get("output_tokens", 0)),
+            int(usage.get("output_tokens", 0)),
+        )
+        total_candidates = []
+        for source in (accounted, usage):
+            value = source.get("total_tokens")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                total_candidates.append(value)
+        if not total_candidates or any(
+            key in usage for key in ("input_tokens", "output_tokens")
+        ):
+            total_candidates.append(input_tokens + output_tokens)
+        reported_cost = usage.get("estimated_cost_usd")
+        accounted_cost = accounted.get("cost_usd")
         return SubtaskUsage(
             model_calls=model_calls,
             tool_calls=tool_calls,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            estimated_cost_usd=float(usage.get("estimated_cost_usd", 0.0)),
+            total_tokens=max(total_candidates),
+            estimated_cost_usd=(
+                float(reported_cost)
+                if reported_cost is not None
+                else float(accounted_cost)
+                if accounted_cost is not None
+                else None
+            ),
             duration_ms=round((time.monotonic() - started) * 1000, 2),
         )
 
@@ -844,7 +980,10 @@ class DelegationRuntime:
             raise DelegationLimitExceeded("CHILD_TOOL_BUDGET_EXCEEDED")
         if usage.total_tokens > int(budget["max_tokens"]):
             raise DelegationLimitExceeded("CHILD_TOKEN_BUDGET_EXCEEDED")
-        if usage.estimated_cost_usd > float(budget["max_cost_usd"]):
+        if (
+            usage.estimated_cost_usd is not None
+            and usage.estimated_cost_usd > float(budget["max_cost_usd"])
+        ):
             raise DelegationLimitExceeded("CHILD_COST_BUDGET_EXCEEDED")
 
     def _run_teaching_task(self, execution: ChildExecution) -> dict[str, Any]:

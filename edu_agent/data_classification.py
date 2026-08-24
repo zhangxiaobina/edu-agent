@@ -52,9 +52,15 @@ METRIC_KEYS = frozenset({
     "tool_result_tokens", "tool_schema_tokens", "total_reserved_tokens",
     "total_tokens", "tokens",
     "model_calls", "max_model_calls", "tool_calls", "max_tool_calls",
+    "max_input_tokens", "max_output_tokens", "max_total_tokens",
+    "cost_microusd", "max_cost_microusd", "cost_usd", "known_cost_usd",
+    "max_cost_usd", "cost_status", "wall_time_ms", "max_wall_time_ms",
+    "wall_time_seconds", "max_wall_time_seconds", "estimated_operations",
+    "unknown_cost_operations", "released_operations",
     "duration_ms", "size_bytes", "attempt", "attempt_count", "sequence",
 })
 _STRICT_METRIC_KEYS = METRIC_KEYS - {
+    "cost_status",
     "requested_tokenizer",
     "tokenizer_fallback_reason",
     "tool_calls",

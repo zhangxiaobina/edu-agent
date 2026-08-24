@@ -132,7 +132,7 @@ def test_depth_fanout_budget_and_global_concurrency_are_enforced(tmp_path):
         assert result.status == "completed"
         tree = runtime.tree(_context())
         assert len(tree["nodes"]) == 2
-        assert tree["reserved"]["tool_calls"] == 2
+        assert tree["reserved"]["tool_calls"] == 0
 
         child = tree["nodes"][0]
         child_context = RunContext.create(

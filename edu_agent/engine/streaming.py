@@ -274,6 +274,22 @@ class ProviderStreamAggregator:
     def response(self) -> EngineResponse | None:
         return self._response
 
+    @property
+    def usage(self) -> dict[str, Any]:
+        return copy.deepcopy(self._usage)
+
+    def failure_usage(self, error: BaseException) -> dict[str, Any]:
+        usage = self.usage
+        error_usage = getattr(error, "usage", None)
+        if isinstance(error_usage, Mapping):
+            usage.update(copy.deepcopy(dict(error_usage)))
+        if usage:
+            try:
+                setattr(error, "usage", copy.deepcopy(usage))
+            except Exception:
+                pass
+        return usage
+
     def _reset_attempt(self) -> None:
         self._content.clear()
         self._tool_calls.clear()
@@ -407,6 +423,7 @@ def consume_provider_stream(
     cancellation_token: CancellationToken | None = None,
     max_output_tokens: int | None = None,
     event_sink: Callable[[ProviderStreamEvent], None] | None = None,
+    run_budget=None,
 ) -> EngineResponse:
     """Consume one engine stream while exposing the exact normalized events."""
 
@@ -422,7 +439,34 @@ def consume_provider_stream(
             kwargs["cancellation_token"] = cancellation_token
         if max_output_tokens is not None and accepts_keyword_argument(chat, "max_output_tokens"):
             kwargs["max_output_tokens"] = max_output_tokens
-        response = chat(messages, tools, **kwargs)
+        budget_aware = run_budget is not None and accepts_keyword_argument(chat, "run_budget")
+        if budget_aware:
+            kwargs["run_budget"] = run_budget
+        budget_attempt = None
+        if run_budget is not None and not budget_aware:
+            provider, model = _engine_budget_identity(engine)
+            budget_attempt = run_budget.begin_provider_attempt(
+                attempt_sequence=1,
+                provider=provider,
+                model=model,
+                route_role="primary",
+            )
+        try:
+            response = chat(messages, tools, **kwargs)
+        except BaseException as error:
+            if budget_attempt is not None:
+                run_budget.settle_provider_attempt(
+                    budget_attempt,
+                    getattr(error, "usage", None),
+                    status="failed",
+                )
+            raise
+        if budget_attempt is not None:
+            run_budget.settle_provider_attempt(
+                budget_attempt,
+                response.usage,
+                status="ok",
+            )
         if cancellation_token is not None:
             cancellation_token.checkpoint("model.after_sync_call")
         return response
@@ -432,16 +476,38 @@ def consume_provider_stream(
         kwargs["cancellation_token"] = cancellation_token
     if max_output_tokens is not None and accepts_keyword_argument(stream, "max_output_tokens"):
         kwargs["max_output_tokens"] = max_output_tokens
-    iterator = iter(stream(messages, tools, **kwargs))
+    budget_aware = run_budget is not None and accepts_keyword_argument(stream, "run_budget")
+    if budget_aware:
+        kwargs["run_budget"] = run_budget
+    budget_attempt = None
+    if run_budget is not None and not budget_aware:
+        provider, model = _engine_budget_identity(engine)
+        budget_attempt = run_budget.begin_provider_attempt(
+            attempt_sequence=1,
+            provider=provider,
+            model=model,
+            route_role="primary",
+        )
+    iterator = None
     aggregator = ProviderStreamAggregator()
     try:
+        iterator = iter(stream(messages, tools, **kwargs))
         for event in iterator:
             if cancellation_token is not None:
                 cancellation_token.checkpoint("provider.stream.receive")
             if event_sink is not None:
                 event_sink(event)
             aggregator.feed(event)
-    except Exception as error:
+        if cancellation_token is not None:
+            cancellation_token.checkpoint("provider.stream.completed")
+        response = aggregator.result()
+    except BaseException as error:
+        if budget_attempt is not None:
+            run_budget.settle_provider_attempt(
+                budget_attempt,
+                aggregator.failure_usage(error),
+                status="failed",
+            )
         if aggregator.visible:
             try:
                 setattr(error, "stream_visible", True)
@@ -452,9 +518,25 @@ def consume_provider_stream(
         close = getattr(iterator, "close", None)
         if callable(close):
             close()
-    if cancellation_token is not None:
-        cancellation_token.checkpoint("provider.stream.completed")
-    return aggregator.result()
+    if budget_attempt is not None:
+        run_budget.settle_provider_attempt(
+            budget_attempt,
+            response.usage,
+            status="ok",
+        )
+    return response
+
+
+def _engine_budget_identity(engine: Any) -> tuple[str, str | None]:
+    begin_routes = getattr(engine, "begin_turn_routes", None)
+    routes = tuple(begin_routes()) if callable(begin_routes) else ()
+    if routes:
+        route = routes[0]
+        return str(getattr(route, "provider", type(engine).__name__)), getattr(
+            route, "model", None
+        )
+    name = str(getattr(engine, "name", type(engine).__name__))
+    return name, str(getattr(engine, "model", name))
 
 
 __all__ = [

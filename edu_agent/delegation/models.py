@@ -157,15 +157,16 @@ class SubtaskUsage:
     tool_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
-    estimated_cost_usd: float = 0.0
+    total_tokens: int | None = None
+    estimated_cost_usd: float | None = None
     duration_ms: float = 0.0
 
-    @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
+    def __post_init__(self) -> None:
+        if self.total_tokens is None:
+            object.__setattr__(self, "total_tokens", self.input_tokens + self.output_tokens)
 
-    def to_dict(self) -> dict[str, int | float]:
-        return {**asdict(self), "total_tokens": self.total_tokens}
+    def to_dict(self) -> dict[str, int | float | None]:
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> SubtaskUsage:
@@ -175,7 +176,16 @@ class SubtaskUsage:
             tool_calls=int(payload.get("tool_calls", 0)),
             input_tokens=int(payload.get("input_tokens", 0)),
             output_tokens=int(payload.get("output_tokens", 0)),
-            estimated_cost_usd=float(payload.get("estimated_cost_usd", 0.0)),
+            total_tokens=(
+                int(payload["total_tokens"])
+                if payload.get("total_tokens") is not None
+                else None
+            ),
+            estimated_cost_usd=(
+                float(payload["estimated_cost_usd"])
+                if payload.get("estimated_cost_usd") is not None
+                else None
+            ),
             duration_ms=float(payload.get("duration_ms", 0.0)),
         )
 

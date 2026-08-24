@@ -290,9 +290,41 @@ def build_agent(
                     "agent model request exceeds the reserved context budget",
                     breakdown=request_breakdown,
                 )
+        model_attempt = (
+            loop_journal.start_model_attempt() if loop_journal is not None else None
+        )
+        operation_id = f"model:{context.run_id}:{model_attempt or 1}"
         try:
-            context.budget.consume_model_call()
+            with context.budget.model_scope(
+                operation_id,
+                breakdowns=route_breakdowns,
+                component="agent_model",
+            ):
+                response = consume_provider_stream(
+                    engine,
+                    state["messages"],
+                    current_tools,
+                    cancellation_token=context.cancellation_token,
+                    max_output_tokens=(
+                        context_accounting.max_output_reserve_tokens
+                        if context_accounting is not None
+                        else None
+                    ),
+                    event_sink=context.emit_provider_event if context.streams_events else None,
+                    run_budget=context.budget,
+                )
         except BudgetExceeded as error:
+            if request_breakdown is not None and hasattr(error, "usage"):
+                selected_breakdown = context_accounting.select_breakdown(
+                    route_breakdowns,
+                    response_model=None,
+                    usage=error.usage,
+                )
+                context_accounting.settle(
+                    selected_breakdown,
+                    error.usage,
+                    phase="agent_model",
+                )
             if plan_coordinator is not None:
                 plan_coordinator.fail(PlanStatus.budget_exceeded, str(error))
                 content = _plan_stop_message(
@@ -304,24 +336,8 @@ def build_agent(
                 content = f"执行已停止：{error}"
             return {
                 "messages": [{"role": "assistant", "content": content}],
-                "stop_reason": "budget_exceeded",
+                "stop_reason": error.stop_reason,
             }
-        model_attempt = (
-            loop_journal.start_model_attempt() if loop_journal is not None else None
-        )
-        try:
-            response = consume_provider_stream(
-                engine,
-                state["messages"],
-                current_tools,
-                cancellation_token=context.cancellation_token,
-                max_output_tokens=(
-                    context_accounting.max_output_reserve_tokens
-                    if context_accounting is not None
-                    else None
-                ),
-                event_sink=context.emit_provider_event if context.streams_events else None,
-            )
         except Exception as error:
             if request_breakdown is not None:
                 context_accounting.settle(
@@ -776,8 +792,10 @@ def run_agent(
             if isinstance(error, BudgetExceeded):
                 coordinator.fail(PlanStatus.budget_exceeded, reason)
                 status = PlanStatus.budget_exceeded.value
+                stop_reason = error.stop_reason
             else:
                 status = PlanStatus.invalid.value
+                stop_reason = status
             loop_journal.enter_planning(plan_id=coordinator.plan.id)
             messages = initial_messages or [
                 {"role": "system", "content": system_prompt},
@@ -791,7 +809,7 @@ def run_agent(
                 "messages": result_messages,
                 "usage": [],
                 "budget": context.budget.usage(),
-                "stop_reason": status,
+                "stop_reason": stop_reason,
                 "plan": coordinator.result(),
             }
         context.emit_run_event(

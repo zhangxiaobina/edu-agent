@@ -698,6 +698,7 @@ def settle_usage(
     context,
     *,
     expected_cursor: int,
+    budget: dict[str, Any] | None = None,
 ):
     with store.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -713,17 +714,30 @@ def settle_usage(
             allow_cancelled=True,
             require_lease=True,
         )
-        budget_json = row["budget_json"]
+        budget_json = (
+            _json(redact_sensitive(budget))
+            if budget is not None
+            else row["budget_json"]
+        )
         usage_json = row["usage_json"]
+        if budget is not None:
+            connection.execute(
+                """
+                UPDATE turn_finalizers SET budget_json=?, updated_at=?
+                WHERE run_id=?
+                """,
+                (budget_json, store.now_iso(), context.run_id),
+            )
         connection.execute(
             "UPDATE runs SET budget_json=?, usage_json=? WHERE id=?",
             (budget_json, usage_json, context.run_id),
         )
+        refreshed = _load_for_update(connection, context)
         updated = _cas_cursor(
             connection,
             store,
             context,
-            row,
+            refreshed,
             expected_cursor=expected_cursor,
             next_cursor=4,
         )

@@ -20,6 +20,7 @@ from .planning.runtime import PlanningOptions
 from .planning.runtime import PlanCoordinator
 from .planning.verifier import EvidenceVerifier
 from .runtime.config import AppConfig, load_config
+from .runtime.budget import RunBudgetLedger, runtime_budget_limits
 from .runtime.context import (
     ContextAccountant,
     ContextAccountingSession,
@@ -119,6 +120,7 @@ class EduAgentService:
             max_item_chars=self.config.memory.max_item_chars,
         )
         self.context_accountant = context_accountant or ContextAccountant()
+        self.budget_pricing = self.config.pricing.catalog()
         self.context_manager = ContextManager(
             token_budget=self.config.runtime.context_token_budget,
             recent_message_limit=self.config.runtime.recent_message_limit,
@@ -431,6 +433,15 @@ class EduAgentService:
                 run_id=context.run_id,
             )
         budget = decision.budget_snapshot or {}
+        if context.budget.ledger is not None:
+            persisted = context.budget.usage()
+            journal_root = budget.get("root_run_id")
+            if journal_root is not None and journal_root != persisted["root_run_id"]:
+                raise RunJournalIdentityError(
+                    "run budget root changed before recovery",
+                    run_id=context.run_id,
+                )
+            return
         for field in (
             "model_calls",
             "max_model_calls",
@@ -438,6 +449,77 @@ class EduAgentService:
             "max_tool_calls",
         ):
             setattr(context.budget, field, int(budget[field]))
+
+    def _bind_root_budget(
+        self,
+        context: RunContext,
+        *,
+        legacy_snapshot: Mapping | None = None,
+    ) -> RunBudgetLedger:
+        with self.state_store.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM run_budget_ledgers WHERE root_run_id=?",
+                (context.run_id,),
+            ).fetchone() is not None
+        if not exists and legacy_snapshot and legacy_snapshot.get("root_run_id"):
+            raise RunJournalIdentityError(
+                "run budget ledger is missing for a ledger-backed journal",
+                run_id=context.run_id,
+            )
+        ledger = RunBudgetLedger(
+            self.state_store,
+            root_run_id=context.run_id,
+            session_id=context.session_id,
+            actor_id=context.actor_id,
+            tenant_id=context.tenant_id,
+            limits=(
+                None
+                if exists
+                else runtime_budget_limits(
+                    self.config.runtime,
+                    self.config.delegation,
+                )
+            ),
+            pricing=self.budget_pricing,
+        )
+        if not exists and legacy_snapshot:
+            model_calls = int(legacy_snapshot.get("model_calls", 0))
+            tool_calls = int(legacy_snapshot.get("tool_calls", 0))
+            if model_calls or tool_calls:
+                operation_id = f"migration:{context.run_id}:legacy-budget"
+                ledger.reserve(
+                    operation_id,
+                    owner_run_id=context.run_id,
+                    kind="legacy_budget_import",
+                    amount={"model_calls": model_calls, "tool_calls": tool_calls},
+                    cost_known=False,
+                    metadata={"component": "migration", "estimated": True},
+                )
+                ledger.commit(
+                    operation_id,
+                    actual={"model_calls": model_calls, "tool_calls": tool_calls},
+                    usage_source="estimated",
+                    cost_known=False,
+                )
+        context.budget.bind_ledger(ledger, owner_run_id=context.run_id)
+        return ledger
+
+    @staticmethod
+    def _record_compression_budget(
+        context: RunContext,
+        *,
+        operation_id: str,
+        status: str,
+    ) -> None:
+        ledger = context.budget.ledger
+        if ledger is None:
+            return
+        ledger.record_free_operation(
+            operation_id,
+            owner_run_id=context.run_id,
+            kind="deterministic_compression",
+            metadata={"component": "compression", "status": status},
+        )
 
     @property
     def teaching_delegation(self):
@@ -452,6 +534,7 @@ class EduAgentService:
                 self.tools_provider,
                 artifact_store=self.artifact_store,
                 policy=self.config.delegation.policy(),
+                pricing=self.budget_pricing,
             )
             self._teaching_delegation = TeachingDelegationService(self._delegation_runtime)
         return self._teaching_delegation
@@ -514,6 +597,7 @@ class EduAgentService:
             title=message[:80],
         )
         self.state_store.enqueue_run(context, request_text=message)
+        self._bind_root_budget(context)
         with self.runtime_manager.session_scope(
             run_id=context.run_id,
             session_id=session_id,
@@ -689,7 +773,9 @@ class EduAgentService:
         text = f"{type(error).__name__}: {error}".lower()
         if is_provider_context_overflow(error):
             return "context_overflow"
-        if isinstance(error, (BudgetExceeded, ContextBudgetExceeded)):
+        if isinstance(error, BudgetExceeded):
+            return error.stop_reason
+        if isinstance(error, ContextBudgetExceeded):
             return "budget_exceeded"
         if "budget" in text or "quota" in text:
             return "budget_exceeded"
@@ -719,6 +805,8 @@ class EduAgentService:
         *,
         context_payload: dict | None = None,
     ) -> None:
+        if isinstance(error, BudgetExceeded) and context.budget.ledger is not None:
+            context.budget.ledger.set_stop_reason(error.stop_reason)
         existing_finalizer = self.state_store.get_turn_finalizer(
             context.run_id,
             session_id=context.session_id,
@@ -897,6 +985,12 @@ class EduAgentService:
             if self.context_engine is not None and not resume
             else None
         )
+        if self.context_engine is not None and not resume:
+            self._record_compression_budget(
+                context,
+                operation_id=f"compression:{context.run_id}:initial:1",
+                status=str(getattr(compaction, "decision", "completed")),
+            )
         if compaction and compaction.compacted_messages:
             context.emit_run_event(
                 RunEventType.CONTEXT_COMPACTED.value,
@@ -1248,6 +1342,12 @@ class EduAgentService:
                         if self.context_engine is not None
                         else None
                     )
+                    if self.context_engine is not None:
+                        self._record_compression_budget(
+                            context,
+                            operation_id=f"compression:{context.run_id}:overflow:1",
+                            status=str(getattr(compaction, "decision", "completed")),
+                        )
                     if compaction is None or not (
                         compaction.compacted_messages
                         or getattr(compaction, "externalized_messages", 0)
@@ -1536,6 +1636,7 @@ class EduAgentService:
             max_tool_calls=self.config.runtime.max_tool_calls,
             cancellation_token=cancellation_token,
         )
+        self._bind_root_budget(context, legacy_snapshot=decision.budget_snapshot)
         self._assert_recovery_runtime_identity(context, decision)
         if stream_writer is not None:
             context.bind_event_sinks(
@@ -1780,6 +1881,7 @@ class EduAgentService:
                     max_model_calls=self.config.runtime.max_model_calls,
                     max_tool_calls=self.config.runtime.max_tool_calls,
                 )
+                self._bind_root_budget(context, legacy_snapshot=finalizer.budget)
                 return self._chat_result_from_finalization(self._finalize_turn(context))
             return self._chat_result_from_finalization(
                 finalization=FinalizationResult.from_record(finalizer)
@@ -1892,6 +1994,7 @@ class EduAgentService:
             max_tool_calls=self.config.runtime.max_tool_calls,
             cancellation_token=cancellation_token,
         )
+        self._bind_root_budget(context, legacy_snapshot=decision.budget_snapshot)
         self._assert_recovery_runtime_identity(context, decision)
         if stream_writer is not None:
             context.bind_event_sinks(

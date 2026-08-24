@@ -117,12 +117,7 @@ class AgentLoopJournal:
         ):
             snapshot = self._bind_context_checkpoint(snapshot, self.context_checkpoint_id)
         budget = snapshot.budget_snapshot
-        for field in (
-            "model_calls",
-            "max_model_calls",
-            "tool_calls",
-            "max_tool_calls",
-        ):
+        for field in ("model_calls", "max_model_calls", "tool_calls", "max_tool_calls"):
             value = budget.get(field)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RunJournalIdentityError(
@@ -130,7 +125,16 @@ class AgentLoopJournal:
                     run_id=self.context.run_id,
                     field=field,
                 )
-            setattr(self.context.budget, field, value)
+            if self.context.budget.ledger is None:
+                setattr(self.context.budget, field, value)
+        if self.context.budget.ledger is not None:
+            persisted = self.context.budget.usage()
+            journal_root = budget.get("root_run_id")
+            if journal_root is not None and journal_root != persisted["root_run_id"]:
+                raise RunJournalIdentityError(
+                    "run budget root changed after journal initialization",
+                    run_id=self.context.run_id,
+                )
         if (
             self.context.budget.model_calls > self.context.budget.max_model_calls
             or self.context.budget.tool_calls > self.context.budget.max_tool_calls

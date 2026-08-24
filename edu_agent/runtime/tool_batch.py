@@ -328,7 +328,13 @@ class ToolBatchExecutor:
                         )
                 break
 
-            accepted = self.context.budget.reserve_tool_calls(len(segment.calls))
+            accepted = self.context.budget.reserve_tool_calls(
+                len(segment.calls),
+                operation_ids=[
+                    f"tool:{self.context.run_id}:{call.call_id}"
+                    for call in segment.calls
+                ],
+            )
             selected = segment.calls[:accepted]
             for call in segment.calls[accepted:]:
                 outcome = self._synthetic_outcome(

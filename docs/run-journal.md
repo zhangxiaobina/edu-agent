@@ -1,4 +1,4 @@
-# RunJournal、TurnFinalizer 与进程重开恢复合同（R2.2-R2.7）
+# RunJournal、TurnFinalizer 与进程重开恢复合同（R2.2-R4.4）
 
 `RunJournal` 是运行恢复的最小持久游标，不是 Plan、Evidence、ToolOperation、Artifact 或 Trace
 的替代品。它只保存这些对象的 ID 引用，以及下一次恢复所需的确定性边界。
@@ -38,7 +38,8 @@ accepted -> planning -> model -> tools -> verifying -> finalizing -> terminal
 - `tool_manifest_hash`、`provider_route_json`：本次 run 冻结的目录摘要（由调用方选择的不可变 hash）和 route 审计形状，不含凭据；
 - `context_checkpoint_id`、`plan_id`、`evidence_id`、`operation_id`、`artifact_id`、`last_tool_event_id`：
   只保存现有真相表的引用；
-- `budget_snapshot_json`：经过有限 JSON 校验的预算快照；不在 journal 内重新结算预算；
+- `budget_snapshot_json`：经过有限 JSON 校验的兼容投影；R4.4 后只引用/展示同一 root ledger 的快照，journal
+  不重新结算预算；
 - `stable_boundary`：最后一个可以安全重开的声明边界；未知或损坏值不能被默认修复；
 - `fencing_token`、`writer_id` 和 `schema_version`：写者身份与 schema 版本。
 
@@ -49,13 +50,13 @@ journal 不保存消息正文、Plan/Evidence/Operation/Artifact payload，也�
 
 恢复入口先读取 journal、finalizer、工具 call/result 配对和 `ToolOperation` 引用，再产生确定性、脱敏且进入
 Trace 的 `RecoveryDecision`。只有下表声明的稳定 cursor 可以自动继续；journal 缺失、损坏、未知 boundary、
-冻结 route/manifest 不一致或预算快照不合法均 fail closed 到 `manual-review`。
+冻结 route/manifest 不一致、预算快照不合法或 ledger root identity 不一致均 fail closed 到 `manual-review`。
 
 | stable cursor | 可证明的持久状态 | decision | 恢复行为 |
 |---|---|---|---|
 | `accepted` | request/run 已创建 | `continue` | 从 planning 继续 |
 | `plan_committed` | Plan 引用和冻结输入已提交 | `continue` | 从 model 继续，不重建另一份 Plan |
-| `model_attempt_started` | attempt、route、manifest、预算已冻结；模型完整返回未提交 | `continue` | 使用冻结身份重入 model；迟到旧结果先过 fence |
+| `model_attempt_started` | attempt、route、manifest 与 root ledger operation 已冻结；模型完整返回未提交 | `continue` | 使用冻结身份重入 model；同 operation 重放不重复扣减，迟到旧结果先过 fence |
 | `assistant_envelope_committed` | envelope 完整，pending call 为只读且无 result | `replay-read` | 只重放该只读调用并提交唯一配对 result |
 | `assistant_envelope_committed` | pending 写 call 尚无 operation | `continue` | handler 尚未进入；按原幂等键 prepare |
 | `assistant_envelope_committed` | operation 为 `prepared/approved/failed` | `continue` | 只恢复同一个 operation，沿既有事务合同执行 |
@@ -71,7 +72,8 @@ Trace 的 `RecoveryDecision`。只有下表声明的稳定 cursor 可以自动�
 | `failed` | failed finalizer/run 已持久化 | `terminal-replay` | 重建相同失败结果，不回到执行态 |
 
 `continue` 不表示从头执行：它只进入该 cursor 对应的下一节点。恢复前重新计算当前工具面和 Provider route，
-必须与 journal 的冻结 hash/脱敏 route 完全一致；预算计数和上限从 snapshot 恢复，不能按新 Service 配置归零。
+必须与 journal 的冻结 hash/脱敏 route 完全一致；预算从 `RunBudgetLedger` 加载原 identity、limits、used、reserved、
+stop reason 和冻结价目，journal snapshot 只做 root 一致性复验，不能按新 Service 配置归零。
 
 ## R2.3 工具消息提交协议
 
@@ -121,10 +123,11 @@ open -> tools_closed -> plan_verified -> final_message_committed
 `tools_closed` 为所有 pending call 写确定性的配对关闭结果；`plan_verified` 复验持久 Plan/Evidence，验证器不可用
 或结果不确定时转为 `manual_review`。只有 `completed` 分支可在
 `messages(run_id, idempotency_key='final-assistant:<run_id>')` 提交最终 assistant；随后才将 Provider usage 与
-预算快照结算到 run。失败路径从已持久的胜出 Provider 事件和异常 usage 恢复结算输入，不因重启归零。
+预算快照结算到 run。response usage 仍从已持久的胜出 Provider 事件和异常 usage 恢复；预算则由 root ledger
+保留包括失败 retry/fallback 在内的全部 attempt，不因重启归零。
 `terminal` 在同一个 SQLite 事务中提交 journal 的 `terminal/cancelled/failed`、
 `runs.status/stop_reason` 与 finalizer terminal。稳定原因包括 `completed`、`interrupted`、
-`budget_exceeded`、`model_failed` 和 `manual_review`。
+`budget_exhausted:<dimension>`、旧兼容 `budget_exceeded`、`model_failed` 和 `manual_review`。
 
 finalizer 在任一步骤后崩溃时，恢复 worker 取得更高 fencing token 后从已提交 cursor 继续；旧 worker 的下一次
 写入被 lease fence 拒绝。取消或不确定写若在最终消息提交后获胜，terminal 事务会将该消息标为 inactive，避免
@@ -135,6 +138,17 @@ API request completion 与 session lease release 都要求先观察到 finalizer
 `terminal` 时，request lease 过期和 stalled-run 扫描只标记 `resume_finalizer`，不会伪造 `abandoned` 终态；
 API response 尚未提交时先继续未完成的 hooks/cleanup，再从 terminal finalizer 重建原 `ChatResult`；已提交时
 继续按原 response hash 重放。
+
+## R4.4 root ledger 恢复边界
+
+幂等 `014_run_budget_ledger` 将 SQLite `user_version` 提升到 14。`run_budget_ledgers` 以 root run 为主键并冻结
+session/actor/tenant、limits、pricing version 与具体价目；`run_budget_operations` 以稳定 operation/attempt id 保存
+reserve/commit/release 状态和请求指纹。所有变更使用 `BEGIN IMMEDIATE`，并发恢复不能超卖。
+
+child allocation 是 root reservation 的转移，不是新的共享预算。Provider/tool operation commit、child 终态差额
+结算和余量释放都可重放；未知 usage 按 R4.1 估算，未知价格保持 unknown。TurnFinalizer 在 `usage_settled` cursor
+使用唯一 `budget-finalizer:<root_run_id>` 释放残留预留并冻结墙钟；若在 ledger final 与 cursor 提交之间崩溃，恢复
+重复同一 finalizer id 后继续，不会二次结算。
 
 ## R2.7 sequence 与进程 fence
 
@@ -163,7 +177,7 @@ writer/fence、写副作用唯一和 API request 字节重放。
    中断时，重开会补齐缺失对象。数据库 schema version 高于当前代码时拒绝启动，绝不降级或覆盖。
 6. **恢复诚实**：只读 snapshot 解码所有 JSON 和 phase；损坏值、未知 phase、缺失必需字段直接抛出
    `RunJournalCorrupt`，恢复层不得静默选择一个默认游标。
-7. **恢复身份冻结**：resume 前复验 tool manifest hash 与脱敏 Provider route，并恢复持久预算计数/上限；任一
-   不一致都不得用新进程的默认配置覆盖。
+7. **恢复身份冻结**：resume 前复验 tool manifest hash、脱敏 Provider route 与 ledger root identity，并加载持久
+   limits/used/reserved/stop reason/price；任一不一致都不得用新进程的默认配置覆盖。
 8. **事件高水位持久化**：可见 RunEvent 的 sequence 先落到 run 高水位，journal 提交与恢复 writer 都只能从
    两个高水位的最大值向前推进；旧 token 每次 publish 都重新过状态库 fence。

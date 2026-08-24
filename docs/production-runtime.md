@@ -153,7 +153,45 @@ Plan/Evidence、tool result、memory/checkpoint、协议开销和最大输出预
 scope、sequence 和 hash；新 checkpoint 使用严格 schema v2。R4.3 不增加数据库 migration，策略版本升级为
 `artifact-first-hysteresis@2026-08-24.r4.3.v1`，仍使用 R4.1 前的确定性压缩 estimator。默认离线摘要和 overflow
 恢复不依赖外部模型；Artifact-only 的持久边界由 Artifact metadata、source sequence、run/session/actor/tenant scope
-共同复验，崩溃后不会再次外置同一结果。本阶段没有实现预算总账。
+共同复验，崩溃后不会再次外置同一结果。
+
+## 持久运行预算
+
+`RunBudgetLedger` 是父 run 与全部 descendant 的唯一预算真相。root identity 固定为
+`root_run_id + session_id + actor_id + tenant_id`；恢复时任一 scope 不一致、limits 改变、pricing version 改变或
+同版本具体价目漂移都会拒绝。预算维度和单位如下：
+
+| 配置/快照维度 | 单位 | 包含内容 |
+|---|---:|---|
+| model calls | 整数 attempt | 父/child Agent、模型 planner/摘要、retry 与 fallback 的每个真实 Provider attempt |
+| tool calls | 整数 call | 每个取得额度并进入 executor 的调用；串行与并发口径相同 |
+| input/output/total tokens | Provider token | 所有 Provider attempt 分项累计，total 作为独立上限 |
+| cost | micro-USD 持久、USD 展示 | 仅显式冻结价目可计算；未知价格不当作 0 |
+| wall time | root elapsed ms | 从 ledger 创建到唯一 budget finalizer，包含退避、等待、压缩、工具和 child |
+
+工具 batch 的规划、Manifest/参数预检、route 选择、context recount、journal/Trace 和 finalizer bookkeeping 不单独
+增加 call/token/cost；它们仍计入 root wall time。确定性 checkpoint 压缩写稳定零额度 operation；模型压缩若启用
+则必须作为 Provider attempt 计费。对外 response 仍只携带胜出结果的 usage，防止改变 API 语义；总账会结算失败
+retry、fallback 和胜出 attempt 的全部用量。
+
+所有并发入口先用稳定 operation/attempt id 调用原子 `reserve`。SQLite `BEGIN IMMEDIATE` 在 used + reserved 上
+检查 model/tool/input/output/total/cost/wall-time，因而并发工具与同时启动的 child 不能超卖。child 批量启动前先
+预留各自完整本地上限，再从 reservation 向 child operation 转移；child 的 `IterationBudget` 继续执行更严格的
+model/tool/token/cost 限制。完成时按实际用量 commit 并释放差额；失败、超时、取消、拒绝或 worker lease 过期时
+release。实际 Provider/child 用量高于预留时仍先完整落账，然后以固定优先级产生
+`budget_exhausted:<dimension>`，不能丢弃已发生用量。
+
+operation 保存请求指纹；相同 id 的等价 reserve/commit/release 重放幂等，内容冲突会失败。进程重开通过 ledger
+加载冻结 identity、limits、used、reserved、stop reason 和价目，不刷新 allowance。`TurnFinalizer` 只使用
+`budget-finalizer:<root_run_id>` 结算一次：原子释放尚未使用的 reservation、冻结 root wall time并保存快照；重复
+调用返回同一结果，其他 finalizer id 被拒绝。本阶段不实现 lifecycle/process drain。
+
+Provider 返回 usage 时按 actual 结算；缺失时使用 R4.1 request breakdown 估算并标记 `estimated`，只有 total 时
+保留实际 total，input/output 使用估算；流在 error 前已经产生的 usage 也不会丢失。`[pricing]` 必须给出版本和
+route/model 的 input/output 每百万 token USD 价格，root 同时冻结版本和规范化价目。没有匹配价格时 snapshot 为
+`cost_status=unknown`、`cost_usd=null`，同时
+保留可计算的 `known_cost_usd`；不要把 unknown 配置成 0 来冒充免费。预算 Trace 只记录 operation id、聚合用量、
+estimated/cost status、stop reason 与受限 route 元数据，不写 prompt、messages 或 tool arguments。
 
 ## 全局运行管理
 
@@ -315,6 +353,7 @@ payload hash、scope、有效期和 approver，不保存 token 或明文凭据�
 - runs（状态、owner/token、heartbeat、取消、恢复原因/建议和持久 stream sequence 高水位）
 - run_journals（phase、loop cursor、model attempt、event sequence、冻结 route/预算、稳定边界和真相表引用）
 - turn_finalizers / turn_finalizer_hooks（收尾 cursor、唯一最终消息、usage/budget、终态和后处理 claim）
+- run_budget_ledgers / run_budget_operations（root 全树 limits、used/reserved、稳定 operation 与唯一 finalizer）
 - session_leases（当前 owner、单调 fencing token、active run、heartbeat 和 expiry）
 - tool_events（tool call / operation 关联、参数、结果、耗时）
 - tool_operation_refs（operation owner、调用关联和当前状态）
@@ -357,6 +396,8 @@ R2.7 的 `012_r2_recovery` 将 schema version 提升到 12，增加 `runs.stream
 EventBus 仍不保存历史 delta，工具并发不改变原序消息和恢复游标。
 R4.2 的 `013_context_checkpoint_provenance` 将 schema version 提升到 13，新增 checkpoint provenance、引用和父链字段；
 迁移可重复执行，旧 checkpoint 保持 schema v1 兼容读取，新写入使用严格 schema v2。
+R4.4 的 `014_run_budget_ledger` 将 schema version 提升到 14；同一迁移可重复运行，root identity、价格、已用和
+预留额度在恢复时保持不变。
 
 ## 可插拔扩展
 
@@ -409,7 +450,8 @@ fallback 只接受上述明确瞬态 failure kind 或 circuit-open，并在 Prov
 tool calling、strict structured output、请求形态和上下文需求；未知 fallback context window 不视为无限。
 401/403/普通 400/context overflow/output cap/unknown 均拒绝切换并保留 primary 原错。候选 route 在 turn 起点冻结，
 `route_resolved/fallback_rejected/fallback_activated/provider_result_selected` 解释选择与唯一胜出结果；失败 attempt
-usage 只留在审计中，不能覆盖最终响应。每条 route 仍只有一个 `CredentialRef`，不实现凭据轮换池。
+usage 不能覆盖最终响应，但与胜出 attempt 一样进入 root ledger。每条 route 仍只有一个 `CredentialRef`，不实现
+凭据轮换池。
 
 Service 在 Provider 明确返回 input context overflow、且流尚未产生可见 delta 时拥有一个更窄的恢复分支：重新计数，
 强制执行一次 checkpoint/Artifact-only 压缩，重建请求，并在相同冻结 route 上重试一次。checkpoint 或已复验的 Artifact

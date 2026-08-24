@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R4.3
-- next_prompt: R4.4
+- last_completed_prompt: R4.4
+- next_prompt: R4.5
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0-R3 顶层门禁均 passed，R4.1-R4.3 的 Context Accounting、Artifact-first 可恢复压缩、保真评测和一次 overflow recovery 已通过；R4 仍需完成全树预算、lifecycle/drain 及备份恢复后才能收口
+- stage_gate_reason: R0-R3 顶层门禁均 passed，R4.1-R4.4 的 Context Accounting、Artifact-first 可恢复压缩、保真评测、一次 overflow recovery 和全树持久预算已通过；R4 仍需完成 lifecycle/drain 及备份恢复后才能收口
 
 ## Baseline Reproduction
 
@@ -1101,3 +1101,49 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   R4.4，不能从本阶段局部 model-call 计数推断已完成总账。
 - gate: `R4.3 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
 - next: R4.4，读取本交接并实现持久 `RunBudgetLedger` 与全树 reserve/commit/release；不实现进程 drain。
+
+### R4.4 - 2026-08-24
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `41da4955f20e1caa581dc34d5788e1fd2948d539` 开始；本次未创建本地提交或推送，未回退用户改动。R4.4
+  证据来自当前未提交 development 工作区，不冒充 candidate/release artifact。
+- ledger identity/units: 新增持久 `RunBudgetLedger`，root identity 冻结
+  `root_run_id + session_id + actor_id + tenant_id`。七维分别为整数 model calls、tool calls、Provider
+  input/output/total tokens、整数 micro-USD cost 和 root elapsed milliseconds；total token 是独立限制，wall time
+  从 ledger 创建持续到唯一 finalizer。root limits 与 delegation root limits 同时存在时取更严格值。
+- accounting boundary: 父/child Agent、模型 planner/未来模型压缩和每个 retry/fallback Provider attempt 都进入同一
+  ledger；每个 executor 接纳的串行/并发工具调用各计一次。route/context recount、Manifest/参数/batch 规划、journal、
+  Trace 和 finalizer bookkeeping 不增加 call/token/cost，但自然计入 root wall time。当前确定性压缩写零额度稳定
+  operation。response 只携带胜出 usage，ledger 仍结算失败 attempt，避免改变 API 合同或隐藏成本。
+- atomicity/replay: 幂等 `014_run_budget_ledger` 将 State schema 提升到 14，新增 ledger/operation 表。`reserve/commit/
+  release/finalize` 使用 `BEGIN IMMEDIATE`；used + reserved 检查防并发超卖，operation id、请求指纹和 attempt sequence
+  保证等价重放不二次收费、冲突重用 fail closed。实际用量超出预留仍完整落账，并按固定优先级持久化
+  `budget_exhausted:<dimension>`；恢复加载原 identity/limits/used/reserved/stop reason，不刷新预算。
+- delegation/finalizer: child 批量启动前预留完整上限并把额度从 root reservation 转移到 child operation，不创建
+  Hermes 式独立共享总账；`IterationBudget` 继续执行更严格的 child model/tool/token/cost 上限。completed 按实际结算
+  并释放差额；failed/timed_out/cancelled/rejected/worker lease expiry 都释放余量。唯一
+  `budget-finalizer:<root_run_id>` 原子释放残留 reservation 并冻结墙钟；重复调用幂等，其他 finalizer id 被拒绝。
+- provider/cost/trace: Provider usage 缺失时使用 R4.1 request breakdown 估算并标记 `estimated`；只有 total 时保留其
+  实际值并估算缺失分量；流式 attempt 在 error 前已经发出的 usage 仍按 actual 结算。新增显式、版本化 `[pricing]`，
+  root 同时冻结 version 与规范化具体价目；未知 route/model 保持 `cost_status=unknown`、`cost_usd=null`，已知部分保留
+  `known_cost_usd`，不以 0 冒充免费。budget Trace 只记录 operation id、聚合用量、usage/cost status、stop reason 和
+  受限 route 元数据，不保存 prompt/messages/tool arguments。
+- tests: 新增 `tests/test_run_budget_ledger.py` 16 项，覆盖 migration/identity/price freeze、原子幂等 API、prompt-free
+  Trace、usage/cost unknown、并发 reserve、七维耗尽、进程重开、多 root 隔离、重复 finalizer、planner/确定性压缩/
+  retry/fallback、失败流 actual usage、父级加两个 child、Provider-only total token 保真、失败释放和超额实际结算；
+  旧 journal/finalizer stop reason 与 schema 断言同步升级。
+- verification: 全仓 Ruff、`uv lock --check`（91 packages）、`uv pip check`（62 packages）和 `git diff --check` 通过；
+  budget/delegation/provider/journal/finalizer/transaction/tool batch/context/recovery/distributed/plan/runtime 联合专项
+  `322 passed (14.50s)`；失败流 usage 补强后的 budget/provider 专项 `86 passed (1.02s)`。受限沙箱全量为
+  `618 passed, 12 failed (41.68s)`，12 项全部止于
+  `127.0.0.1:0` 的 `socket.bind PermissionError`。显式清空真实 Provider 凭据并获准本机回环后，首轮全量仅既有
+  tool-batch p95 时序断言受调度抖动失败（结构并发断言通过），该用例单独复跑 `1 passed`，随后同一全量离线命令
+  `630 passed (36.69s)`。
+- not_verified: 未访问公网、真实模型/Provider、真实教学平台、GitHub-hosted CI 或 Docker/Jobe；未运行阶段收口专用
+  `zsh scripts/accept_stage8.sh`，因为 R4.4 是普通切片且 R4 gate 仍未收口。未实现 lifecycle/process drain，也未做
+  SQLite 备份恢复或 Artifact retention/GC。
+- residual_risks: 未知价目的 run 只能报告已知部分，不能执行精确 cost limit 归因；部署方必须维护经核验且版本化的
+  价格表。wall time 是 root 墙钟而非各并发任务 CPU 时间。进程级 readiness、有限 drain、final flush 和 deadline 后
+  可恢复标记留给 R4.5；backup/restore 与 retention/GC 留给 R4.6。
+- gate: `R4.4 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
+- next: R4.5，读取本交接并实现进程级 `starting/running/draining/stopped`、readiness 与有限 drain；不做数据库备份工具。

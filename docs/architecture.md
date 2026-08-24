@@ -92,6 +92,42 @@ Provider 明确返回 input context overflow 且尚无可见 stream delta 时，
 overflow、output cap、普通 invalid request、本地 `CurrentUserInputTooLarge` 和可见流错误均直接分类失败，不进入循环，
 也不伪装为 fallback。
 
+## 持久全树预算
+
+R4.4 的 `RunBudgetLedger` 以 `(root_run_id, session_id, actor_id, tenant_id)` 作为不可变 root identity；
+`root_run_id` 是表主键，其余三项用于防止恢复或 child 跨 scope 绑定。一个父 run、planner、压缩、所有
+retry/fallback attempt、并发工具以及全部 descendant 共用这一行总账。Hermes 风格的 child 独立新预算没有被
+用来冒充共享预算；child 的 `IterationBudget` 仍保留更严格的本地上限，但其可用额度必须先从 root reservation
+转移。
+
+| 维度 | 持久单位 | 计数边界 |
+|---|---:|---|
+| `model_calls` | Provider attempt 次数 | 父/child Agent、模型 planner、任何模型摘要，以及每个 retry/fallback 的真实 I/O attempt 各计一次 |
+| `tool_calls` | executor 接纳的调用次数 | 串行或并发 segment 中每个取得预算的调用各计一次；batch 规划本身不计 |
+| `input_tokens` / `output_tokens` / `total_tokens` | Provider token | 每个实际 attempt 分别累计；`total_tokens` 是独立限制，不由另外两个限制替代 |
+| `cost_microusd` | 整数 micro-USD | 仅按冻结的显式价格表计算；对外同时给出 USD 投影 |
+| `wall_time_ms` | root elapsed 毫秒 | 从 ledger 创建到 finalizer 的 root 墙钟，覆盖等待、退避、planner、压缩、工具和 child |
+
+纯路由选择、context recount、参数/Manifest 规划校验、journal/Trace 写入和 finalizer bookkeeping 不增加
+model/tool/token/cost；它们仍自然消耗 root wall time。当前 checkpoint 压缩是确定性的，因此写入一个稳定的
+零额度 operation；若以后使用模型摘要，该 Provider attempt 必须走同一 ledger。HTTP response 的 usage 只描述
+胜出的 Provider 结果以保持 API 兼容，但 ledger 会结算失败 retry 和最终 fallback 在内的每个实际 attempt。
+
+`reserve/commit/release` 都在 SQLite `BEGIN IMMEDIATE` 内更新 ledger 与 operation：reserve 按 used + reserved
+检查所有维度，防止并发超卖；commit 用实际值替换预留并释放差额，即使 Provider 或 child 实际值超过预留也先
+完整落账，再持久化固定的 `budget_exhausted:<dimension>`；失败、取消、超时、拒绝和 lease expiry 会 release
+未用 child 额度。每个动作绑定稳定 operation/attempt id 与请求指纹，等价重放返回原结果，不同请求复用同一 id
+会失败。恢复通过 `RunBudgetLedger.open()` 读取原 identity、limits、used、reserved、stop reason、价格版本和具体
+价目，不会重新发放额度。
+
+Provider usage 缺失时复用 R4.1 的 request breakdown 估算 input/output，并标记 `usage_source=estimated`；只有
+Provider total 时保留该实际 total，缺失分量仍估算；流式 attempt 在 error 前已发出的 usage 仍按 actual 结算。
+价格配置必须显式且版本化，并在 root 创建时连同规范化价目冻结；未知 route/model 的 cost 保持
+`cost_status=unknown`、`cost_usd=null`，已知部分另存为
+`known_cost_usd`，不能写 0 冒充免费。预算 Trace 只含 operation id、维度聚合、usage source、cost status 和
+安全元数据，不保存 prompt、messages 或 tool arguments。唯一 `budget-finalizer:<root_run_id>` 原子释放残留预留并
+冻结墙钟；重复 finalizer 幂等，另一个 finalizer identity 被拒绝。
+
 ## 教学 Provider 防腐层
 
 R3.2-R3.3 的 `edu_agent.teaching` 是教学领域数据边界，不是上节 R1 的模型 `ProviderGateway`。三类现有
@@ -257,7 +293,7 @@ actor/tenant、component/type/status、duration、usage、error 和 attributes�
 
 ```text
 runs/messages/session_leases -> runtime/conversation
-provider_events              -> provider
+provider_events              -> provider/budget aggregates
 plans/plan_steps/evidence    -> planning/evidence
 tool_events/operation_refs   -> tool/transaction/sandbox
 artifacts                    -> artifact metadata only
@@ -296,7 +332,7 @@ timestamp 规范化为 UTC，payload 在进入总线前经过中心脱敏并验�
 |---|---|---|
 | `RunEventBus` | 当前进程内 future-only 发布/订阅、sequence、writer fence、有界 fan-out | 落库、历史回放、断线恢复、跨进程传输 |
 | `TraceRepository` | 从现有业务/审计表只读投影并导出 `RuntimeEvent v1`；索引可重建 | 消费 EventBus 作为新真相源、保存 token delta |
-| `RunJournal`（R2.2-R2.7） | 持久保存 phase、sequence/loop cursor、attempt、冻结 route、预算和最后稳定边界；恢复 planner 结合消息、operation/finalizer 真相选择动作 | 替代 Plan/Evidence/ToolOperation/Artifact/Trace 真相，保存历史 token delta |
+| `RunJournal`（R2.2-R4.4） | 持久保存 phase、sequence/loop cursor、attempt、冻结 route、预算引用/快照和最后稳定边界；恢复 planner 结合 ledger、消息、operation/finalizer 真相选择动作 | 替代 `RunBudgetLedger`、Plan/Evidence/ToolOperation/Artifact/Trace 真相，保存历史 token delta |
 
 每个订阅 buffer、进程内 stream state 数和活跃订阅总数都有固定上限。达到 stream/subscription 上限时
 fail closed；buffer 满时只取消该慢消费者、清空不完整队列并显式返回 `SlowConsumerError`，生产者和其他
@@ -322,6 +358,10 @@ lease fencing token 与 writer；旧 worker、重复/跳跃 phase、游标回退
 `009_run_journal` migration 可重复执行，SQLite `user_version` 高于当前代码时拒绝启动，未知 phase/损坏 JSON
 在只读 snapshot 中直接失败，不用默认值猜恢复位置。R2.7 的 `012_r2_recovery` 增加 run 级 stream sequence
 高水位；恢复决策表详见 [docs/run-journal.md](run-journal.md)。
+
+R4.4 的幂等 `014_run_budget_ledger` 将 SQLite schema version 提升到 14，新增 `run_budget_ledgers` 与
+`run_budget_operations`。RunJournal 只保存兼容 budget snapshot；恢复和 finalizer 的消费真相来自同一 root ledger，
+不会因重建 `RunContext` 而刷新。
 
 ### Agent 工具消息稳定边界（R2.3）
 

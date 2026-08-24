@@ -63,7 +63,7 @@ from .turn_finalizer import (
 
 _UNSET = object()
 _SCOPED_ARTIFACT_REFERENCE_TYPE = "edu-agent.scoped-artifact.v1"
-STATE_SCHEMA_VERSION = 13
+STATE_SCHEMA_VERSION = 14
 
 
 class SessionLeaseUnavailable(RuntimeError):
@@ -702,6 +702,9 @@ class StateStore:
             initialize_agent_tool_message_schema(connection, now=self.now_iso())
             initialize_turn_finalizer_schema(connection, now=self.now_iso())
             initialize_context_checkpoint_schema(connection, now=self.now_iso())
+            from ..runtime.budget import initialize_run_budget_schema
+
+            initialize_run_budget_schema(connection, now=self.now_iso())
             connection.execute(
                 """
                 INSERT OR IGNORE INTO state_schema_migrations(version, applied_at)
@@ -4691,6 +4694,8 @@ class StateStore:
             "agent_tool_calls",
             "turn_finalizers",
             "turn_finalizer_hooks",
+            "run_budget_ledgers",
+            "run_budget_operations",
         }
         if table not in allowed:
             raise ValueError(f"不允许统计表：{table}")

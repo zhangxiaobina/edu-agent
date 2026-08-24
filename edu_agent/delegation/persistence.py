@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import uuid
 from datetime import timedelta
 from typing import Any
 
 from ..runtime.security import redact_sensitive, redact_sensitive_text
+from ..runtime.budget import BudgetAmounts, BudgetExceeded, RunBudgetLedger
 from ..state.store import FencingTokenRejected, RunCancelled
 from .models import DelegationBackpressure, DelegationLimitExceeded, SubtaskStatus
 
@@ -154,7 +157,7 @@ class DelegationState:
             "input_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
-            "estimated_cost_usd": 0.0,
+            "estimated_cost_usd": None,
         }
 
     @staticmethod
@@ -166,6 +169,173 @@ class DelegationState:
             "cost_usd": 0.0,
         }
 
+    @staticmethod
+    def _child_reservation(child_budget: dict[str, int | float]) -> BudgetAmounts:
+        tokens = int(child_budget["max_tokens"])
+        return BudgetAmounts(
+            model_calls=int(child_budget["max_model_calls"]),
+            tool_calls=int(child_budget["max_tool_calls"]),
+            input_tokens=tokens,
+            output_tokens=tokens,
+            total_tokens=tokens,
+            cost_microusd=int(math.ceil(float(child_budget["max_cost_usd"]) * 1_000_000)),
+        )
+
+    @staticmethod
+    def _ledger_projection(snapshot: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        reserved = snapshot["reserved"]
+        reservation = {
+            "model_calls": int(reserved["model_calls"]),
+            "tool_calls": int(reserved["tool_calls"]),
+            "tokens": int(reserved["total_tokens"]),
+            "cost_usd": float(reserved["cost_microusd"]) / 1_000_000,
+        }
+        usage = {
+            "model_calls": int(snapshot["model_calls"]),
+            "tool_calls": int(snapshot["tool_calls"]),
+            "input_tokens": int(snapshot["input_tokens"]),
+            "output_tokens": int(snapshot["output_tokens"]),
+            "total_tokens": int(snapshot["total_tokens"]),
+            "estimated_cost_usd": snapshot["cost_usd"],
+            "cost_status": snapshot["cost_status"],
+            "estimated": bool(snapshot["estimated"]),
+            "wall_time_ms": int(snapshot["wall_time_ms"]),
+        }
+        return reservation, usage
+
+    def _sync_root_projection(
+        self,
+        connection,
+        root_run_id: str,
+        snapshot: dict[str, Any],
+        *,
+        now: str,
+    ) -> None:
+        reserved, usage = self._ledger_projection(snapshot)
+        connection.execute(
+            """
+            UPDATE delegation_roots
+            SET reserved_json=?, usage_json=?, updated_at=?
+            WHERE root_run_id=?
+            """,
+            (_json(reserved), _json(usage), now, root_run_id),
+        )
+
+    def _settle_child_usage(
+        self,
+        connection,
+        row,
+        usage: dict[str, Any],
+        ledger: RunBudgetLedger,
+    ) -> dict[str, Any]:
+        current = ledger.owner_usage(row["id"], connection=connection)
+        target_input = int(usage.get("input_tokens", 0))
+        target_output = int(usage.get("output_tokens", 0))
+        target = {
+            "model_calls": int(usage.get("model_calls", 0)),
+            "tool_calls": int(usage.get("tool_calls", 0)),
+            "input_tokens": target_input,
+            "output_tokens": target_output,
+            "total_tokens": int(
+                usage.get("total_tokens", target_input + target_output)
+            ),
+        }
+        cost_value = usage.get("estimated_cost_usd")
+        cost_known = cost_value is not None or not any(target.values())
+        target_cost = (
+            int(math.ceil(float(cost_value) * 1_000_000))
+            if cost_value is not None
+            else current.cost_microusd
+        )
+        current_values = current.to_dict()
+        target["cost_microusd"] = target_cost
+        target["wall_time_ms"] = 0
+        deltas = {
+            key: int(target[key]) - int(current_values[key])
+            for key in target
+        }
+        if any(value < 0 for value in deltas.values()):
+            raise DelegationLimitExceeded("child reported usage is below persisted usage")
+        reservation_operation_id = f"delegation:{row['id']}:reservation"
+        reservation = ledger.operation(
+            reservation_operation_id,
+            connection=connection,
+        )
+        if reservation is None or reservation["status"] != "reserved":
+            raise DelegationLimitExceeded("child budget reservation is unavailable")
+        ledger.commit(
+            reservation_operation_id,
+            actual=BudgetAmounts(**deltas),
+            usage_source="reported" if cost_known else "estimated",
+            cost_known=cost_known,
+            metadata={"component": "delegation", "status": "child_terminal"},
+            connection=connection,
+        )
+        return ledger.release_owner_reservations(
+            row["id"],
+            reason="child_terminal",
+            connection=connection,
+        )
+
+    def _release_child_budget(
+        self,
+        connection,
+        row,
+        *,
+        reason: str,
+        now: str,
+    ) -> None:
+        exists = connection.execute(
+            "SELECT 1 FROM run_budget_ledgers WHERE root_run_id=?",
+            (row["root_run_id"],),
+        ).fetchone()
+        if exists is None:
+            self._release_legacy_reservation(connection, row, now=now)
+            return
+        ledger = RunBudgetLedger.open(
+            self.state_store,
+            root_run_id=row["root_run_id"],
+            connection=connection,
+        )
+        snapshot = ledger.release_owner_reservations(
+            row["id"],
+            reason=reason,
+            connection=connection,
+        )
+        self._sync_root_projection(
+            connection,
+            row["root_run_id"],
+            snapshot,
+            now=now,
+        )
+
+    def _release_legacy_reservation(self, connection, row, *, now: str) -> None:
+        root = connection.execute(
+            "SELECT reserved_json FROM delegation_roots WHERE root_run_id=?",
+            (row["root_run_id"],),
+        ).fetchone()
+        if root is None:
+            return
+        reserved = json.loads(root["reserved_json"])
+        budget = json.loads(row["budget_json"])
+        deductions = {
+            "model_calls": int(budget["max_model_calls"]),
+            "tool_calls": int(budget["max_tool_calls"]),
+            "tokens": int(budget["max_tokens"]),
+            "cost_usd": float(budget["max_cost_usd"]),
+        }
+        next_reserved = {
+            key: max(0, reserved[key] - deductions[key])
+            for key in reserved
+        }
+        connection.execute(
+            """
+            UPDATE delegation_roots SET reserved_json=?, updated_at=?
+            WHERE root_run_id=?
+            """,
+            (_json(next_reserved), now, row["root_run_id"]),
+        )
+
     def create_batch(
         self,
         *,
@@ -175,6 +345,7 @@ class DelegationState:
         child_budget: dict[str, int | float],
         max_depth: int,
         max_children_per_parent: int,
+        ledger: RunBudgetLedger | None = None,
     ) -> list[dict[str, Any]]:
         if len({entry["task_spec"]["task_key"] for entry in entries}) != len(entries):
             raise DelegationLimitExceeded("同一批次 task_key 不能重复")
@@ -207,6 +378,8 @@ class DelegationState:
                 raise DelegationLimitExceeded(
                     f"委派深度超过上限（{depth}/{max_depth}）"
                 )
+            if ledger is not None and ledger.root_run_id != root_run_id:
+                raise DelegationLimitExceeded("delegation root 与共享预算 ledger 不一致")
             connection.execute(
                 """
                 INSERT OR IGNORE INTO delegation_roots(
@@ -307,28 +480,71 @@ class DelegationState:
                     )
 
             reserved = json.loads(root["reserved_json"])
-            additions = {
-                "model_calls": int(child_budget["max_model_calls"]) * len(new_entries),
-                "tool_calls": int(child_budget["max_tool_calls"]) * len(new_entries),
-                "tokens": int(child_budget["max_tokens"]) * len(new_entries),
-                "cost_usd": float(child_budget["max_cost_usd"]) * len(new_entries),
-            }
-            proposed = {key: reserved[key] + additions[key] for key in reserved}
-            limits = {
-                "model_calls": int(root_budget["max_model_calls"]),
-                "tool_calls": int(root_budget["max_tool_calls"]),
-                "tokens": int(root_budget["max_tokens"]),
-                "cost_usd": float(root_budget["max_cost_usd"]),
-            }
-            exceeded = [key for key, value in proposed.items() if value > limits[key]]
-            if exceeded:
-                raise DelegationLimitExceeded(
-                    f"root delegation budget 预留失败：{sorted(exceeded)}"
-                )
+            proposed = reserved
+            if ledger is None:
+                additions = {
+                    "model_calls": int(child_budget["max_model_calls"]) * len(new_entries),
+                    "tool_calls": int(child_budget["max_tool_calls"]) * len(new_entries),
+                    "tokens": int(child_budget["max_tokens"]) * len(new_entries),
+                    "cost_usd": float(child_budget["max_cost_usd"]) * len(new_entries),
+                }
+                proposed = {key: reserved[key] + additions[key] for key in reserved}
+                limits = {
+                    "model_calls": int(root_budget["max_model_calls"]),
+                    "tool_calls": int(root_budget["max_tool_calls"]),
+                    "tokens": int(root_budget["max_tokens"]),
+                    "cost_usd": float(root_budget["max_cost_usd"]),
+                }
+                exceeded = [key for key, value in proposed.items() if value > limits[key]]
+                if exceeded:
+                    raise DelegationLimitExceeded(
+                        f"root delegation budget 预留失败：{sorted(exceeded)}"
+                    )
 
-            for entry in new_entries:
+            ledger_snapshot = None
+            prepared_entries = [(entry, uuid.uuid4().hex) for entry in new_entries]
+            batch_operation_id = None
+            if ledger is not None and prepared_entries:
+                child_amount = self._child_reservation(child_budget)
+                aggregate_amount = BudgetAmounts(
+                    **{
+                        key: value * len(prepared_entries)
+                        for key, value in child_amount.to_dict().items()
+                    }
+                )
+                batch_key = "\x1f".join(
+                    sorted(entry["task_spec"]["task_key"] for entry, _ in prepared_entries)
+                )
+                digest = hashlib.sha256(batch_key.encode("utf-8")).hexdigest()[:24]
+                batch_operation_id = (
+                    f"delegation:{parent_context.run_id}:batch:{digest}"
+                )
+                try:
+                    ledger.reserve(
+                        batch_operation_id,
+                        owner_run_id=parent_context.run_id,
+                        kind="child_batch_reservation",
+                        amount=aggregate_amount,
+                        metadata={"component": "delegation", "status": "queued"},
+                        connection=connection,
+                    )
+                except BudgetExceeded as error:
+                    # The failed reserve persists its deterministic stop reason,
+                    # while no child row/allocation has been created yet.
+                    connection.commit()
+                    raise DelegationLimitExceeded(error.stop_reason) from error
+            for entry, run_id in prepared_entries:
                 task_spec = entry["task_spec"]
-                run_id = uuid.uuid4().hex
+                if ledger is not None:
+                    ledger_snapshot = ledger.reserve(
+                        f"delegation:{run_id}:reservation",
+                        owner_run_id=run_id,
+                        kind="child_reservation",
+                        amount=self._child_reservation(child_budget),
+                        metadata={"component": "delegation", "status": "queued"},
+                        parent_operation_id=batch_operation_id,
+                        connection=connection,
+                    )
                 connection.execute(
                     """
                     INSERT INTO delegation_runs(
@@ -365,7 +581,20 @@ class DelegationState:
                         now,
                     ),
                 )
-            if new_entries:
+            if ledger is not None and batch_operation_id is not None:
+                ledger_snapshot = ledger.release(
+                    batch_operation_id,
+                    reason="child_allocations_created",
+                    connection=connection,
+                )
+            if ledger is not None and ledger_snapshot is not None:
+                self._sync_root_projection(
+                    connection,
+                    root_run_id,
+                    ledger_snapshot,
+                    now=now,
+                )
+            elif new_entries:
                 connection.execute(
                     """
                     UPDATE delegation_roots
@@ -408,6 +637,12 @@ class DelegationState:
                 (row["root_run_id"],),
             ).fetchone()
             if root["cancel_requested_at"] or row["status"] == "cancel_requested":
+                self._release_child_budget(
+                    connection,
+                    row,
+                    reason="root_cancelled_before_claim",
+                    now=now_iso,
+                )
                 connection.execute(
                     """
                     UPDATE delegation_runs
@@ -528,6 +763,7 @@ class DelegationState:
         result_artifact_id: str | None = None,
         failure_reason: str | None = None,
         cancel_reason: str | None = None,
+        ledger: RunBudgetLedger | None = None,
     ) -> dict[str, Any]:
         if status.value not in _TERMINAL:
             raise ValueError(f"非法 delegated run 终态：{status.value}")
@@ -549,6 +785,11 @@ class DelegationState:
                 return _decode_run(row)
             if row["worker_owner"] != worker_owner:
                 raise FencingTokenRejected("delegated run 终态提交 owner 不匹配")
+            ledger_snapshot = (
+                self._settle_child_usage(connection, row, usage, ledger)
+                if ledger is not None
+                else None
+            )
             connection.execute(
                 """
                 UPDATE delegation_runs
@@ -570,20 +811,33 @@ class DelegationState:
             )
             if connection.execute("SELECT changes()").fetchone()[0] != 1:
                 raise RuntimeError(f"delegated run {run_id} 不能结束")
-            root = connection.execute(
-                "SELECT usage_json FROM delegation_roots WHERE root_run_id=?",
-                (row["root_run_id"],),
-            ).fetchone()
-            aggregate = json.loads(root["usage_json"])
-            for key in aggregate:
-                aggregate[key] += usage.get(key, 0)
-            connection.execute(
-                """
-                UPDATE delegation_roots SET usage_json=?, updated_at=?
-                WHERE root_run_id=?
-                """,
-                (_json(aggregate), now, row["root_run_id"]),
-            )
+            if ledger_snapshot is not None:
+                self._sync_root_projection(
+                    connection,
+                    row["root_run_id"],
+                    ledger_snapshot,
+                    now=now,
+                )
+            else:
+                self._release_legacy_reservation(connection, row, now=now)
+                root = connection.execute(
+                    "SELECT usage_json FROM delegation_roots WHERE root_run_id=?",
+                    (row["root_run_id"],),
+                ).fetchone()
+                aggregate = json.loads(root["usage_json"])
+                for key in aggregate:
+                    incoming = usage.get(key)
+                    if aggregate[key] is None or incoming is None:
+                        aggregate[key] = None
+                    else:
+                        aggregate[key] += incoming
+                connection.execute(
+                    """
+                    UPDATE delegation_roots SET usage_json=?, updated_at=?
+                    WHERE root_run_id=?
+                    """,
+                    (_json(aggregate), now, row["root_run_id"]),
+                )
             updated = connection.execute(
                 "SELECT * FROM delegation_runs WHERE id=?", (run_id,)
             ).fetchone()
@@ -618,6 +872,20 @@ class DelegationState:
                 """,
                 (now, reason, now, root_run_id),
             )
+            queued_rows = connection.execute(
+                """
+                SELECT * FROM delegation_runs
+                WHERE root_run_id=? AND status='queued'
+                """,
+                (root_run_id,),
+            ).fetchall()
+            for row in queued_rows:
+                self._release_child_budget(
+                    connection,
+                    row,
+                    reason="root_cancelled",
+                    now=now,
+                )
             queued = connection.execute(
                 """
                 UPDATE delegation_runs
@@ -644,6 +912,17 @@ class DelegationState:
         now = self.state_store.now_iso()
         with self.state_store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                f"SELECT * FROM delegation_runs WHERE id IN ({placeholders}) AND status='queued'",
+                tuple(sorted(run_ids)),
+            ).fetchall()
+            for row in rows:
+                self._release_child_budget(
+                    connection,
+                    row,
+                    reason="child_cancelled",
+                    now=now,
+                )
             queued = connection.execute(
                 f"""
                 UPDATE delegation_runs SET status='cancelled', cancel_reason=?, finished_at=?
@@ -664,6 +943,18 @@ class DelegationState:
         reason = redact_sensitive_text(reason)
         now = self.state_store.now_iso()
         with self.state_store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM delegation_runs WHERE id=? AND status='queued'",
+                (run_id,),
+            ).fetchone()
+            if row is not None:
+                self._release_child_budget(
+                    connection,
+                    row,
+                    reason="queued_rejected",
+                    now=now,
+                )
             cursor = connection.execute(
                 """
                 UPDATE delegation_runs
@@ -692,6 +983,22 @@ class DelegationState:
         reason = redact_sensitive_text(reason)
         now = self.state_store.now_iso()
         with self.state_store.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM delegation_runs
+                WHERE id=? AND status IN ('running', 'cancel_requested')
+                    AND worker_owner=?
+                """,
+                (run_id, worker_owner),
+            ).fetchone()
+            if row is not None:
+                self._release_child_budget(
+                    connection,
+                    row,
+                    reason="worker_failed",
+                    now=now,
+                )
             cursor = connection.execute(
                 """
                 UPDATE delegation_runs
@@ -723,6 +1030,12 @@ class DelegationState:
                     row["cancel_reason"]
                     if status == "cancelled"
                     else "WORKER_LEASE_EXPIRED"
+                )
+                self._release_child_budget(
+                    connection,
+                    row,
+                    reason="worker_lease_expired",
+                    now=now,
                 )
                 connection.execute(
                     """
@@ -792,6 +1105,18 @@ class DelegationState:
                 """,
                 (root_run_id,),
             ).fetchall()
+            has_ledger = connection.execute(
+                "SELECT 1 FROM run_budget_ledgers WHERE root_run_id=?",
+                (root_run_id,),
+            ).fetchone() is not None
+        reserved = json.loads(root["reserved_json"])
+        usage = json.loads(root["usage_json"])
+        if has_ledger:
+            snapshot = RunBudgetLedger.open(
+                self.state_store,
+                root_run_id=root_run_id,
+            ).snapshot()
+            reserved, usage = self._ledger_projection(snapshot)
         return {
             "root_run_id": root_run_id,
             "actor_id": root["actor_id"],
@@ -800,8 +1125,8 @@ class DelegationState:
             "role": root["role"],
             "course_ids": json.loads(root["course_ids_json"] or "[]"),
             "budget": json.loads(root["budget_json"]),
-            "reserved": json.loads(root["reserved_json"]),
-            "usage": json.loads(root["usage_json"]),
+            "reserved": reserved,
+            "usage": usage,
             "cancel_reason": root["cancel_reason"],
             "nodes": [_decode_run(row) for row in rows],
         }

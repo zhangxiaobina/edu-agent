@@ -1124,6 +1124,7 @@ class ResilientEngine(Engine):
         max_retries: int,
         cancellation_token: CancellationToken | None = None,
         max_output_tokens: int | None = None,
+        run_budget=None,
     ) -> _RouteExecution:
         attempts = 0
         with self.route_registry.lease(route.identity) as state:
@@ -1154,6 +1155,21 @@ class ResilientEngine(Engine):
                             state.breaker.state,
                         )
                     attempts += 1
+                    attempt_number = start_attempt + attempts
+                    budget_attempt = (
+                        run_budget.begin_provider_attempt(
+                            attempt_sequence=attempt_number,
+                            provider=route.provider,
+                            model=(
+                                route.route.model
+                                if route.route is not None
+                                else route.audit.get("model") or route.provider
+                            ),
+                            route_role=route_role,
+                        )
+                        if run_budget is not None
+                        else None
+                    )
                     try:
                         response = self._chat_frozen_route(
                             engine,
@@ -1163,7 +1179,8 @@ class ResilientEngine(Engine):
                             cancellation_token,
                             max_output_tokens,
                         )
-                    except CancellationRequested:
+                    except CancellationRequested as caught:
+                        error = caught
                         state.breaker.record_non_retryable(permit)
                         raise
                     except Exception as caught:
@@ -1173,11 +1190,23 @@ class ResilientEngine(Engine):
                             opened, breaker_after = state.breaker._record_failure(permit)
                         else:
                             _, breaker_after = state.breaker._record_success(permit)
-                    except BaseException:
+                    except BaseException as caught:
+                        error = caught
                         state.breaker.record_non_retryable(permit)
                         raise
                     else:
                         recovered, breaker_after = state.breaker._record_success(permit)
+                    finally:
+                        if budget_attempt is not None:
+                            run_budget.settle_provider_attempt(
+                                budget_attempt,
+                                (
+                                    response.usage
+                                    if response is not None
+                                    else getattr(error, "usage", None)
+                                ),
+                                status="ok" if response is not None else "failed",
+                            )
                 finally:
                     state.semaphore.release()
 
@@ -1293,6 +1322,7 @@ class ResilientEngine(Engine):
         max_retries: int,
         cancellation_token: CancellationToken | None = None,
         max_output_tokens: int | None = None,
+        run_budget=None,
     ) -> Generator[ProviderStreamEvent, None, _StreamRouteExecution]:
         attempts = 0
         with self.route_registry.lease(route.identity) as state:
@@ -1338,6 +1368,20 @@ class ResilientEngine(Engine):
                         )
                     attempts += 1
                     attempt_number = start_attempt + attempts
+                    budget_attempt = (
+                        run_budget.begin_provider_attempt(
+                            attempt_sequence=attempt_number,
+                            provider=route.provider,
+                            model=(
+                                route.route.model
+                                if route.route is not None
+                                else route.audit.get("model") or route.provider
+                            ),
+                            route_role=route_role,
+                        )
+                        if run_budget is not None
+                        else None
+                    )
                     aggregator = ProviderStreamAggregator()
                     try:
                         iterator = self._stream_frozen_route(
@@ -1423,8 +1467,15 @@ class ResilientEngine(Engine):
                                 error=error,
                                 retryable=not visible,
                             )
-                    except CancellationRequested:
+                    except CancellationRequested as caught:
+                        error = caught
                         state.breaker.record_non_retryable(permit)
+                        if budget_attempt is not None:
+                            run_budget.settle_provider_attempt(
+                                budget_attempt,
+                                aggregator.failure_usage(caught),
+                                status="failed",
+                            )
                         raise
                     except Exception as caught:
                         error = caught
@@ -1435,8 +1486,15 @@ class ResilientEngine(Engine):
                             error=caught,
                             retryable=not visible,
                         )
-                    except BaseException:
+                    except BaseException as caught:
+                        error = caught
                         state.breaker.record_non_retryable(permit)
+                        if budget_attempt is not None:
+                            run_budget.settle_provider_attempt(
+                                budget_attempt,
+                                aggregator.failure_usage(caught),
+                                status="failed",
+                            )
                         raise
                     finally:
                         close = getattr(iterator, "close", None)
@@ -1456,6 +1514,16 @@ class ResilientEngine(Engine):
 
                 assert permit is not None
                 attempt_number = start_attempt + attempts
+                if budget_attempt is not None:
+                    run_budget.settle_provider_attempt(
+                        budget_attempt,
+                        (
+                            response.usage
+                            if response is not None
+                            else aggregator.failure_usage(error)
+                        ),
+                        status="ok" if response is not None else "failed",
+                    )
                 if error is None:
                     assert response is not None and completed_event is not None
                     self._attempt_event(
@@ -1587,6 +1655,7 @@ class ResilientEngine(Engine):
         *,
         cancellation_token: CancellationToken | None = None,
         max_output_tokens: int | None = None,
+        run_budget=None,
     ) -> EngineResponse:
         with self._chat_route_plan() as route_plan:
             streamable = self._supports_provider_stream(
@@ -1604,6 +1673,7 @@ class ResilientEngine(Engine):
                         tools,
                         cancellation_token=cancellation_token,
                         max_output_tokens=max_output_tokens,
+                        run_budget=run_budget,
                     )
                 )
             return self._chat_sync(
@@ -1611,6 +1681,7 @@ class ResilientEngine(Engine):
                 tools,
                 cancellation_token=cancellation_token,
                 max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
 
     def stream_chat(
@@ -1621,6 +1692,7 @@ class ResilientEngine(Engine):
         attempt: int = 1,
         cancellation_token: CancellationToken | None = None,
         max_output_tokens: int | None = None,
+        run_budget=None,
     ) -> Iterator[ProviderStreamEvent]:
         if attempt != 1:
             raise ValueError("ResilientEngine stream attempt 必须从 1 开始")
@@ -1668,6 +1740,7 @@ class ResilientEngine(Engine):
                 max_retries=self.max_retries,
                 cancellation_token=cancellation_token,
                 max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
             attempts = primary.attempts
             if primary.response is not None:
@@ -1870,6 +1943,7 @@ class ResilientEngine(Engine):
                 max_retries=0,
                 cancellation_token=cancellation_token,
                 max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
             attempts += fallback.attempts
             if fallback.response is not None:
@@ -1944,6 +2018,7 @@ class ResilientEngine(Engine):
         *,
         cancellation_token: CancellationToken | None = None,
         max_output_tokens: int | None = None,
+        run_budget=None,
     ) -> EngineResponse:
         with self._chat_route_plan() as route_plan:
             primary_route = route_plan.primary
@@ -1980,6 +2055,7 @@ class ResilientEngine(Engine):
                 max_retries=self.max_retries,
                 cancellation_token=cancellation_token,
                 max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
             attempts = primary.attempts
             if primary.response is not None:
@@ -2084,6 +2160,7 @@ class ResilientEngine(Engine):
                 max_retries=0,
                 cancellation_token=cancellation_token,
                 max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
             attempts += fallback.attempts
             if fallback.response is not None:

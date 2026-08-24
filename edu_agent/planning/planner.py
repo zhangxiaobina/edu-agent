@@ -7,10 +7,9 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from ..engine.base import Engine
-from ..runtime.cancellation import call_with_cancellation
-from ..runtime.cancellation import accepts_keyword_argument
+from ..engine.streaming import consume_provider_stream
 from ..runtime.context import ContextBudgetExceeded
-from ..runtime.models import RunContext
+from ..runtime.models import BudgetExceeded, RunContext
 from .models import PlanSpec, PlanValidationError, validate_plan_graph
 
 
@@ -58,7 +57,6 @@ class ModelPlanGenerator:
         available_tools: set[str],
         max_steps: int,
     ) -> PlanSpec:
-        context.budget.consume_model_call()
         planning_context = {
             "available_tools": sorted(available_tools),
             "max_steps": max_steps,
@@ -102,24 +100,33 @@ class ModelPlanGenerator:
                     "planner request exceeds the reserved context budget",
                     breakdown=accounting,
                 )
-        kwargs = {}
-        if max_output_tokens is not None and accepts_keyword_argument(
-            self.engine.chat,
-            "max_output_tokens",
-        ):
-            kwargs["max_output_tokens"] = max_output_tokens
         try:
-            response = call_with_cancellation(
-                self.engine.chat,
-                messages,
-                [],
-                cancellation_token=context.cancellation_token,
-                **kwargs,
-            )
+            with context.budget.model_scope(
+                f"planner:{context.run_id}:1",
+                breakdowns=route_accounting,
+                component="planner",
+            ):
+                response = consume_provider_stream(
+                    self.engine,
+                    messages,
+                    [],
+                    cancellation_token=context.cancellation_token,
+                    max_output_tokens=max_output_tokens,
+                    run_budget=context.budget,
+                )
         except Exception as error:
-            if accounting is not None:
+            should_settle = not isinstance(error, BudgetExceeded) or hasattr(
+                error,
+                "usage",
+            )
+            if accounting is not None and should_settle:
+                selected_accounting = context_accounting.select_breakdown(
+                    route_accounting,
+                    response_model=None,
+                    usage=getattr(error, "usage", None),
+                )
                 context_accounting.settle(
-                    accounting,
+                    selected_accounting,
                     getattr(error, "usage", None),
                     phase="planner",
                 )

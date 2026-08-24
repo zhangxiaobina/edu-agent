@@ -192,6 +192,8 @@ class TurnFinalizer:
             return "completed"
         if reason in CANONICAL_STOP_REASONS:
             return str(reason)
+        if isinstance(reason, str) and reason.startswith("budget_exhausted:"):
+            return reason
         text = f"{error or ''} {reason or ''}".lower()
         if "manual_review" in text or "uncertain" in text:
             return "manual_review"
@@ -572,9 +574,14 @@ class TurnFinalizer:
         if record.cursor >= FINALIZER_CURSOR["usage_settled"]:
             return record
         self._hit("before_usage_settled")
+        if self.context.budget.ledger is not None:
+            self.budget = self.context.budget.finalize(
+                f"budget-finalizer:{self.context.budget.ledger.root_run_id}"
+            )
         record = self.state_store.settle_turn_usage(
             self.context,
             expected_cursor=record.cursor,
+            budget=self.budget,
         )
         self._hit("usage_settled")
         return record

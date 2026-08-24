@@ -230,6 +230,11 @@ class ModelConfig:
 class RuntimeConfig:
     max_model_calls: int = 12
     max_tool_calls: int = 24
+    max_input_tokens: int = 96_000
+    max_output_tokens: int = 24_000
+    max_total_tokens: int = 120_000
+    max_cost_usd: float | None = None
+    max_wall_time_seconds: float = 1_800.0
     tool_batch_max_workers: int = 4
     tool_call_timeout_seconds: float = 120.0
     context_token_budget: int = 12_000
@@ -261,10 +266,36 @@ class RuntimeConfig:
                 "output_token_reserve",
                 min(2_048, max(1, self.context_token_budget // 4)),
             )
-        for name in ("context_token_budget", "output_token_reserve"):
+        for name in (
+            "max_model_calls",
+            "max_tool_calls",
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_total_tokens",
+            "context_token_budget",
+            "output_token_reserve",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"runtime {name} 必须是正整数")
+        if self.max_total_tokens > self.max_input_tokens + self.max_output_tokens:
+            raise ValueError(
+                "runtime.max_total_tokens 不能超过 input/output token 上限之和"
+            )
+        if self.max_cost_usd is not None and (
+            isinstance(self.max_cost_usd, bool)
+            or not isinstance(self.max_cost_usd, (int, float))
+            or not math.isfinite(float(self.max_cost_usd))
+            or self.max_cost_usd < 0
+        ):
+            raise ValueError("runtime.max_cost_usd 必须是 null 或有限非负数")
+        if (
+            isinstance(self.max_wall_time_seconds, bool)
+            or not isinstance(self.max_wall_time_seconds, (int, float))
+            or not math.isfinite(float(self.max_wall_time_seconds))
+            or self.max_wall_time_seconds <= 0
+        ):
+            raise ValueError("runtime.max_wall_time_seconds 必须是正有限数")
         if self.context_token_budget < 256:
             raise ValueError("runtime context_token_budget 不能小于 256")
         if self.output_token_reserve >= self.context_token_budget:
@@ -541,6 +572,31 @@ class DelegationConfig:
 
 
 @dataclass(frozen=True)
+class BudgetPricingConfig:
+    version: str = "unpriced@2026-08-24.r4.4.v1"
+    prices: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        from .budget import ModelPriceCatalog
+
+        catalog = ModelPriceCatalog(version=self.version, prices=self.prices)
+        object.__setattr__(self, "version", catalog.version)
+        object.__setattr__(
+            self,
+            "prices",
+            {
+                str(key): dict(value)
+                for key, value in self.prices.items()
+            },
+        )
+
+    def catalog(self):
+        from .budget import ModelPriceCatalog
+
+        return ModelPriceCatalog(version=self.version, prices=self.prices)
+
+
+@dataclass(frozen=True)
 class AppConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -552,6 +608,7 @@ class AppConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     transaction: TransactionConfig = field(default_factory=TransactionConfig)
     delegation: DelegationConfig = field(default_factory=DelegationConfig)
+    pricing: BudgetPricingConfig = field(default_factory=BudgetPricingConfig)
     code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -629,6 +686,7 @@ def load_config(path: str | os.PathLike | None = None) -> AppConfig:
         "scheduler",
         "transaction",
         "delegation",
+        "pricing",
         "code_execution",
         "observability",
         "api",
@@ -647,6 +705,7 @@ def load_config(path: str | os.PathLike | None = None) -> AppConfig:
         scheduler=_section(data, "scheduler", SchedulerConfig),
         transaction=_section(data, "transaction", TransactionConfig),
         delegation=_section(data, "delegation", DelegationConfig),
+        pricing=_section(data, "pricing", BudgetPricingConfig),
         code_execution=_section(data, "code_execution", CodeExecutionConfig),
         observability=_section(data, "observability", ObservabilityConfig),
         api=_section(data, "api", ApiConfig),
