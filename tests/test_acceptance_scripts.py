@@ -220,6 +220,21 @@ def test_stage8_controlled_run_bootstraps_and_calls_stage7_once(tmp_path: Path):
         for entry in entries
     ) == 2
     assert any("tests/test_eval_lineage.py" in entry["args"] for entry in entries)
+    assert any("scripts/eval_context_fidelity.py" in entry["args"] for entry in entries)
+    assert any(
+        "scripts/state_maintenance.py" in entry["args"] and "backup" in entry["args"]
+        for entry in entries
+    )
+    assert any(
+        "scripts/state_maintenance.py" in entry["args"] and "restore" in entry["args"]
+        for entry in entries
+    )
+    assert any(
+        "scripts/state_maintenance.py" in entry["args"] and "gc" in entry["args"]
+        for entry in entries
+    )
+    assert any("tests/test_r46_storage_maintenance.py" in entry["args"] for entry in entries)
+    assert any("tests/test_lifecycle.py" in entry["args"] for entry in entries)
     assert sum(
         entry["args"]
         == [

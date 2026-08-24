@@ -149,7 +149,7 @@ def test_turn_finalizer_schema_has_a_numeric_migration_boundary(tmp_path):
     store = StateStore(tmp_path / "state.db")
     with store.connect() as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == STATE_SCHEMA_VERSION
-        assert STATE_SCHEMA_VERSION == 14
+        assert STATE_SCHEMA_VERSION == 15
         assert connection.execute(
             "SELECT COUNT(*) FROM state_schema_migrations WHERE version=?",
             (TURN_FINALIZER_SCHEMA,),

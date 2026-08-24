@@ -49,7 +49,7 @@ from .runtime.recovery import (
 )
 from .runtime.tool_executor import ApprovalRequest, ExecutionPolicy, PolicyToolExecutor
 from .scheduler import JobStore, Scheduler
-from .state import MemoryManager, MemoryProvider, StateStore
+from .state import MemoryManager, MemoryProvider, StateStorageError, StateStore
 from .state import RunJournalIdentityError
 from .state.store import FencingTokenRejected, RunCancelled, TurnFinalizerPending
 from .tools import registry
@@ -1029,6 +1029,8 @@ class EduAgentService:
             )
         except FencingTokenRejected:
             raise
+        except StateStorageError:
+            raise
         except Exception as error:
             self._finalize_failure(context, error)
             raise
@@ -1659,6 +1661,8 @@ class EduAgentService:
                 context_payload=context_payload,
             )
         except FencingTokenRejected:
+            raise
+        except StateStorageError:
             raise
         except Exception as error:
             context_payload["accounting"] = accounting.records()

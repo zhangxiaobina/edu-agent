@@ -2,6 +2,7 @@
   "checks": {
     "all_splits_present": true,
     "complete_provenance": true,
+    "context_fidelity_lineage": true,
     "cross_split_duplicates": true,
     "deterministic_declarations": true,
     "deterministic_generation": true,
@@ -10,7 +11,223 @@
     "stable_ids": true,
     "template_family_isolation": true
   },
+  "context_fidelity": {
+    "checks": {
+      "all_splits_present": true,
+      "complete_provenance": true,
+      "cross_split_duplicates": true,
+      "deterministic_generation": true,
+      "scope_isolation": true,
+      "semantic_group_isolation": true,
+      "sensitive_fields": true,
+      "stable_ids": true,
+      "template_family_isolation": true
+    },
+    "deterministic_generation": {
+      "error": null,
+      "first_hash": "806877b39e168afd5b3734b3255f805af874f581f14b6e325ce6880da6a2552f",
+      "passed": true,
+      "sample_count": 12,
+      "second_hash": "806877b39e168afd5b3734b3255f805af874f581f14b6e325ce6880da6a2552f"
+    },
+    "errors": [],
+    "manifest": {
+      "manifest_hash": "438c02be43b762b9e65fe8f2e92d268541fccd4320efdf6f60ecdc8933999a0a",
+      "sample_count": 12,
+      "samples": [
+        {
+          "content_hash": "8bd908cfa72702ef5331fdafa528a2d5f2b8e91ec19866e89984147daa623572",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "operation-status-0",
+          "query_hash": "44be936bbb972dbf939abfe3ad67887061a69e2c47ce31c899ff211c982c42ae",
+          "sample_id": "5150a0b8a75e3671b40b",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:operation-status-0",
+          "source": "synthetic-context-fidelity",
+          "split": "dev",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "9228fcb49593e5a1eed900a473382aa5650eca5d495554e6529ddc984fff3550",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "operation-status-1",
+          "query_hash": "913ca131cc3a6b8d9691579a29fd51a947f10ee24aaed15f07b95240187bd5a0",
+          "sample_id": "8d3eb3f70946252a1638",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:operation-status-1",
+          "source": "synthetic-context-fidelity",
+          "split": "dev",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "ce95d0201183f3b5081b1a89ddede5fa6a21e0df262bc2fda592ada7dc26cc7b",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "operation-status-2",
+          "query_hash": "58a278da14cc[REDACTED]b6988f55eacafda89d6ff9f8c84f2e5b708c3844d",
+          "sample_id": "a04e0caac2b7549daf86",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:operation-status-2",
+          "source": "synthetic-context-fidelity",
+          "split": "dev",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "418d3ea9df06034dfd3a6fa57d015056196c5c1ccb723fad4dc8663cd31c77c0",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "citation-artifact-0",
+          "query_hash": "000ec34bdf878f2ccefe1292bab2ee9f44fac3defd3badaee5f1766bd02ed131",
+          "sample_id": "4ea745a9de48e97325ec",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 314,
+          "semantic_group": "context:citation-artifact-0",
+          "source": "synthetic-context-fidelity",
+          "split": "test",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "a8538ba60b46ca13016737eac309f26b22a138fd9944661127e9e3804b8c101e",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "citation-artifact-1",
+          "query_hash": "232f86ac1f5f9cbc7c0d97bb24d19e53f3801c993c695c3a24039f706c1348d3",
+          "sample_id": "952d1b4ea8eacb18934c",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 314,
+          "semantic_group": "context:citation-artifact-1",
+          "source": "synthetic-context-fidelity",
+          "split": "test",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "0932037b8e447640e2df331edb2de4d5bc01c9379d87c0d40975f65f0d269cff",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "citation-artifact-2",
+          "query_hash": "6631de1eacdc4889e85cd05dcd5b7ca6fc7e79dcdc2a827fb0f031c4eb9dbf10",
+          "sample_id": "c680f1c224cae2682841",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 314,
+          "semantic_group": "context:citation-artifact-2",
+          "source": "synthetic-context-fidelity",
+          "split": "test",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "ef5906c920168744bb7d09053606be1c80a7b98bac0379a7d7b3e7b7406fb376",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "constraint-course-1",
+          "query_hash": "75d6feec9e69aa5ab59004c2a59bbbd834e05152b57808590d81c9e32ee1ad09",
+          "sample_id": "36898dd83b4711151bc1",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:constraint-course-1",
+          "source": "synthetic-context-fidelity",
+          "split": "train",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "32ec1ad608425ec1e504585cf37c9efb66aed8b697db578787c4b31f485ea32c",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "constraint-course-3",
+          "query_hash": "2750c2cf927c136ab7e552d4ae715510ff37daca5d787aacf0905eed3b8096c8",
+          "sample_id": "52fe578be080a9c4a5b5",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:constraint-course-3",
+          "source": "synthetic-context-fidelity",
+          "split": "train",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "832d36c702a33a3347dd6fc3fe4a0287aa115a0b89264c700843fd4bb3fd7b09",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "constraint-course-0",
+          "query_hash": "e9ebb95b484ea02807853b329dfbbaa1b9a2f3e51d3b4df9ae5d33b33e2043d6",
+          "sample_id": "560b3213e020a013abbe",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:constraint-course-0",
+          "source": "synthetic-context-fidelity",
+          "split": "train",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "ccdca707b466ddb7f62d721aba8afef19dfcece551f97a78d614b2403b818d2d",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "constraint-course-4",
+          "query_hash": "19a11151c407c60900e35d5465f21412bce46c31552be940fc5a01f66c4b088b",
+          "sample_id": "6f53f5db5385d73479b7",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:constraint-course-4",
+          "source": "synthetic-context-fidelity",
+          "split": "train",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "62e00c9a1c8368973b87d05afa2a1dcb6ebe6e61fc14c8b1a3f722d19ee5c635",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "constraint-course-5",
+          "query_hash": "aac0f046d1cab2c2927f1803146ce82134b1513e144037028acedba13b6e4d88",
+          "sample_id": "7a3765ef3c44a0b56ba5",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:constraint-course-5",
+          "source": "synthetic-context-fidelity",
+          "split": "train",
+          "version": "r4.3.v1"
+        },
+        {
+          "content_hash": "63484c86d5f79cffb04bf8f6ea8273c6700de7b043ae7eda1729541513fe7fe7",
+          "deterministic": true,
+          "generator": "build_context_fidelity_corpus",
+          "intent_template_family": "constraint-course-2",
+          "query_hash": "5336e328c5d56fb63821ff687b3723d13c3856a84f5fb55812624c20ddc84cc6",
+          "sample_id": "9b5c23fe1fc5dd14989e",
+          "schema": "edu-agent.context-fidelity.v1",
+          "seed": 42,
+          "semantic_group": "context:constraint-course-2",
+          "source": "synthetic-context-fidelity",
+          "split": "train",
+          "version": "r4.3.v1"
+        }
+      ],
+      "schema": "edu-agent.context-fidelity.v1",
+      "split_counts": {
+        "dev": 3,
+        "test": 3,
+        "train": 6
+      }
+    },
+    "manifest_hash": "438c02be43b762b9e65fe8f2e92d268541fccd4320efdf6f60ecdc8933999a0a",
+    "n_cases": 12,
+    "passed": true,
+    "sample_count": 12,
+    "schema": "edu-agent.context-fidelity.v1",
+    "split_counts": {
+      "dev": 3,
+      "test": 3,
+      "train": 6
+    }
+  },
   "dataset_generation": {
+    "context_fidelity": {
+      "generator": "build_context_fidelity_corpus",
+      "source": "synthetic-context-fidelity",
+      "version": "r4.3.v1"
+    },
     "test": {
       "courses_per_class": 3,
       "n_classes": 5,

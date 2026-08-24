@@ -621,9 +621,11 @@ R0-R5 拆成 33 个可独立验收和交接的提示词；前一编号未满足�
 2. R1 已完成：Provider Gateway 已跑通 Chat Completions/Responses mode、Retry-After 和兼容 fallback。
 3. R2 已完成：RunEvent、RunJournal、增量工具消息、TurnFinalizer、Provider/SSE 真流、统一取消、持久 writer
    fence、五崩溃窗恢复和独立门禁均已通过。
-4. R3.1 已冻结 ToolManifest，R3.2 已收口只读切片，R3.3 已将教学 command/receipt/error 与 16 工具契约矩阵收口；下一步 R3.4 做 schema-guided 参数规范化与 repair audit，仍不并发。
-5. 完成 R4：补实际 token/overflow recovery、全树预算、drain 与 backup/restore。
-6. 完成 R5：跑一次固定真实模型独立 Test，更新演示、部署和运行手册，冻结秋招候选版。
+4. R3 已完成：ToolManifest、参数规范化/repair audit、事务/operation/outbox 和受控并发均已通过阶段门禁。
+5. R4 已完成：Context/overflow recovery、全树预算、lifecycle/drain、一致 backup/restore 和 retention/GC 已通过
+   `accept_stage8.sh` 收口门禁。
+6. 当前下一步为 R5.1：只收口候选版验收编排、版本化报告 schema 和证据清单；之后再按 R5 提示词独立完成真实模型
+   Test、部署运行手册、演示与候选版冻结。
 
 R5 前明确不做：消息平台 Gateway、桌面工作台、通用浏览器/终端、多媒体工具、全量多 Provider、完整
 credential pool、自动 Skill 激活、XES/MOOCCube 大规模下载和跨主机协调。公开数据尚未下载不能阻塞

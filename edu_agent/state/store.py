@@ -66,7 +66,8 @@ from .turn_finalizer import (
 
 _UNSET = object()
 _SCOPED_ARTIFACT_REFERENCE_TYPE = "edu-agent.scoped-artifact.v1"
-STATE_SCHEMA_VERSION = 14
+STATE_SCHEMA_VERSION = 15
+STORAGE_MAINTENANCE_MIGRATION = "015_storage_maintenance"
 
 
 class SessionLeaseUnavailable(RuntimeError):
@@ -93,13 +94,123 @@ class StateSchemaVersionError(RuntimeError):
     pass
 
 
+class StateStorageError(RuntimeError):
+    """Stable, non-sensitive failure surfaced for SQLite storage faults."""
+
+    def __init__(self, error_code: str, message: str):
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = error_code != "STATE_STORAGE_CORRUPT"
+
+
+def normalize_state_storage_error(error: sqlite3.Error) -> StateStorageError:
+    code = getattr(error, "sqlite_errorcode", None)
+    base_code = code & 0xFF if isinstance(code, int) else None
+    text = str(error).lower()
+    if "no such module: fts5" in text or "no such table: memory_fts" in text:
+        return StateStorageError(
+            "STATE_STORAGE_FEATURE_UNAVAILABLE",
+            "optional state storage search feature is unavailable",
+        )
+    if base_code == sqlite3.SQLITE_FULL or "database or disk is full" in text:
+        return StateStorageError("STATE_STORAGE_FULL", "state storage capacity is exhausted")
+    if base_code == sqlite3.SQLITE_READONLY or "readonly" in text or "read-only" in text:
+        return StateStorageError("STATE_STORAGE_READ_ONLY", "state storage is read-only")
+    corrupt_codes = {
+        getattr(sqlite3, "SQLITE_CORRUPT", -1),
+        getattr(sqlite3, "SQLITE_NOTADB", -1),
+    }
+    if base_code in corrupt_codes or "malformed" in text or "not a database" in text:
+        return StateStorageError("STATE_STORAGE_CORRUPT", "state storage integrity check failed")
+    return StateStorageError("STATE_STORAGE_UNAVAILABLE", "state storage is unavailable")
+
+
+class _StateCursor(sqlite3.Cursor):
+    def execute(self, *args, **kwargs):
+        try:
+            return super().execute(*args, **kwargs)
+        except sqlite3.IntegrityError:
+            raise
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+
+    def executemany(self, *args, **kwargs):
+        try:
+            return super().executemany(*args, **kwargs)
+        except sqlite3.IntegrityError:
+            raise
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+
+    def executescript(self, *args, **kwargs):
+        try:
+            return super().executescript(*args, **kwargs)
+        except sqlite3.IntegrityError:
+            raise
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+
+    def fetchone(self):
+        try:
+            return super().fetchone()
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+
+    def fetchmany(self, *args, **kwargs):
+        try:
+            return super().fetchmany(*args, **kwargs)
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+
+    def fetchall(self):
+        try:
+            return super().fetchall()
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+
+    def __next__(self):
+        try:
+            return super().__next__()
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+
+
 class _StateConnection(sqlite3.Connection):
-    """让 ``with state_store.connect()`` 同时提交并释放文件描述符。"""
+    """Normalize storage faults and close context-managed connections."""
 
     def __exit__(self, exc_type, exc_value, traceback):
-        result = super().__exit__(exc_type, exc_value, traceback)
-        self.close()
-        return result
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        except sqlite3.IntegrityError:
+            raise
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+        finally:
+            self.close()
+
+    def execute(self, *args, **kwargs):
+        return self.cursor().execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        return self.cursor().executemany(*args, **kwargs)
+
+    def executescript(self, *args, **kwargs):
+        return self.cursor().executescript(*args, **kwargs)
+
+    def cursor(self, factory=_StateCursor):
+        return super().cursor(factory)
+
+    def commit(self):
+        try:
+            return super().commit()
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
+
+    def rollback(self):
+        try:
+            return super().rollback()
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
 
 
 def _now() -> str:
@@ -123,10 +234,12 @@ class StateStore:
         *,
         clock: Callable[[], datetime] | None = None,
         read_only: bool = False,
+        migration_fault_injector: Callable[[str], None] | None = None,
     ):
         self.path = Path(path).expanduser()
         self._clock = clock or (lambda: datetime.now(UTC))
         self.read_only = read_only
+        self._migration_fault_injector = migration_fault_injector
         if read_only:
             if not self.path.is_file():
                 raise FileNotFoundError(self.path)
@@ -147,19 +260,24 @@ class StateStore:
 
     def connect(self) -> sqlite3.Connection:
         target = f"file:{self.path.resolve()}?mode=ro" if self.read_only else self.path
-        connection = sqlite3.connect(
-            target,
-            timeout=10,
-            factory=_StateConnection,
-            uri=self.read_only,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
-        if not self.read_only:
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = NORMAL")
-        return connection
+        try:
+            connection = sqlite3.connect(
+                target,
+                timeout=10,
+                factory=_StateConnection,
+                uri=self.read_only,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 10000")
+            if not self.read_only:
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("PRAGMA synchronous = NORMAL")
+            return connection
+        except StateStorageError:
+            raise
+        except sqlite3.Error as error:
+            raise normalize_state_storage_error(error) from error
 
     def migration_ready(self) -> bool:
         """Return only the aggregate migration state used by readiness."""
@@ -182,6 +300,7 @@ class StateStore:
                     "012_r2_recovery",
                     CHECKPOINT_MIGRATION,
                     "014_run_budget_ledger",
+                    STORAGE_MAINTENANCE_MIGRATION,
                 }
                 present = {
                     str(row["version"])
@@ -190,7 +309,7 @@ class StateStore:
                     ).fetchall()
                 }
                 return required <= present
-        except (OSError, sqlite3.Error, StateSchemaVersionError):
+        except (OSError, sqlite3.Error, StateSchemaVersionError, StateStorageError):
             return False
 
     def writable_ready(self) -> bool:
@@ -215,11 +334,11 @@ class StateStore:
             )
             connection.rollback()
             return True
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, StateStorageError):
             if connection is not None:
                 try:
                     connection.rollback()
-                except sqlite3.Error:
+                except (sqlite3.Error, StateStorageError):
                     pass
             return False
         finally:
@@ -464,7 +583,8 @@ class StateStore:
                     sha256 TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
                     metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    gc_pending_at TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_artifacts_run
@@ -795,6 +915,50 @@ class StateStore:
                 """,
                 (self.now_iso(),),
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS retention_holds (
+                    id TEXT PRIMARY KEY,
+                    resource_type TEXT NOT NULL CHECK(
+                        resource_type IN ('session', 'run', 'artifact')
+                    ),
+                    resource_id TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    UNIQUE(resource_type, resource_id, reason)
+                )
+                """
+            )
+            artifact_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(artifacts)")
+            }
+            if "gc_pending_at" not in artifact_columns:
+                connection.execute("ALTER TABLE artifacts ADD COLUMN gc_pending_at TEXT")
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_artifacts_gc_pending
+                ON artifacts(gc_pending_at, created_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_retention_holds_resource
+                ON retention_holds(resource_type, resource_id, expires_at)
+                """
+            )
+            if self._migration_fault_injector is not None:
+                self._migration_fault_injector("after_015_schema_before_marker")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO state_schema_migrations(version, applied_at)
+                VALUES (?, ?)
+                """,
+                (STORAGE_MAINTENANCE_MIGRATION, self.now_iso()),
+            )
+            if self._migration_fault_injector is not None:
+                self._migration_fault_injector("after_015_marker_before_user_version")
             connection.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION}")
 
     @staticmethod
@@ -847,8 +1011,9 @@ class StateStore:
                 END;
                 """
             )
-        except sqlite3.OperationalError:
-            pass
+        except StateStorageError as error:
+            if error.error_code != "STATE_STORAGE_FEATURE_UNAVAILABLE":
+                raise
 
     def ensure_session(
         self,
@@ -2674,7 +2839,7 @@ class StateStore:
             row = connection.execute(
                 """
                 SELECT * FROM artifacts
-                WHERE id=? AND actor_id=? AND tenant_id=?
+                WHERE id=? AND actor_id=? AND tenant_id=? AND gc_pending_at IS NULL
                 """,
                 (artifact_id, actor_id, tenant_id),
             ).fetchone()
@@ -4222,8 +4387,10 @@ class StateStore:
                 """,
                 params,
             ).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        except StateStorageError as error:
+            if error.error_code == "STATE_STORAGE_FEATURE_UNAVAILABLE":
+                return []
+            raise
 
     def record_audit_event(
         self,
@@ -4907,6 +5074,7 @@ class StateStore:
             "turn_finalizer_hooks",
             "run_budget_ledgers",
             "run_budget_operations",
+            "retention_holds",
         }
         if table not in allowed:
             raise ValueError(f"不允许统计表：{table}")

@@ -8,8 +8,8 @@
       "early_termination_rate": 0.0,
       "irrelevance": {},
       "latency_ms": {
-        "p50": 0.002042,
-        "p95": 0.003375
+        "p50": 0.002,
+        "p95": 0.004125
       },
       "model_calls": {
         "p50": 2.0,
@@ -76,7 +76,7 @@
     "source": "offline_sqlite_crash_window_recovery",
     "status": "verified"
   },
-  "commit": "2c483a7bdab4bbc59652d0af5711f247a0303a02",
+  "commit": "7822781077f7132db29a3ba6c5bfeeb7e0a469e9",
   "config": {
     "agent_source": "offline_oracle",
     "input_hashes": {
@@ -91,7 +91,7 @@
       "edu_agent/eval/tasks_derived.py": "8718976261858cd49b404e25b4d91ac6e2cf509e04c0e943bfbaad9519d9fb09",
       "edu_agent/eval/tasks_test.py": "5ad3d5cc31d4f7d7cd5c0650d7947a935d88cd3fd676f872b1b1d8218096ddb0",
       "pyproject.toml": "c6e1c6fd141deba0b3d83514a6c34355a308b29b175c8945273c76b0ce2d6d09",
-      "scripts/audit_eval_lineage.py": "e49e1639c19e40fe3c4633cb6b4a1a47e925f5a0b368a24e3f87fee5cabb34fd",
+      "scripts/audit_eval_lineage.py": "7c44a9e5b8d4695552120d953eae50d16f1d5ad54c4de9de0d972fcd73abfed1",
       "scripts/eval_system.py": "8f7ac8e17951289a07b12a37d7ff3e7b77e8cd8d807e0c70511270f7a560fc14",
       "uv.lock": "48977aafec9e01daa735c7232c326f209555e858dad0c3fa5fb9e443771608aa"
     },
@@ -102,15 +102,15 @@
     },
     "repeats": 1,
     "sandbox": {
-      "backend": null,
-      "report_hash": "not_provided",
-      "source": "no_real_backend_report"
+      "backend": "xiaobiny/jobe-custom@sha256:173036eb3b5cdc2a2634da0bd70eba56d22efced2b2981568359cc2c6bf63bd4",
+      "report_hash": "48765f6d6e614cb6cabafd67a5b60a9d7346879f422a4b37c19353275d63f430",
+      "source": "real_backend_report"
     },
     "seed": 42,
     "test_seed": 314,
     "test_task_count": 6
   },
-  "config_hash": "4c0ebe130bbf007fe1a9e877213539aae4584236b89bb4a4767a891bc0e16fa7",
+  "config_hash": "78db67ff160ce60d73cc753b4524d05f12ffe53170ec11a9e0e0cb445f05ecb4",
   "environment": {
     "architecture": "arm64",
     "os": "Darwin",
@@ -132,7 +132,7 @@
   },
   "evidence_mode": "development",
   "failed_trajectories": null,
-  "generated_at": "2026-08-23T14:06:43.461517+00:00",
+  "generated_at": "2026-08-24T15:00:15.358444+00:00",
   "git": {
     "available": true,
     "dirty": true
@@ -251,9 +251,9 @@
   "multi_agent": {
     "metrics": {
       "hidden_cost_model_calls": 0,
-      "parallel_elapsed_seconds": 0.074051,
+      "parallel_elapsed_seconds": 0.112428,
       "permission_leak_rate": 0.0,
-      "scheduling_overhead_seconds": 0.044051,
+      "scheduling_overhead_seconds": 0.082428,
       "success_rate": 1.0
     },
     "source": "offline_teaching_delegation_runtime",
@@ -267,8 +267,8 @@
         "p95": 3.0
       },
       "model_latency_ms": {
-        "p50": 0.002042,
-        "p95": 0.003375
+        "p50": 0.002,
+        "p95": 0.004125
       },
       "tokens": {
         "input": 0,
@@ -279,7 +279,7 @@
         "p50": 1.0,
         "p95": 2.0
       },
-      "wall_seconds": 0.80255
+      "wall_seconds": 0.90386
     },
     "real_model": {
       "metrics": null,
@@ -318,7 +318,7 @@
   },
   "reliability": {
     "metrics": {
-      "cancel_latency_ms": 0.879916,
+      "cancel_latency_ms": 0.98975,
       "cancel_requested": 1,
       "circuit_or_fallback_hit": 1,
       "lease_fencing_conflicts": 1,
@@ -330,10 +330,33 @@
     "status": "verified"
   },
   "sandbox": {
-    "metrics": null,
-    "reason": "Docker/Jobe backend was not started",
-    "source": "no_real_backend_report",
-    "status": "not_verified"
+    "backend": "xiaobiny/jobe-custom@sha256:173036eb3b5cdc2a2634da0bd70eba56d22efced2b2981568359cc2c6bf63bd4",
+    "metrics": {
+      "cases": 15,
+      "escape": {
+        "cases": 2,
+        "pass_rate": 1.0,
+        "passed": 2
+      },
+      "network": {
+        "cases": 2,
+        "pass_rate": 1.0,
+        "passed": 2
+      },
+      "oom": {
+        "cases": 1,
+        "pass_rate": 1.0,
+        "passed": 1
+      },
+      "passed": 15,
+      "timeout": {
+        "cases": 1,
+        "pass_rate": 1.0,
+        "passed": 1
+      }
+    },
+    "source": "real_backend_report",
+    "status": "verified"
   },
   "schema_version": "edu-agent.system-eval.v4",
   "seed": 42,
@@ -342,13 +365,13 @@
     "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
     "metrics": {
       "digest": "6cb9f01a5bfa291d3b38050fceba53d4ca0f9a8ebab6dae3158a466e4b000cb6",
-      "elapsed_seconds": 0.081487,
-      "events_per_second": 12284.168,
+      "elapsed_seconds": 0.076973,
+      "events_per_second": 13004.476,
       "exported_events": 1001,
       "indexed_events": 1000,
       "max_rows_loaded_per_page": 65,
       "pages": 16,
-      "peak_memory_bytes": 251113,
+      "peak_memory_bytes": 251193,
       "projected_events": 1001,
       "rows_loaded": 1016,
       "sql_queries": 33

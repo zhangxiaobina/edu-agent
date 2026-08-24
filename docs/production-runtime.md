@@ -416,6 +416,12 @@ R4.2 的 `013_context_checkpoint_provenance` 将 schema version 提升到 13，�
 迁移可重复执行，旧 checkpoint 保持 schema v1 兼容读取，新写入使用严格 schema v2。
 R4.4 的 `014_run_budget_ledger` 将 schema version 提升到 14；同一迁移可重复运行，root identity、价格、已用和
 预留额度在恢复时保持不变。
+R4.6 的 `015_storage_maintenance` 将 schema version 提升到 15，增加精确 retention hold 与 Artifact
+`gc_pending_at` 两阶段续收标记。在线 backup/restore、引用校验、删除资格和运维命令见
+[SQLite 状态备份、恢复与 Retention/GC](storage-operations.md)。
+
+`StateStore` 的 WAL、lease、fencing 和 GC 只适用于能共享同一个 SQLite 文件的本机 Worker；它们不提供
+跨主机共识、网络分区一致性或共享文件系统锁语义。多主机部署必须替换状态协调层，不能沿用单机 SQLite 声明。
 
 ## 可插拔扩展
 

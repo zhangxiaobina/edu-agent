@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R4.5
-- next_prompt: R4.6
-- baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
-- stage_gate: in_progress
-- stage_gate_reason: R0-R3 顶层门禁均 passed，R4.1-R4.5 的 Context Accounting、Artifact-first 可恢复压缩、保真评测、一次 overflow recovery、全树持久预算及进程 lifecycle/drain 已通过；R4 仍需完成备份恢复与 retention/GC 后才能收口
+- last_completed_prompt: R4.6
+- next_prompt: R5.1
+- baseline_commit: 7822781077f7132db29a3ba6c5bfeeb7e0a469e9
+- stage_gate: passed
+- stage_gate_reason: R0-R4 顶层门禁均 passed；R4.1-R4.6 的 Context Accounting、Artifact-first 可恢复压缩、保真评测、一次 overflow recovery、全树持久预算、进程 lifecycle/drain、一致备份恢复及 retention/GC 已通过完整 Stage 8 收口验收
 
 ## Baseline Reproduction
 
@@ -1189,3 +1189,47 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   restore 演练、Artifact retention/GC 与引用关系留给 R4.6。
 - gate: `R4.5 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
 - next: R4.6，读取 R4.1-R4.5 交接并实现 SQLite 一致备份/恢复、retention/GC 与 R4 收口；不得开始候选版包装。
+
+### R4.6 - 2026-08-24
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `7822781077f7132db29a3ba6c5bfeeb7e0a469e9` 开始；本次未创建本地提交或推送，未回退用户改动。验收产物来自
+  当前未提交 development 工作区，不冒充 candidate/release artifact；本会话未开始候选版包装。
+- deletion contract/references: retention 只按完整 session cohort 选择，不孤立删除 run。候选 session、root run 及全部
+  delegated child 必须超过策略窗口且 terminal，显式 journal/finalizer/budget 真相不得缺失，finalizer cursor 为 7，root
+  budget/delegation reservation 为零；活跃 lease、恢复建议、可重放 API 请求、memory、retention hold、`manual_review`、
+  pending operation、未发布或仍在窗口内的 outbox 均阻塞。非终态 journal 引用的 checkpoint 始终活跃。只有合格 cohort
+  的 Artifact 才可在父引用按外键顺序有界删除后进入两阶段 GC；其仍须独立过期、零引用、无 hold 并通过 managed-root/
+  path/hash 复验，unlink 前在同一有界写锁下再次复验引用和 late hold。未知文件从不扫描或删除。
+- backup/restore: 幂等 `015_storage_maintenance` 将 schema 提升到 15。在线备份使用 SQLite 官方 backup API，仅获取已提交
+  的一致数据库视图，不复制 live WAL/SHM 或未提交页；只复制 snapshot 索引的 Artifact 并复验大小/hash。版本化 manifest
+  记录 UTC 时间、schema/migration、SHA-256、大小和脱敏的 Python/SQLite/OS 类别，不含源绝对路径、主机、用户、endpoint、
+  环境变量或凭据。backup target 必须不存在；restore 只接受新目录或空目录，先校验 manifest/payload hash、schema 上限、
+  integrity/foreign key，再在私有 staging 中恢复并向前 migration，最后复验 session/run/journal/operation/checkpoint/Artifact
+  引用后发布；拒绝覆盖活跃数据库、未知文件和 schema 降级。
+- GC/operations: 新增默认 dry-run 的审计 CLI，batch size 限制为 1..1000；apply 在父记录提交后逐个复验并删除 Artifact，
+  中断后可从 durable pending 标记续收。存在 operation ref 时必须由显式 `--operation-db` 证明 operation/outbox 终态且
+  已过窗口，否则 fail closed；外部业务 DB 仅作锁定证明，不由 StateStore GC 删除。delegation child 的 tool/provider/Trace
+  事件随 cohort 清理。文档明确 SQLite lease/WAL/fencing 只协调共享同一本机文件的 Worker，不提供 NFS、多主机、跨容器
+  副本或网络分区下的共识。
+- storage failure drills: 覆盖真实 SQLite `SQLITE_FULL`、只读数据库、损坏 backup、final message 写入中断和 migration
+  各事务边界中断；写故障稳定归一为 `STATE_STORAGE_FULL/READ_ONLY/CORRUPT/UNAVAILABLE`，HTTP/SSE 返回脱敏 503。
+  final message 与 cursor 同事务，失败不产生 partial final；恢复复用持久 candidate 和 budget，不再次调用模型、刷新预算或
+  重复业务/operation/outbox 副作用。migration 中断整体回滚，重启只应用一次。
+- tests: 新增 20 项 R4.6 backup/restore/GC/fault 专项及 production demo 回归；demo 使用明确 output reserve 的 16,384-token
+  context，四轮长会话实际生成一个 checkpoint 并压缩四条消息，同时保留最新完整 exchange。SIGTERM/HTTP lifecycle、
+  deadline fencing、manual-review 保留和恢复边界进入 R4 收口专项。
+- verification: `uv lock --check`（91 packages）、`uv pip check`（62 packages）、全仓 Ruff 和 `git diff --check` 通过；
+  R4.6 storage 专项 `20 passed`，全部 R4 专项 `104 passed`。长会话 fidelity 12 个 stable
+  样本的六项指标均为 `1.0`，scope leak 与 duplicate trigger rate 均为 `0`。CLI 在线 backup、verify、空目录 restore、
+  post-migration `verify-state` 和 GC dry-run 通过；全量 pytest `665 passed (43.90s)`。唯一公开入口
+  `zsh scripts/accept_stage8.sh` 完整退出 0：R4 专项 `104 passed`、R2 专项 `148 passed`、production demo checkpoint、
+  Stage 7/Docker sandbox、10k Trace、lineage/fidelity、数据边界审计（0 findings）、backup/restore/GC 及最终全量
+  `665 passed` 全部通过，脚本退出时清理临时状态。
+- not_verified: 未访问公网、真实模型/Provider、真实教学平台或 GitHub-hosted CI；没有验证跨主机 SQLite/NFS 共识，因为
+  该能力明确不受支持。未创建 candidate/release 模式报告，按范围留给 R5.1。
+- residual_risks: 数据库 snapshot 与外置 Artifact 不是跨介质原子快照，备份通过 snapshot 精确索引及复制前后 hash/size
+  复验在变更时 fail closed；恢复和 GC 仍应由运维方监控容量并保留经验证的独立备份。外部 operation DB 无分布式事务，
+  所以缺少它或 outbox 未发布时 GC 必须保留 cohort。同步第三方调用的进程强杀边界延续 R4.5 的 supervisor 要求。
+- gate: `R4 passed`；R0-R4 顶层 stage gate 均为 `passed`。
+- next: R5.1，仅收口候选版验收编排、版本化报告 schema 和证据清单；不访问真实模型、不部署服务、不新增 Runtime 功能。

@@ -29,8 +29,10 @@ def main() -> None:
         MockEngine(policy),
         config=AppConfig(
             runtime=RuntimeConfig(
-                context_token_budget=512,
-                compression_trigger_ratio=0.5,
+                context_token_budget=16_384,
+                output_token_reserve=512,
+                compression_trigger_ratio=0.1,
+                compression_min_reclaim_tokens=1,
                 compression_keep_recent=2,
             ),
             storage=StorageConfig(
@@ -43,13 +45,19 @@ def main() -> None:
 
     first = service.chat("分析三班本周学情", actor_id="teacher-demo", role="teacher")
     second = service.chat(
-        "继续给出干预建议" + "，并解释每项建议的依据" * 80,
+        "继续给出干预建议" + "，并解释每项建议的依据" * 400,
         actor_id="teacher-demo",
         role="teacher",
         session_id=first.session_id,
     )
     third = service.chat(
-        "最后汇总本次干预方案",
+        "最后汇总本次干预方案" + "，补充课堂观察和阶段数据" * 400,
+        actor_id="teacher-demo",
+        role="teacher",
+        session_id=first.session_id,
+    )
+    fourth = service.chat(
+        "把方案整理为执行清单",
         actor_id="teacher-demo",
         role="teacher",
         session_id=first.session_id,
@@ -68,11 +76,12 @@ def main() -> None:
     print(f"turn 1: {first.final_answer}")
     print(f"turn 2: {second.final_answer}")
     print(f"turn 3: {third.final_answer}")
+    print(f"turn 4: {fourth.final_answer}")
     print(
         "context:",
         {
-            "checkpoint_id": third.context["checkpoint_id"],
-            "compacted_messages": third.context["compacted_messages"],
+            "checkpoint_id": fourth.context["checkpoint_id"],
+            "compacted_messages": fourth.context["compacted_messages"],
         },
     )
     print(f"job: {job_id} -> {scheduled[0]['status']}")

@@ -44,9 +44,27 @@ acceptance_uv_run python scripts/audit_data_boundaries.py \
   --fail-on-findings \
   "$stage8_root/audit.db" "$stage8_root/audit.db-wal" "$stage8_root/audit.db-shm"
 
+state_backup="$stage8_root/state-backup"
+state_restore="$stage8_root/state-restore"
+acceptance_uv_run python scripts/state_maintenance.py backup \
+  --state "$stage8_root/audit.db" --artifacts "$stage8_root/state-artifacts" \
+  --target "$state_backup"
+acceptance_uv_run python scripts/state_maintenance.py verify-backup \
+  --backup "$state_backup"
+acceptance_uv_run python scripts/state_maintenance.py restore \
+  --backup "$state_backup" --target-dir "$state_restore"
+acceptance_uv_run python scripts/state_maintenance.py verify-state \
+  --state "$state_restore/state.db" --artifacts "$state_restore/artifacts"
+acceptance_uv_run python scripts/state_maintenance.py gc \
+  --state "$state_restore/state.db" --artifacts "$state_restore/artifacts" \
+  --terminal-age-seconds 2592000 --artifact-age-seconds 2592000 --batch-size 100
+
 lineage_output="$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/eval-lineage.json"
 acceptance_uv_run python scripts/audit_eval_lineage.py \
   --quiet --output "$lineage_output"
+acceptance_uv_run python scripts/eval_context_fidelity.py \
+  --output "$stage8_root/context-fidelity.json" \
+  --thresholds tests/fixtures/context_fidelity_thresholds.json
 
 acceptance_uv_run ruff check \
   edu_agent/api.py edu_agent/data_audit.py edu_agent/data_classification.py \
@@ -55,15 +73,23 @@ acceptance_uv_run ruff check \
   edu_agent/eval/tasks.py edu_agent/eval/tasks_derived.py edu_agent/eval/tasks_test.py \
   edu_agent/observability \
   edu_agent/runtime/config.py edu_agent/runtime/security.py edu_agent/service.py \
-  edu_agent/state/store.py edu_agent/state/trace_index.py \
+  edu_agent/state/maintenance.py edu_agent/state/store.py edu_agent/state/trace_index.py \
   scripts/audit_data_boundaries.py scripts/audit_eval_lineage.py \
-  scripts/benchmark_trace_scaling.py scripts/eval_system.py \
+  scripts/benchmark_trace_scaling.py scripts/eval_context_fidelity.py \
+  scripts/eval_system.py scripts/state_maintenance.py \
   tests/test_acceptance_scripts.py tests/test_ci_provenance.py tests/test_eval_lineage.py \
+  tests/test_lifecycle.py tests/test_production_runtime_demo.py \
+  tests/test_r46_storage_maintenance.py \
   tests/test_stage8_boundaries_recovery_trace.py
 
 acceptance_uv_run python -m pytest -p no:cacheprovider \
   tests/test_eval_lineage.py tests/test_acceptance_scripts.py \
   tests/test_stage8_boundaries_recovery_trace.py -q
+acceptance_uv_run python -m pytest -p no:cacheprovider \
+  tests/test_context_accounting.py tests/test_context_checkpoint.py \
+  tests/test_context_fidelity.py tests/test_r43_context_policy.py \
+  tests/test_r43_context_recovery.py tests/test_run_budget_ledger.py \
+  tests/test_lifecycle.py tests/test_r46_storage_maintenance.py -q
 acceptance_uv_run python scripts/benchmark_trace_scaling.py \
   --events 10000 --page-size 100 \
   --output "$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/trace-scaling.json"

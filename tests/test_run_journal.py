@@ -677,10 +677,10 @@ def test_newer_database_schema_is_never_downgraded(tmp_path):
             CREATE TABLE state_schema_migrations(
                 version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
             );
-            INSERT INTO state_schema_migrations VALUES ('015_future', 't0');
+            INSERT INTO state_schema_migrations VALUES ('016_future', 't0');
             """
         )
-    with pytest.raises(StateSchemaVersionError, match="015_future"):
+    with pytest.raises(StateSchemaVersionError, match="016_future"):
         StateStore(marker_path)
 
 

@@ -33,7 +33,7 @@ from .observability.redaction import RedactionPolicy
 from .runtime.cancellation import CancellationRequested, CancellationToken
 from .runtime.context import CurrentUserInputTooLarge
 from .runtime.lifecycle import LifecycleAdmission, LifecycleRejected, ShutdownReport
-from .state import ContextCheckpointError
+from .state import ContextCheckpointError, StateStorageError
 
 
 @dataclass(frozen=True)
@@ -326,7 +326,9 @@ class EduAgentApi:
                 if current_user_too_large
                 else getattr(error, "error_code", type(error).__name__)
             )
-            response_status = 413 if current_user_too_large else 500
+            response_status = (
+                413 if current_user_too_large else 503 if isinstance(error, StateStorageError) else 500
+            )
             if stream_writer is not None and not stream_writer.bound:
                 try:
                     failed_run = self.service.get_run_status(
@@ -404,6 +406,8 @@ class EduAgentApi:
                             else error_code
                             if current_user_too_large
                             or str(error_code).startswith("CONTEXT_CHECKPOINT_")
+                            else error_code
+                            if isinstance(error, StateStorageError)
                             else "INTERNAL"
                         ),
                         message=f"{type(error).__name__}: {error}",
@@ -970,6 +974,17 @@ class EduAgentApi:
                     error.error_code,
                     "process is not accepting new work",
                     retryable=True,
+                ).payload(request_id),
+                headers={"Retry-After": "1"},
+            )
+        except StateStorageError as error:
+            return ApiResponse(
+                503,
+                ApiError(
+                    503,
+                    error.error_code,
+                    str(error),
+                    retryable=error.retryable,
                 ).payload(request_id),
                 headers={"Retry-After": "1"},
             )

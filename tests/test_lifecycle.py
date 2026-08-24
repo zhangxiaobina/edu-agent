@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
+import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
 from http.client import HTTPConnection
+from pathlib import Path
 
 import pytest
 
@@ -772,3 +777,94 @@ def test_real_http_liveness_readiness_and_draining_rejection(tmp_path):
         server.server_close()
         server_thread.join(2)
         api.close()
+
+
+def test_api_server_sigterm_drains_and_stops_with_audited_transitions(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    state_path = tmp_path / "state.db"
+    artifact_path = tmp_path / "artifacts"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            (
+                "[storage]",
+                f'state_path = "{state_path}"',
+                f'artifact_path = "{artifact_path}"',
+                "[lifecycle]",
+                "shutdown_deadline_seconds = 1.0",
+                "cancellation_grace_seconds = 0.2",
+                "final_flush_seconds = 0.1",
+                "poll_interval_seconds = 0.01",
+            )
+        ),
+        encoding="utf-8",
+    )
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "EDU_AGENT_CONFIG": str(config_path),
+            "EDU_AGENT_DEMO_TOKEN": "local-test-token",
+            "EDU_AGENT_API_HOST": "127.0.0.1",
+            "EDU_AGENT_API_PORT": str(port),
+            "EDU_AGENT_API_KEY": "",
+            "EDU_AGENT_FALLBACK_API_KEY": "",
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    process = subprocess.Popen(
+        [sys.executable, "scripts/api_server.py"],
+        cwd=root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"API server exited before readiness: {stdout}\n{stderr}")
+            try:
+                connection = HTTPConnection("127.0.0.1", port, timeout=0.2)
+                connection.request("GET", "/health/ready")
+                response = connection.getresponse()
+                body = json.loads(response.read())
+                connection.close()
+                if response.status == 200 and body["ready"] is True:
+                    break
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise AssertionError("API server did not become ready")
+            time.sleep(0.02)
+        process.terminate()
+        assert process.wait(timeout=5) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+    with StateStore(state_path, read_only=True).connect() as connection:
+        transitions = [
+            (row[0], json.loads(row[1]))
+            for row in connection.execute(
+                """
+                SELECT decision, details_json FROM audit_events
+                WHERE action='process.lifecycle_transition' ORDER BY id
+                """
+            )
+        ]
+    assert [item[0] for item in transitions] == [
+        "starting",
+        "running",
+        "draining",
+        "stopped",
+    ]
+    assert [(item[1]["from_state"], item[0]) for item in transitions[1:]] == [
+        ("starting", "running"),
+        ("running", "draining"),
+        ("draining", "stopped"),
+    ]

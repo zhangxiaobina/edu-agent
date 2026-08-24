@@ -100,6 +100,10 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   `draining`，readiness 立即失败并拒绝新 chat/Scheduler claim，liveness 在有界收尾期间保持成功。deadline
   到期后统一取消 Provider stream、工具和 Scheduler runner；仍未完成的 run 先写成可恢复 `abandoned` 并保留
   lease/fencing，再执行有界 WAL flush。外部模型短暂故障不参与 readiness，仍由 route breaker/fallback 处理。
+- **一致备份、受控恢复与 GC**：SQLite backup API 生成带 schema/hash/安全环境 manifest 的一致快照，Artifact
+  按索引逐个复验并打包；restore 只接受新目录或空目录，先校验再 migration 和引用复验。Retention 默认 dry-run，
+  `manual_review`、pending operation/outbox、恢复状态、hold 和活跃 checkpoint 都会阻塞；详见
+  [`docs/storage-operations.md`](docs/storage-operations.md)。
 - **模型与后台任务容错**：模型错误区分连接/超时/429/5xx 与 auth/权限/参数/上下文/输出上限，只重试明确
   瞬态故障；重试遵守有上限的 `Retry-After` 并使用 full jitter，并发和 breaker 按冻结 route 隔离，
   half-open 只放行一个探测。fallback 只接管策略允许的瞬态故障，并在发送前复验目标 API mode、tool calling、

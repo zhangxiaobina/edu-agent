@@ -282,6 +282,12 @@ stateDiagram-v2
 Plan/Evidence、tool event 和业务写提交边界都复验 owner/token。它不提供网络分区下的分布式锁、跨区域
 一致性或强制终止任意阻塞线程。
 
+这里的“同一文件”是硬边界：只支持共享该本机 SQLite 文件的 Worker，不声称 NFS、多主机、跨容器副本之间存在
+共识。R4.6 的一致 backup 使用 SQLite backup API；restore 只发布到新目录并向前 migration；retention 按 terminal
+session cohort 删除，`manual_review`、pending operation/outbox、恢复 cursor、retention hold 和活跃 checkpoint
+都会阻塞。Artifact 必须在父引用删除后仍满足过期、无引用和 hash/path 复验，才进入可续收的两阶段 GC。完整
+引用图和命令见 [storage-operations.md](storage-operations.md)。
+
 ## 写操作与恢复
 
 ```mermaid

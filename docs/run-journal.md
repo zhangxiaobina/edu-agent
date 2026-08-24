@@ -150,6 +150,10 @@ child allocation 是 root reservation 的转移，不是新的共享预算。Pro
 使用唯一 `budget-finalizer:<root_run_id>` 释放残留预留并冻结墙钟；若在 ledger final 与 cursor 提交之间崩溃，恢复
 重复同一 finalizer id 后继续，不会二次结算。
 
+R4.6 的 `015_storage_maintenance` 只增加 retention hold 与 Artifact 两阶段 GC 标记，不改变 journal phase/cursor。
+GC 只有在 journal 已为 `terminal/cancelled/failed`、finalizer cleanup 完成且不存在恢复、operation/outbox 或 hold
+阻塞时才删除整个过期 session cohort；非终态 journal 引用的 checkpoint 始终保留。
+
 ## R2.7 sequence 与进程 fence
 
 `012_r2_recovery` 将 SQLite `user_version` 提升到 12，并在 `runs.stream_event_sequence` 保存传输 sequence
