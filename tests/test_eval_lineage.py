@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
@@ -24,6 +25,7 @@ from edu_agent.eval.tasks_test import (
     TEST_SEED,
     build_test_tasks,
 )
+from scripts.audit_eval_lineage import main as audit_eval_lineage_main
 from scripts.eval_demo import _evidence_request_error, _write_result
 
 
@@ -82,6 +84,50 @@ def test_complete_corpus_is_family_isolated_and_deterministic(tmp_path):
         first_test.close()
         second_train.close()
         second_test.close()
+
+
+def test_shared_lineage_audit_includes_context_fidelity(tmp_path, monkeypatch, capsys):
+    output = tmp_path / "lineage.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["audit_eval_lineage.py", "--quiet", "--output", str(output)],
+    )
+    assert audit_eval_lineage_main() == 0
+    assert capsys.readouterr().out == "evaluation lineage audit passed\n"
+    report = json.loads(output.read_text(encoding="utf-8"))
+    fidelity = report["context_fidelity"]
+    assert report["checks"]["context_fidelity_lineage"] is True
+    assert fidelity["passed"] is True
+    assert fidelity["sample_count"] == 12
+    assert fidelity["deterministic_generation"]["passed"] is True
+    assert all("scope" not in sample for sample in fidelity["manifest"]["samples"])
+
+
+def test_shared_lineage_audit_propagates_context_fidelity_failure(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from edu_agent.eval.context_fidelity import build_context_fidelity_corpus
+
+    invalid = [case.to_dict() for case in build_context_fidelity_corpus()]
+    del invalid[0]["lineage"]["source"]
+    monkeypatch.setattr(
+        "scripts.audit_eval_lineage.build_context_fidelity_corpus",
+        lambda: deepcopy(invalid),
+    )
+    output = tmp_path / "invalid-lineage.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["audit_eval_lineage.py", "--quiet", "--output", str(output)],
+    )
+
+    assert audit_eval_lineage_main() == 1
+    assert capsys.readouterr().out == "evaluation lineage audit failed\n"
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["passed"] is False
+    assert report["checks"]["context_fidelity_lineage"] is False
+    assert any(error.startswith("context_fidelity:missing_provenance:") for error in report["errors"])
 
 
 def test_test_split_oracle_only_validates_harness(tmp_path):

@@ -133,7 +133,8 @@ Plan/Evidence、tool result、memory/checkpoint、协议开销和最大输出预
 `ContextEngine` 是可替换接口，内置 `CheckpointContextEngine` 在历史达到配置阈值后：
 
 1. 先把超过结果预算的旧 tool result 写入现有 scoped Artifact；消息只保留 typed reference、SHA-256、
-   脱敏 preview、classification、原长度和业务回执，写入失败的原子组不参与本次压缩；
+   脱敏 preview、classification、原长度和业务回执，写入失败的原子组不参与本次压缩。若没有可归档的完整旧
+   exchange，但这次替换本身已回收上下文，则返回 `artifact_only`，不伪造空 checkpoint；
 2. 按 assistant tool call + 全部 tool result 原子组选择旧 exchange，并显式保留 system、当前 turn、近期消息、
    未完成 Plan、审批/operation receipt、citation、Artifact ref、用户约束和未配对工具组；
 3. 仅将选中的原消息标为 `active=0` 并关联 checkpoint，不删除或重写原文；精确 sequence 清单即使不连续也可恢复；
@@ -142,11 +143,17 @@ Plan/Evidence、tool result、memory/checkpoint、协议开销和最大输出预
 5. 每次注入或恢复前复验 session/actor/tenant、创建 run、source/summary/parent hash、软归档状态以及 Artifact/
    operation 引用。缺失、篡改或 scope 不符会返回 `CONTEXT_CHECKPOINT_*` 并写 denied audit，不会继续生成答案；
 6. checkpoint 与长期记忆一起放入当前真实 user turn，system prompt 保持逐字节稳定。原消息可通过
-   `restore_context_checkpoint_messages()` 恢复，Artifact 引用也可在完整性复验后解引用。
+   `restore_context_checkpoint_messages()` 恢复，Artifact 引用也可在完整性复验后解引用；
+7. trigger/release 双阈值、正值最小回收量和按新 user turn 计数的冷却窗口阻止逐轮 micro-compaction。策略 marker
+   记录压缩时观察到的最大 sequence；达到 release 后重新武装，但进程重启不会把 retained recent 消息算成新内容；
+8. 确定性摘要将 scope、用户约束、实体、approval、未完成 Plan、operation/citation/Artifact 引用放入结构化必保区。
+   多代 checkpoint 解析并合并这些字段，不递归截断旧摘要；必保区超过上限时返回 `mandatory_summary_too_large`。
 
 `013_context_checkpoint_provenance` 将旧范围型 checkpoint 幂等迁移为可兼容读取的 schema v1，并回填可取得的
-scope、sequence 和 hash；新 checkpoint 使用严格 schema v2。当前摘要仍是确定性有损检查点，压缩触发阈值继续使用
-R4.1 前的 estimator；反抖动、摘要保真评测和 Provider context overflow 单次恢复属于 R4.3，尚未在这里实现。
+scope、sequence 和 hash；新 checkpoint 使用严格 schema v2。R4.3 不增加数据库 migration，策略版本升级为
+`artifact-first-hysteresis@2026-08-24.r4.3.v1`，仍使用 R4.1 前的确定性压缩 estimator。默认离线摘要和 overflow
+恢复不依赖外部模型；Artifact-only 的持久边界由 Artifact metadata、source sequence、run/session/actor/tenant scope
+共同复验，崩溃后不会再次外置同一结果。本阶段没有实现预算总账。
 
 ## 全局运行管理
 
@@ -392,7 +399,7 @@ pending → running → success
 ## 模型容错
 
 `ResilientEngine` 把错误分为连接、超时、限流、服务端、认证、权限、非法请求、上下文溢出、输出上限和
-未知错误。只有连接/超时/429/5xx 才退避重试；认证、权限、参数、上下文和输出上限问题快速失败。本地退避
+未知错误。只有连接/超时/429/5xx 才在韧性层退避重试；认证、权限、参数、上下文和输出上限问题快速失败。本地退避
 使用有上限的 full jitter；合法的 `Retry-After` 秒数或 HTTP-date 优先，并受独立配置上限约束。并发限制、
 连续瞬态失败计数和 breaker 都按冻结的 route identity 隔离；冷却后的 half-open 同一路由只允许一个探测。
 route 状态表由 Engine 实例拥有，具有容量和空闲 TTL，避免进程级状态无限增长。每次 Provider attempt 的
@@ -403,6 +410,12 @@ tool calling、strict structured output、请求形态和上下文需求；未�
 401/403/普通 400/context overflow/output cap/unknown 均拒绝切换并保留 primary 原错。候选 route 在 turn 起点冻结，
 `route_resolved/fallback_rejected/fallback_activated/provider_result_selected` 解释选择与唯一胜出结果；失败 attempt
 usage 只留在审计中，不能覆盖最终响应。每条 route 仍只有一个 `CredentialRef`，不实现凭据轮换池。
+
+Service 在 Provider 明确返回 input context overflow、且流尚未产生可见 delta 时拥有一个更窄的恢复分支：重新计数，
+强制执行一次 checkpoint/Artifact-only 压缩，重建请求，并在相同冻结 route 上重试一次。checkpoint 或已复验的 Artifact
+replacement 是持久恢复边界；recount、started/committed/retry_started/succeeded 或 exhausted 状态写入 journal/Trace。
+output cap、普通 invalid request、本地当前输入过长、第二次 overflow 和已有可见 delta 的错误直接失败，不会进入循环
+或借 fallback 隐藏原错；取消与 finalizer 竞争仍由 fencing 和唯一终态 cursor 收敛。
 
 `EduAgentService.scheduler()` 用同一个 Service 执行任务，因此计划任务不会绕过记忆、预算、
 工具安全和状态持久化。

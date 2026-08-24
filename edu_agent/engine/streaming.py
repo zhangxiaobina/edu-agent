@@ -316,6 +316,11 @@ class ProviderStreamAggregator:
                 self._reset_attempt()
                 return None
             if event.error is not None:
+                if self._visible:
+                    try:
+                        setattr(event.error, "stream_visible", True)
+                    except Exception:
+                        pass
                 raise event.error
             raise ProviderStreamProtocolError(
                 event.error_message or "provider stream failed",
@@ -436,6 +441,13 @@ def consume_provider_stream(
             if event_sink is not None:
                 event_sink(event)
             aggregator.feed(event)
+    except Exception as error:
+        if aggregator.visible:
+            try:
+                setattr(error, "stream_visible", True)
+            except Exception:
+                pass
+        raise
     finally:
         close = getattr(iterator, "close", None)
         if callable(close):

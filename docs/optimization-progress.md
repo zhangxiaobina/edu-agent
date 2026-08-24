@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R4.2
-- next_prompt: R4.3
+- last_completed_prompt: R4.3
+- next_prompt: R4.4
 - baseline_commit: 8d5d2a15bb107c90dcada53018b65728371c6d88
 - stage_gate: in_progress
-- stage_gate_reason: R0-R3 顶层门禁均 passed，R4.1-R4.2 的 Context Accounting、Artifact-first compaction 与 checkpoint provenance 已通过；R4 仍需完成压缩反抖动/overflow recovery、全树预算、lifecycle/drain 及备份恢复后才能收口
+- stage_gate_reason: R0-R3 顶层门禁均 passed，R4.1-R4.3 的 Context Accounting、Artifact-first 可恢复压缩、保真评测和一次 overflow recovery 已通过；R4 仍需完成全树预算、lifecycle/drain 及备份恢复后才能收口
 
 ## Baseline Reproduction
 
@@ -1059,3 +1059,45 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   单次 Provider overflow recovery 留给 R4.3。Artifact retention/GC 与备份恢复关系留给 R4.6。
 - gate: `R4.2 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
 - next: R4.3，读取本交接并实现压缩反抖动、摘要保真评测与至多一次同 route Provider context overflow recovery。
+
+### R4.3 - 2026-08-24
+
+- commit/evidence: 会话从与 `origin/main` 同步且工作区干净的
+  `b9320c3b833ee15454c133c33324e97b825a8adc` 开始；本次未创建本地提交或推送，未回退用户改动。R4.3
+  证据来自当前未提交 development 工作区，不冒充 candidate/release artifact。
+- recoverable compaction: `CheckpointContextEngine` 使用 trigger/release 双阈值、正值最小回收量和按完成 user turn/
+  时间计算的冷却规则；持久 policy marker 保存 `last_observed_sequence`，进程重开不会把 retained recent 内容当作新 turn。
+  策略先将大 tool result 变为 scoped Artifact ref，再只归档完整旧 exchange；普通压缩保留 recent，Provider overflow
+  强制压缩可绕过 recent，但仍保留 system/当前 turn、未完成 Plan、审批、operation/citation/Artifact 和不完整工具组。
+  只有 Artifact 替换产生回收且无完整 exchange 时返回 `artifact_only`，不创建空 checkpoint。
+- summary fidelity: 确定性摘要把 tenant/actor/session/course scope、用户约束、实体、approval、未完成 Plan、operation/
+  citation/Artifact ref 放入结构化必保区；多代 checkpoint 解析并合并必保字段，只截断可选自由文本。prior scope 不一致
+  fail closed，必保字段超过上限返回 `mandatory_summary_too_large`；默认离线与恢复路径不依赖外部摘要模型。
+- fidelity gate: 新增 12 条稳定 Train 6/Dev 3/Test 3 lineage corpus。观测实际执行生产摘要器、重启后的反抖动策略和
+  `ContextAccountant`；固定 `utf8-bytes-div3@r4.3.v1` 只作为可复现 reference counter，不冒充 Provider tokenizer。
+  六类 constraint/entity/operation/approval/citation/Artifact fidelity 均为 `1.0`，scope leak 与重复触发率均为 `0.0`，
+  compression ratio 为 `0.2202165172`（约 `77.98%` 回收），估算绝对相对误差为 `0.0820028104`。门槛由
+  `tests/fixtures/context_fidelity_thresholds.json` 配置；通用 `audit_eval_lineage.py` 现在双生成该 corpus，并阻断稳定
+  ID/hash 不一致、跨 split 内容/族/语义/scope 重叠、缺 provenance、敏感字段或非确定生成。
+- provider recovery: 只有 Provider 明确 input context overflow 且没有可见 stream delta 时，Service 才执行至多一次
+  “重新计数 -> 强制 checkpoint/Artifact-only 压缩 -> 重建请求 -> 同冻结 route 重试”。started/committed/
+  retry_started/succeeded/exhausted 写入 journal/Trace；checkpoint 或结构化复验的 Artifact replacement 是崩溃恢复边界。
+  started-only 可继续，committed 后重启直接从 attempt 2 恢复且不重复压缩。output cap、普通 invalid request、本地当前
+  输入过长、可见 stream 和第二次 overflow 保留原分类直接失败，不进入循环或 fallback。
+- config/migrations/scope: 新增压缩 trigger/release、最小回收量、turn/time cooldown 配置与示例；ratio 拒绝布尔值，
+  新 token/threshold Trace 字段继续走中心 numeric redaction。无新依赖、环境变量或数据库 migration；策略版本为
+  `artifact-first-hysteresis@2026-08-24.r4.3.v1`。本阶段明确没有实现持久预算总账，也没有提前开始 R4.4。
+- verification: context/accounting/checkpoint/fidelity、Provider adapter/gateway/resilience/streaming、R2/R4.3 recovery、
+  journal、finalizer 和 cancellation 专项 `218 passed (5.78s)`；阈值抖动、无可压内容、关键项过大、一次恢复成功、
+  第二次 overflow、Artifact-only 崩溃窗、finalizer/cancel 竞争及重启不重复压缩均有回归。通用 lineage audit 与带门槛
+  fidelity CLI 退出 0；全仓 Ruff、`uv lock --check`（91 packages）、`uv pip check`（62 packages）和
+  `git diff --check` 通过。受限沙箱全量为 `601 passed, 12 failed (37.11s)`，12 项全部止于
+  `127.0.0.1:0` 的 `socket.bind PermissionError`；加入最终 lineage 失败传播反例后，当前工作区在获准回环环境的
+  同一离线命令为 `614 passed (36.69s)`。
+- not_verified: 未访问公网、真实模型/Provider、真实教学平台、GitHub-hosted CI 或 Docker/Jobe；未运行阶段收口专用
+  `zsh scripts/accept_stage8.sh`，因为 R4.3 是普通切片且 R4 gate 仍未收口。未实现可选模型摘要，离线正确性不依赖它。
+- residual_risks: 确定性自由文本摘要仍有意有损，门槛只能保证声明的必保项；固定 reference counter 不能替代真实
+  Provider tokenizer/usage 校准。Artifact retention/GC 与 checkpoint 备份关系留给 R4.6；全树预算与跨 child 结算留给
+  R4.4，不能从本阶段局部 model-call 计数推断已完成总账。
+- gate: `R4.3 passed`；R4 总门禁保持 `in_progress`，R0-R3 顶层 stage gate 仍为 `passed`。
+- next: R4.4，读取本交接并实现持久 `RunBudgetLedger` 与全树 reserve/commit/release；不实现进程 drain。

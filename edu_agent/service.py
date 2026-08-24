@@ -13,7 +13,7 @@ from .agent.loop_journal import frozen_route_shape, tool_manifest_hash
 from .agent.prompts import SYSTEM_PROMPT
 from .agent.turn_finalizer import FinalizationResult, TurnFinalizer
 from .code_execution import build_code_execution_provider
-from .engine import Engine, get_engine
+from .engine import Engine, get_engine, is_provider_context_overflow
 from .knowledge import KnowledgeToolProvider, SQLiteKnowledgeProvider
 from .observability import RedactionPolicy, RunEventType, TraceRepository
 from .planning.runtime import PlanningOptions
@@ -138,6 +138,10 @@ class EduAgentService:
                 self.state_store,
                 token_budget=self.config.runtime.context_token_budget,
                 trigger_ratio=self.config.runtime.compression_trigger_ratio,
+                release_ratio=self.config.runtime.compression_release_ratio,
+                min_reclaim_tokens=self.config.runtime.compression_min_reclaim_tokens,
+                cooldown_turns=self.config.runtime.compression_cooldown_turns,
+                cooldown_seconds=self.config.runtime.compression_cooldown_seconds,
                 keep_recent=self.config.runtime.compression_keep_recent,
                 summary_max_chars=self.config.runtime.compression_summary_max_chars,
                 result_budget=self.result_budget,
@@ -571,7 +575,7 @@ class EduAgentService:
         return payload
 
     @staticmethod
-    def _call_context_engine(method, *args, context: RunContext):
+    def _call_context_engine(method, *args, context: RunContext, **kwargs):
         """Pass run scope when supported while retaining the pre-R4.2 plugin API."""
 
         parameters = inspect.signature(method).parameters.values()
@@ -580,7 +584,23 @@ class EduAgentService:
             or parameter.kind is inspect.Parameter.VAR_KEYWORD
             for parameter in parameters
         )
-        return method(*args, context=context) if accepts_context else method(*args)
+        accepts_var_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+        )
+        accepted_names = {
+            parameter.name
+            for parameter in parameters
+            if parameter.kind
+            in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+        }
+        filtered = {
+            key: value
+            for key, value in kwargs.items()
+            if accepts_var_kwargs or key in accepted_names
+        }
+        if accepts_context:
+            filtered["context"] = context
+        return method(*args, **filtered)
 
     def _plan_finalizer_components(self, context: RunContext):
         """Load the persisted Plan/Evidence verifiers for the final re-check."""
@@ -667,6 +687,8 @@ class EduAgentService:
     @staticmethod
     def _failure_stop_reason(error: Exception) -> str:
         text = f"{type(error).__name__}: {error}".lower()
+        if is_provider_context_overflow(error):
+            return "context_overflow"
         if isinstance(error, (BudgetExceeded, ContextBudgetExceeded)):
             return "budget_exceeded"
         if "budget" in text or "quota" in text:
@@ -885,6 +907,10 @@ class EduAgentService:
                     "estimated_tokens_after": compaction.estimated_tokens_after,
                 },
             )
+        if compaction and (
+            compaction.compacted_messages
+            or getattr(compaction, "externalized_messages", 0)
+        ):
             history = self.state_store.get_messages(
                 session_id,
                 limit=None,
@@ -960,8 +986,134 @@ class EduAgentService:
             ),
             "accounting": accounting.records(),
         }
-        try:
-            result = run_agent(
+
+        frozen_route_json = json.dumps(
+            frozen_route_shape(self.engine),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        recovery_attempted = False
+
+        def _recovery_event_exists(event: str) -> bool:
+            checker = getattr(self.state_store, "has_provider_event", None)
+            if not callable(checker):
+                return False
+            try:
+                return bool(
+                    checker(
+                        context.run_id,
+                        event,
+                        provider="runtime",
+                        actor_id=context.actor_id,
+                        tenant_id=context.tenant_id,
+                    )
+                )
+            except TypeError:
+                # Keep lightweight test stores and pre-R4.3 adapters usable;
+                # the durable StateStore path above remains scope checked.
+                return bool(checker(context.run_id, event, provider="runtime"))
+
+        def _recovery_committed() -> bool:
+            # ``compacted`` is retained as a durable alias for databases that
+            # were written before the explicit committed event was introduced.
+            if _recovery_event_exists(
+                "context_overflow_recovery_committed"
+            ) or _recovery_event_exists("context_overflow_recovery_compacted"):
+                return True
+            # ``compact_messages`` and the checkpoint policy marker commit in
+            # one SQLite transaction.  This closes the narrow crash window
+            # between that commit and recording the provider Trace event.
+            try:
+                checkpoint = self.state_store.latest_context_checkpoint(
+                    session_id,
+                    context=context,
+                )
+            except (AttributeError, TypeError):
+                return False
+            if not checkpoint or checkpoint.get("created_run_id") != context.run_id:
+                checkpoint_committed = False
+            else:
+                checkpoint_committed = any(
+                    isinstance(item, dict)
+                    and item.get("type") == "compaction_policy"
+                    and item.get("reason") == "provider_context_overflow"
+                    for item in checkpoint.get("preserved_items", [])
+                )
+            if checkpoint_committed:
+                return True
+            artifact_checker = getattr(
+                self.state_store,
+                "has_context_overflow_artifact_externalization",
+                None,
+            )
+            return bool(
+                _recovery_event_exists("context_overflow_recovery_started")
+                and callable(artifact_checker)
+                and artifact_checker(
+                    context.run_id,
+                    session_id=session_id,
+                    actor_id=context.actor_id,
+                    tenant_id=context.tenant_id,
+                )
+            )
+
+        recovery_attempted = _recovery_committed()
+        force_recovery_model_attempt = recovery_attempted and not _recovery_event_exists(
+            "context_overflow_recovery_retry_started"
+        )
+
+        def _without_persisted_protocol(all_history: list[dict]):
+            """Remove this run's durable protocol before rebuilding a snapshot."""
+
+            persisted = self.state_store.get_run_messages(context.run_id)
+            if not persisted:
+                return all_history, []
+            protocol = [
+                item
+                for item in persisted
+                if item.get("role") in {"assistant", "tool"}
+            ]
+            if len(all_history) >= len(persisted) and all_history[-len(persisted) :] == persisted:
+                return all_history[: -len(persisted)], protocol
+            count = len(persisted)
+            start = next(
+                (
+                    index
+                    for index in range(len(all_history) - count, -1, -1)
+                    if all_history[index : index + count] == persisted
+                ),
+                None,
+            )
+            if start is None:
+                raise RuntimeError("context recovery found an unordered run protocol")
+            return [*all_history[:start], *all_history[start + count :]], protocol
+
+        def _rebuild_after_compaction():
+            refreshed_history = self.state_store.get_messages(session_id, limit=None)
+            compact_history, protocol = _without_persisted_protocol(refreshed_history)
+            refreshed_checkpoint = (
+                self._call_context_engine(
+                    self.context_engine.checkpoint_summary,
+                    session_id,
+                    context=context,
+                )
+                if self.context_engine is not None
+                else None
+            )
+            refreshed_snapshot = self.context_manager.prepare(
+                system_prompt=self.system_prompt,
+                history=compact_history,
+                user_message=message,
+                memory_items=memory_snapshot.items if memory_snapshot else [],
+                context_checkpoint=refreshed_checkpoint,
+                tools=frozen_tools,
+                accounting=accounting,
+            )
+            return refreshed_snapshot, [*refreshed_snapshot.messages, *protocol]
+
+        def _run_agent_once():
+            return run_agent(
                 message,
                 self.engine,
                 db_conn=db_conn,
@@ -980,19 +1132,234 @@ class EduAgentService:
                 state_store=self.state_store,
                 context_checkpoint_id=(
                     compaction.checkpoint_id
-                    if compaction is not None
+                    if compaction is not None and compaction.checkpoint_id
                     else (
-                        self.state_store.latest_context_checkpoint(session_id) or {}
+                        self.state_store.latest_context_checkpoint(
+                            session_id,
+                            context=context,
+                        )
+                        or {}
                     ).get("id")
                 ),
+                force_new_model_attempt=force_recovery_model_attempt,
                 loop_fault_injector=self.loop_fault_injector,
                 tool_manifest=manifest,
                 tool_batch_max_workers=self.config.runtime.tool_batch_max_workers,
-                tool_call_timeout_seconds=(
-                    self.config.runtime.tool_call_timeout_seconds
-                ),
+                tool_call_timeout_seconds=self.config.runtime.tool_call_timeout_seconds,
                 context_accounting=accounting,
             )
+
+        try:
+            while True:
+                try:
+                    result = _run_agent_once()
+                    break
+                except Exception as provider_error:
+                    marker_exists = _recovery_committed()
+                    started_exists = _recovery_event_exists(
+                        "context_overflow_recovery_started"
+                    )
+                    eligible = (
+                        not recovery_attempted
+                        and not marker_exists
+                        and is_provider_context_overflow(provider_error)
+                    )
+                    if not eligible:
+                        if (
+                            recovery_attempted
+                            and is_provider_context_overflow(provider_error)
+                        ):
+                            self.state_store.record_provider_event(
+                                run_id=context.run_id,
+                                provider="runtime",
+                                event="context_overflow_recovery_exhausted",
+                                attempt=context.budget.model_calls,
+                                error_class=type(provider_error).__name__,
+                                details={
+                                    "failure_kind": "context_overflow",
+                                    "recovery_attempts": 1,
+                                    "fallback": False,
+                                },
+                            )
+                        raise
+                    recovery_attempted = True
+                    force_recovery_model_attempt = True
+                    context.check_control("context_overflow.recovery.before")
+                    current_route_json = json.dumps(
+                        frozen_route_shape(self.engine),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    if current_route_json != frozen_route_json:
+                        raise RuntimeError("provider route changed before context overflow recovery")
+                    if not started_exists:
+                        self.state_store.record_provider_event(
+                            run_id=context.run_id,
+                            provider="runtime",
+                            event="context_overflow_recovery_started",
+                            attempt=context.budget.model_calls,
+                            error_class=type(provider_error).__name__,
+                            details={
+                                "failure_kind": "context_overflow",
+                                "route": frozen_route_shape(self.engine),
+                                "recovery_attempt": 1,
+                            },
+                        )
+                    else:
+                        self.state_store.record_provider_event(
+                            run_id=context.run_id,
+                            provider="runtime",
+                            event="context_overflow_recovery_resumed",
+                            attempt=context.budget.model_calls,
+                            error_class=type(provider_error).__name__,
+                            details={
+                                "failure_kind": "context_overflow",
+                                "route": frozen_route_shape(self.engine),
+                                "recovery_attempt": 1,
+                            },
+                        )
+                    recount = accounting.measure(
+                        messages=agent_messages,
+                        tools=frozen_tools,
+                        phase="context_overflow_recount",
+                        event="context_overflow_recount",
+                    )
+                    self.state_store.record_provider_event(
+                        run_id=context.run_id,
+                        provider="runtime",
+                        event="context_overflow_recovery_recounted",
+                        attempt=context.budget.model_calls,
+                        details={
+                            "estimated_input_tokens": recount.estimated_input_tokens,
+                            "total_reserved_tokens": recount.total_reserved_tokens,
+                            "decision": recount.decision,
+                        },
+                    )
+                    compaction = (
+                        self._call_context_engine(
+                            self.context_engine.compact_if_needed,
+                            session_id,
+                            self.state_store.get_messages(session_id, limit=None),
+                            context=context,
+                            force=True,
+                            reason="provider_context_overflow",
+                        )
+                        if self.context_engine is not None
+                        else None
+                    )
+                    if compaction is None or not (
+                        compaction.compacted_messages
+                        or getattr(compaction, "externalized_messages", 0)
+                    ):
+                        self.state_store.record_provider_event(
+                            run_id=context.run_id,
+                            provider="runtime",
+                            event="context_overflow_recovery_unavailable",
+                            attempt=context.budget.model_calls,
+                            details={
+                                "decision": getattr(compaction, "decision", "no_engine"),
+                                "compacted_messages": getattr(
+                                    compaction, "compacted_messages", 0
+                                ),
+                                "externalized_messages": getattr(
+                                    compaction, "externalized_messages", 0
+                                ),
+                            },
+                        )
+                        raise
+                    # The checkpoint or Artifact replacement is the durable
+                    # recovery boundary.  Once this event is committed, a
+                    # later owner must not compact again before the retry.
+                    self.state_store.record_provider_event(
+                        run_id=context.run_id,
+                        provider="runtime",
+                        event="context_overflow_recovery_committed",
+                        attempt=context.budget.model_calls,
+                        details={
+                            "checkpoint_id": compaction.checkpoint_id,
+                            "compacted_messages": compaction.compacted_messages,
+                            "externalized_messages": getattr(
+                                compaction, "externalized_messages", 0
+                            ),
+                            "same_route": True,
+                            "recovery_attempt": 1,
+                        },
+                    )
+                    context.check_control("context_overflow.recovery.after_compaction")
+                    context.emit_run_event(
+                        RunEventType.CONTEXT_COMPACTED.value,
+                        {
+                            "checkpoint_id": compaction.checkpoint_id,
+                            "compacted_messages": compaction.compacted_messages,
+                            "externalized_messages": getattr(
+                                compaction, "externalized_messages", 0
+                            ),
+                            "estimated_tokens_before": compaction.estimated_tokens_before,
+                            "estimated_tokens_after": compaction.estimated_tokens_after,
+                            "reclaimed_tokens": getattr(compaction, "reclaimed_tokens", 0),
+                            "reason": "provider_context_overflow",
+                            "recovery_attempt": 1,
+                        },
+                    )
+                    snapshot, agent_messages = _rebuild_after_compaction()
+                    self.state_store.start_run(
+                        run_id=context.run_id,
+                        session_id=session_id,
+                        model=getattr(self.engine, "name", type(self.engine).__name__),
+                        context_tokens=snapshot.estimated_tokens,
+                        omitted_messages=snapshot.omitted_messages,
+                        context=context,
+                    )
+                    context_payload.update(
+                        {
+                            "estimated_tokens": snapshot.estimated_tokens,
+                            "omitted_messages": snapshot.omitted_messages,
+                            "checkpoint_id": compaction.checkpoint_id,
+                            "compacted_messages": compaction.compacted_messages,
+                            "externalized_messages": getattr(
+                                compaction, "externalized_messages", 0
+                            ),
+                            "breakdown": (
+                                snapshot.breakdown.to_trace()
+                                if snapshot.breakdown is not None
+                                else None
+                            ),
+                            "recovery": {
+                                "attempted": True,
+                                "failure_kind": "context_overflow",
+                                "recount_estimated_tokens": recount.estimated_input_tokens,
+                                "checkpoint_id": compaction.checkpoint_id,
+                            },
+                        }
+                    )
+                    self.state_store.record_provider_event(
+                        run_id=context.run_id,
+                        provider="runtime",
+                        event="context_overflow_recovery_compacted",
+                        attempt=context.budget.model_calls,
+                        details={
+                            "checkpoint_id": compaction.checkpoint_id,
+                            "compacted_messages": compaction.compacted_messages,
+                            "externalized_messages": getattr(
+                                compaction, "externalized_messages", 0
+                            ),
+                            "estimated_tokens_before": compaction.estimated_tokens_before,
+                            "estimated_tokens_after": compaction.estimated_tokens_after,
+                            "same_route": True,
+                        },
+                    )
+                    # The loop has exactly one eligible transition.  A second
+                    # overflow reaches the outer failure path unchanged.
+                    continue
+            if recovery_attempted:
+                self.state_store.record_provider_event(
+                    run_id=context.run_id,
+                    provider="runtime",
+                    event="context_overflow_recovery_succeeded",
+                    attempt=context.budget.model_calls,
+                    details={"recovery_attempts": 1, "same_route": True},
+                )
             context_payload["accounting"] = accounting.records()
             context.check_control("messages.before_final_commit")
             context.emit_run_event(

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 CHECKPOINT_MIGRATION = "013_context_checkpoint_provenance"
 CHECKPOINT_SCHEMA_VERSION = 2
-CHECKPOINT_STRATEGY_VERSION = "artifact-first-checkpoint@2026-08-24.v1"
+CHECKPOINT_STRATEGY_VERSION = "artifact-first-hysteresis@2026-08-24.r4.3.v1"
 CHECKPOINT_ESTIMATOR_VERSION = "legacy-json-chars-div4@r4.1.v1"
 
 _JSON_FIELDS = {

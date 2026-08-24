@@ -202,6 +202,43 @@ def classify_failure(error: Exception) -> FailureDecision:
     return FailureDecision(FailureKind.UNKNOWN, False, status)
 
 
+def is_provider_context_overflow(error: Exception) -> bool:
+    """Identify a provider-reported input overflow eligible for one recovery.
+
+    Local accounting failures and capability preflight errors use the same
+    ``FailureKind`` for routing purposes, but they must never trigger a retry
+    after deleting history.  Keep this stricter predicate at the recovery
+    boundary rather than weakening the general failure classifier.
+    """
+
+    if bool(getattr(error, "stream_visible", False)):
+        return False
+    try:
+        from ..runtime.context import ContextBudgetExceeded
+
+        if isinstance(error, ContextBudgetExceeded):
+            return False
+    except ImportError:
+        pass
+    if isinstance(error, ProviderCapabilityError):
+        return False
+    decision = classify_failure(error)
+    if decision.kind is not FailureKind.CONTEXT_OVERFLOW:
+        return False
+    markers = _error_markers(error)
+    status = _status_code(error)
+    if not markers and status is None:
+        return False
+    text = str(error).lower()[:4096]
+    return bool(
+        markers & _CONTEXT_CODES
+        or "context_length_exceeded" in text
+        or "context window" in text
+        or "context length" in text
+        or "prompt too long" in text
+    )
+
+
 def _non_negative_finite(value: float, label: str) -> float:
     if isinstance(value, bool):
         raise ValueError(f"{label} must be a non-negative finite number")
@@ -2118,6 +2155,7 @@ __all__ = [
     "RouteStateCapacityError",
     "RouteStateRegistry",
     "classify_failure",
+    "is_provider_context_overflow",
     "parse_retry_after",
     "retry_after_from_error",
 ]

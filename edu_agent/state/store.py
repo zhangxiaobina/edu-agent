@@ -62,6 +62,7 @@ from .turn_finalizer import (
 
 
 _UNSET = object()
+_SCOPED_ARTIFACT_REFERENCE_TYPE = "edu-agent.scoped-artifact.v1"
 STATE_SCHEMA_VERSION = 13
 
 
@@ -2111,6 +2112,10 @@ class StateStore:
                 session_id,
                 context=context,
             )
+            session = connection.execute(
+                "SELECT role, course_ids_json FROM sessions WHERE id=?",
+                (session_id,),
+            ).fetchone()
             plans = connection.execute(
                 """
                 SELECT id, run_id, status, goal FROM plans
@@ -2168,6 +2173,17 @@ class StateStore:
                 }
             )
         return {
+            "scope": {
+                "session_id": session_id,
+                "actor_id": actor_id,
+                "tenant_id": tenant_id,
+                "role": session["role"] if session is not None else None,
+                "course_ids": (
+                    json.loads(session["course_ids_json"] or "[]")
+                    if session is not None
+                    else []
+                ),
+            },
             "unfinished_plans": [
                 {
                     "plan_id": row["id"],
@@ -2646,6 +2662,79 @@ class StateStore:
                     _now(),
                 ),
             )
+
+    def has_provider_event(
+        self,
+        run_id: str,
+        event: str,
+        *,
+        provider: str | None = None,
+        actor_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> bool:
+        """Return whether a durable runtime/provider event already exists."""
+
+        query = """
+            SELECT 1
+            FROM provider_events e
+            LEFT JOIN runs r ON r.id=e.run_id
+            WHERE e.run_id=? AND e.event=?
+        """
+        parameters: list[object] = [run_id, event]
+        if actor_id is not None:
+            query += " AND r.actor_id=?"
+            parameters.append(actor_id)
+        if tenant_id is not None:
+            query += " AND r.tenant_id=?"
+            parameters.append(tenant_id)
+        if provider is not None:
+            query += " AND e.provider=?"
+            parameters.append(provider)
+        query += " LIMIT 1"
+        with self.connect() as connection:
+            return connection.execute(query, tuple(parameters)).fetchone() is not None
+
+    def has_context_overflow_artifact_externalization(
+        self,
+        run_id: str,
+        *,
+        session_id: str,
+        actor_id: str,
+        tenant_id: str,
+    ) -> bool:
+        """Verify a provider-overflow Artifact replacement from this run."""
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT a.id AS artifact_id, a.metadata_json,
+                       m.sequence, m.content
+                FROM artifacts a
+                JOIN messages m ON m.session_id=a.session_id
+                WHERE a.run_id=? AND a.session_id=?
+                  AND a.actor_id=? AND a.tenant_id=?
+                  AND a.kind='context-tool-result'
+                  AND m.role='tool' AND m.active=1
+                ORDER BY a.created_at, a.id, m.sequence
+                """,
+                (run_id, session_id, actor_id, tenant_id),
+            ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+                payload = json.loads(row["content"] or "{}")
+                reference = payload["data"]["artifact_ref"]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                reference.get("type") == _SCOPED_ARTIFACT_REFERENCE_TYPE
+                and reference.get("artifact_id") == row["artifact_id"]
+                and metadata.get("source_message_sequence") == int(row["sequence"])
+                and metadata.get("context_compaction_reason")
+                == "provider_context_overflow"
+            ):
+                return True
+        return False
 
     def get_selected_provider_usage(
         self,

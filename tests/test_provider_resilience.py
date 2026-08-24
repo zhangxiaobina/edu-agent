@@ -834,6 +834,23 @@ def test_metric_redaction_preserves_numbers_but_rejects_unexpected_text():
     }
     assert redact_sensitive(
         {
+            "estimated_tokens_before": 1_024,
+            "estimated_tokens_after": 640,
+            "min_reclaim_tokens": 256,
+            "reclaimed_tokens": 384,
+            "trigger_threshold": 800,
+            "release_threshold": "canary_secret_metric",
+        }
+    ) == {
+        "estimated_tokens_before": 1_024,
+        "estimated_tokens_after": 640,
+        "min_reclaim_tokens": 256,
+        "reclaimed_tokens": 384,
+        "trigger_threshold": 800,
+        "release_threshold": "[REDACTED]",
+    }
+    assert redact_sensitive(
+        {
             "tool_calls": [
                 {
                     "id": "call-1",

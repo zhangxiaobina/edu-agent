@@ -680,6 +680,7 @@ def run_agent(
     state_store=None,
     force_plan: bool | None = None,
     context_checkpoint_id: str | None = None,
+    force_new_model_attempt: bool = False,
     loop_fault_injector=None,
     tool_manifest: ToolManifest | None = None,
     tool_batch_max_workers: int = 4,
@@ -734,6 +735,7 @@ def run_agent(
         manifest_hash_override=getattr(context, "_tool_manifest_hash_override", None),
         engine=engine,
         context_checkpoint_id=context_checkpoint_id,
+        force_new_model_attempt=force_new_model_attempt,
         fault_injector=loop_fault_injector,
     )
     coordinator = None

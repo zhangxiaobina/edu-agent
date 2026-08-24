@@ -166,6 +166,50 @@ def test_artifact_first_compaction_uses_typed_ref_and_sensitive_safe_preview(tmp
     assert checkpoint["estimated_tokens_after"] > 0
 
 
+def test_artifact_only_compaction_is_reported_without_fake_checkpoint(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    context = _active_context(store, session_id="artifact-only", run_id="artifact-only-run")
+    store.append_messages(
+        context.session_id,
+        [
+            _tool_call("artifact-only-call"),
+            {
+                "role": "tool",
+                "tool_call_id": "artifact-only-call",
+                "name": "large_query",
+                "content": json.dumps(
+                    {"ok": True, "data": {"rows": ["x" * 2_000]}, "meta": {}},
+                ),
+            },
+        ],
+    )
+    artifacts = ArtifactStore(tmp_path / "artifacts", store)
+
+    result = _engine(store, artifacts).compact_if_needed(
+        context.session_id,
+        store.get_messages(context.session_id),
+        context=context,
+        force=True,
+        reason="provider_context_overflow",
+    )
+
+    assert result.decision == "artifact_only"
+    assert result.compacted_messages == 0
+    assert result.externalized_messages == 1
+    assert result.checkpoint_id is None
+    assert store.count("context_checkpoints") == 0
+    assert store.has_context_overflow_artifact_externalization(
+        context.run_id,
+        session_id=context.session_id,
+        actor_id=context.actor_id,
+        tenant_id=context.tenant_id,
+    )
+    tool = next(message for message in store.get_messages(context.session_id) if message["role"] == "tool")
+    assert json.loads(tool["content"])["data"]["artifact_ref"]["type"] == (
+        ARTIFACT_REFERENCE_TYPE
+    )
+
+
 def test_checkpoint_preserves_constraints_plan_receipts_citations_and_unpaired_group(tmp_path):
     store = StateStore(tmp_path / "state.db")
     context = _active_context(store)
@@ -226,6 +270,8 @@ def test_checkpoint_preserves_constraints_plan_receipts_citations_and_unpaired_g
                         "meta": {
                             "operation_id": operation["id"],
                             "operation_status": "committed",
+                            "approval_id": "approval-1",
+                            "approval_status": "approved",
                         },
                     }
                 ),
@@ -257,6 +303,8 @@ def test_checkpoint_preserves_constraints_plan_receipts_citations_and_unpaired_g
     assert any(item.get("plan_id") == plan["id"] for item in checkpoint["preserved_items"])
     assert "必须始终使用课程 1" in checkpoint["summary"]
     assert "citation:course-1:section-2" in checkpoint["summary"]
+    assert "approval-1" in checkpoint["summary"]
+    assert "approved" in checkpoint["summary"]
 
 
 def test_checkpoint_hash_tampering_fails_closed_and_is_audited(tmp_path):

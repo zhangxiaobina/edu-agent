@@ -51,6 +51,7 @@ class AgentLoopJournal:
         manifest_hash_override: str | None = None,
         engine,
         context_checkpoint_id: str | None = None,
+        force_new_model_attempt: bool = False,
         fault_injector: FaultInjector | None = None,
     ):
         self.state_store = state_store
@@ -71,6 +72,7 @@ class AgentLoopJournal:
             }
         )
         self.context_checkpoint_id = context_checkpoint_id
+        self._force_new_model_attempt = bool(force_new_model_attempt)
         self.faults = fault_injector or FaultInjector()
         self._model_calls_in_invocation = 0
         self.active = bool(
@@ -109,6 +111,11 @@ class AgentLoopJournal:
                 "run provider route changed after journal initialization",
                 run_id=self.context.run_id,
             )
+        if (
+            self.context_checkpoint_id is not None
+            and snapshot.context_checkpoint_id != self.context_checkpoint_id
+        ):
+            snapshot = self._bind_context_checkpoint(snapshot, self.context_checkpoint_id)
         budget = snapshot.budget_snapshot
         for field in (
             "model_calls",
@@ -197,6 +204,35 @@ class AgentLoopJournal:
             )
         return snapshot
 
+    def _bind_context_checkpoint(self, snapshot, checkpoint_id: str):
+        """Advance the durable journal reference after overflow compaction."""
+
+        try:
+            return self.state_store.compare_and_set_run_journal(
+                self.context,
+                expected_revision=snapshot.revision,
+                expected_phase=snapshot.phase,
+                phase=snapshot.phase,
+                expected_loop_cursor=snapshot.loop_cursor,
+                loop_cursor=snapshot.loop_cursor,
+                expected_model_attempt=snapshot.model_attempt,
+                model_attempt=snapshot.model_attempt,
+                expected_event_sequence=snapshot.event_sequence,
+                event_sequence=snapshot.event_sequence + 1,
+                expected_fencing_token=snapshot.fencing_token,
+                stable_boundary=snapshot.stable_boundary,
+                budget_snapshot=self.context.budget.usage(),
+                context_checkpoint_id=checkpoint_id,
+            )
+        except Exception as error:
+            # A concurrent recovery owner may have committed the same
+            # checkpoint.  Re-read and accept only that exact reference;
+            # unrelated races remain hard failures.
+            current = self.read()
+            if current.context_checkpoint_id == checkpoint_id:
+                return current
+            raise error
+
     def _cas(
         self,
         *,
@@ -254,12 +290,22 @@ class AgentLoopJournal:
             self._model_calls_in_invocation += 1
             return self._model_calls_in_invocation
         current = self.read()
-        if self._model_calls_in_invocation == 0 and current.phase in {
+        forced_recovery_attempt = self._force_new_model_attempt
+        if (
+            self._model_calls_in_invocation == 0
+            and not self._force_new_model_attempt
+            and current.phase in {
+                RunPhase.MODEL,
+                RunPhase.TOOLS,
+            }
+        ):
+            attempt = current.model_attempt
+        elif current.phase in {
+            RunPhase.PLANNING,
+            RunPhase.VERIFYING,
             RunPhase.MODEL,
             RunPhase.TOOLS,
         }:
-            attempt = current.model_attempt
-        elif current.phase in {RunPhase.PLANNING, RunPhase.VERIFYING, RunPhase.MODEL}:
             attempt = current.model_attempt + 1
             self._cas(
                 phase=RunPhase.MODEL,
@@ -267,6 +313,19 @@ class AgentLoopJournal:
                 loop_cursor=current.loop_cursor + 1,
                 model_attempt=attempt,
             )
+            if forced_recovery_attempt:
+                recorder = getattr(self.state_store, "record_provider_event", None)
+                if callable(recorder):
+                    recorder(
+                        run_id=self.context.run_id,
+                        provider="runtime",
+                        event="context_overflow_recovery_retry_started",
+                        attempt=attempt,
+                        details={
+                            "checkpoint_id": self.context_checkpoint_id,
+                            "same_route": True,
+                        },
+                    )
         else:
             raise RunJournalTransitionError(
                 "journal is not at a model-call boundary",
@@ -274,6 +333,7 @@ class AgentLoopJournal:
                 model_attempt=current.model_attempt,
             )
         self._model_calls_in_invocation += 1
+        self._force_new_model_attempt = False
         return attempt
 
     def append_envelope(self, message: dict, *, model_attempt: int) -> dict:

@@ -48,6 +48,7 @@ from .resilient import (
     RouteStateCapacityError,
     RouteStateRegistry,
     classify_failure,
+    is_provider_context_overflow,
     parse_retry_after,
     retry_after_from_error,
 )
@@ -92,6 +93,7 @@ __all__ = [
     "RouteStateCapacityError",
     "RouteStateRegistry",
     "classify_failure",
+    "is_provider_context_overflow",
     "parse_retry_after",
     "retry_after_from_error",
     "get_engine",

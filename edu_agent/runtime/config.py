@@ -237,6 +237,14 @@ class RuntimeConfig:
     recent_message_limit: int = 80
     compression_enabled: bool = True
     compression_trigger_ratio: float = 0.7
+    compression_release_ratio: float | None = None
+    # A positive default prevents a checkpoint from being created when it does
+    # not materially reduce the request.  Direct ContextEngine users retain
+    # the legacy zero default for compatibility; service-created engines use
+    # this runtime policy.
+    compression_min_reclaim_tokens: int = 256
+    compression_cooldown_turns: int = 1
+    compression_cooldown_seconds: float = 0.0
     compression_keep_recent: int = 12
     compression_summary_max_chars: int = 4_000
     tool_result_inline_chars: int = 12_000
@@ -263,6 +271,47 @@ class RuntimeConfig:
             raise ValueError(
                 "runtime output_token_reserve 必须小于 context_token_budget"
             )
+        if (
+            isinstance(self.compression_trigger_ratio, bool)
+            or not isinstance(self.compression_trigger_ratio, (int, float))
+            or not math.isfinite(float(self.compression_trigger_ratio))
+            or not 0 < self.compression_trigger_ratio <= 1
+        ):
+            raise ValueError("runtime compression_trigger_ratio 必须在 (0, 1] 内")
+        if self.compression_release_ratio is None:
+            object.__setattr__(
+                self,
+                "compression_release_ratio",
+                max(0.05, float(self.compression_trigger_ratio) - 0.15),
+            )
+        if (
+            isinstance(self.compression_release_ratio, bool)
+            or not isinstance(self.compression_release_ratio, (int, float))
+            or not math.isfinite(float(self.compression_release_ratio))
+            or not 0 < self.compression_release_ratio <= self.compression_trigger_ratio
+        ):
+            raise ValueError(
+                "runtime compression_release_ratio 必须在 (0, compression_trigger_ratio] 内"
+            )
+        if (
+            isinstance(self.compression_min_reclaim_tokens, bool)
+            or not isinstance(self.compression_min_reclaim_tokens, int)
+            or self.compression_min_reclaim_tokens < 0
+        ):
+            raise ValueError("runtime compression_min_reclaim_tokens 必须是非负整数")
+        if (
+            isinstance(self.compression_cooldown_turns, bool)
+            or not isinstance(self.compression_cooldown_turns, int)
+            or self.compression_cooldown_turns < 0
+        ):
+            raise ValueError("runtime compression_cooldown_turns 必须是非负整数")
+        if (
+            isinstance(self.compression_cooldown_seconds, bool)
+            or not isinstance(self.compression_cooldown_seconds, (int, float))
+            or not math.isfinite(float(self.compression_cooldown_seconds))
+            or self.compression_cooldown_seconds < 0
+        ):
+            raise ValueError("runtime compression_cooldown_seconds 必须是有限非负数")
         if (
             isinstance(self.tool_batch_max_workers, bool)
             or not isinstance(self.tool_batch_max_workers, int)

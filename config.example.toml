@@ -47,6 +47,13 @@ output_token_reserve = 2048
 recent_message_limit = 80
 compression_enabled = true
 compression_trigger_ratio = 0.7
+# hysteresis release threshold; compaction must cross trigger again after
+# dropping below this level.  A force recovery may compact once on provider
+# input overflow, subject to the minimum reclaim policy.
+compression_release_ratio = 0.55
+compression_min_reclaim_tokens = 256
+compression_cooldown_turns = 1
+compression_cooldown_seconds = 0
 compression_keep_recent = 12
 compression_summary_max_chars = 4000
 tool_result_inline_chars = 12000

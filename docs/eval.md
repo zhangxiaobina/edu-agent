@@ -36,8 +36,10 @@ uv run --frozen --offline python scripts/audit_eval_lineage.py \
 
 审计会从两组全新临时数据库各生成一次完整 corpus。以下任一情况都会退出非零：缺 provenance、稳定
 id/hash 不一致、跨 split sample/query 重复、模板族重叠、等价语义组重叠、敏感字段、split 缺失或两次
-生成 hash 不同。输出 manifest 不保存 query 文本，只保存身份、来源、族、split 和 hash。对应反例测试在
-`tests/test_eval_lineage.py`。
+生成 hash 不同。同一入口还会生成两次 R4.3 context fidelity corpus，并对它执行相同的 provenance、族/
+等价语义组、scope、敏感字段和确定性门禁；任一子报告失败都会使顶层 gate 失败。输出 manifest 不保存 query
+或 case 自由文本，只保存身份、来源、族、split 和 hash。对应反例测试在 `tests/test_eval_lineage.py` 和
+`tests/test_context_fidelity.py`。
 
 ## 2. Harness 与指标
 
@@ -51,6 +53,29 @@ id/hash 不一致、跨 split sample/query 重复、模板族重叠、等价语�
 
 `run_eval()` 在执行模型前验证所给任务的 lineage；缺失或不合法的 lineage 会抛出
 `LineageValidationError`，不会生成看似有效的指标。
+
+## 2.1 Context fidelity（R4.3）
+
+上下文压缩使用独立的确定性 `edu-agent.context-fidelity.v1` corpus，不把几条手写样例当作门禁。
+`build_context_fidelity_corpus()` 生成 scope 隔离的 Train/Dev/Test 样本，并为每条样本绑定稳定
+`sample_id`、意图族和合成 provenance；`validate_context_fidelity_corpus()` 会拒绝稳定 ID/hash 不一致、
+跨 split 内容/族/等价语义组/scope 重叠、缺 provenance、敏感字段、split 缺失或两次生成不一致。默认离线
+评测不调用模型：
+
+```bash
+uv run --frozen --offline python scripts/eval_context_fidelity.py \
+  --output artifacts/context-fidelity.json \
+  --thresholds tests/fixtures/context_fidelity_thresholds.json
+```
+
+报告分别统计用户关键约束、实体/课程 scope、operation/approval、citation 与 Artifact ref 保真，
+以及 scope leak rate、摘要压缩比（`after/before`）、重复触发率和请求 token 估算绝对相对误差。阈值由
+测试或评测命令传入 `assert_context_fidelity_thresholds(metrics, thresholds)`，实现不内置“几条例子
+通过即合格”的门槛。观测值不是 corpus 预填答案：每条样本实际执行生产确定性摘要器、重启后的
+`CheckpointContextEngine` 反抖动策略和 `ContextAccountant` fallback estimator。估算误差的对照值来自仅在
+runner 内注册的固定 `utf8-bytes-div3@r4.3.v1` reference counter，安全因子均为 1；它是跨离线环境可复现的
+代理口径，不冒充真实 Provider tokenizer 或账单 usage，也不触发 tokenizer/模型下载。CLI 可用
+`--thresholds <json>` 对报告执行同一门禁；真实模型结果与该离线协议指标仍分栏保存。
 
 ## 3. Oracle/mock 边界
 

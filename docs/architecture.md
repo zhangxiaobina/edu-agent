@@ -64,7 +64,8 @@ model-specific context/output 上限为 `None` 时表示未知，不能解释为
 
 `ResilientEngine` 在冻结的 `ResolvedRoute.identity` 粒度共享并发 semaphore 与 circuit breaker。连接、超时、
 429 和 5xx 使用 full-jitter 有界退避；合法 `Retry-After` 秒数或 HTTP-date 覆盖本地退避并受独立上限约束。
-认证、权限、普通 400、context overflow、output cap 和未知错误不重试。half-open 每个 route 只允许一个探测，
+认证、权限、普通 400、context overflow、output cap 和未知错误不在该韧性层重试或 fallback。Provider 明确报告的
+input context overflow 只有在 Service 的 checkpoint recovery 边界才可能恢复一次；half-open 每个 route 只允许一个探测，
 route 状态注册表按容量和空闲 TTL 回收；每个实际 Provider attempt 单独写入脱敏审计事件。
 默认 SDK client 关闭自身重试，由这一层统一拥有尝试次数、等待和审计；显式注入的 client/factory 由调用方控制。
 primary/fallback route plan 在 turn 起点冻结；fallback 只允许连接、超时、可恢复 429、5xx 或已打开 circuit，且
@@ -77,6 +78,19 @@ primary/fallback route plan 在 turn 起点冻结；fallback 只允许连接、�
 前的瞬态失败能继续 retry/fallback；一旦已有可见 delta，error 即为该流终态，不会无提示拼接另一 attempt。
 旧 attempt 或旧 route 迟到的事件转成可审计 ignored，不进入聚合结果。R2.6 将胜出流映射为 HTTP SSE，
 Provider/Agent 失败统一结束为 typed error，terminal 后 writer 拒绝所有 delta。
+
+R4.3 的 `CheckpointContextEngine` 使用 trigger/release 双阈值、最小回收量和按新 user turn 计数的冷却窗口。
+压缩先外置大结果，再只归档已完成的旧 exchange；策略 marker 保存本次观察到的最大消息 sequence，进程重开
+不会把仍活跃的 recent 消息当作新 turn。摘要将 scope、用户约束、实体、approval、未完成 Plan 和所有引用作为
+结构化必保字段，多代 checkpoint 解析并合并这些字段，只截断可选自由文本；字段本身放不下时拒绝压缩。没有可归档
+exchange 但 Artifact 替换已回收空间时返回 `artifact_only`；其 Artifact metadata/source sequence 与 owner/run scope
+共同形成可复验的崩溃恢复边界，不创建空 checkpoint。
+
+Provider 明确返回 input context overflow 且尚无可见 stream delta 时，`EduAgentService` 最多执行一次重新计数、
+强制 checkpoint/Artifact-only 压缩、重建快照并在同一冻结 route 上重试。checkpoint 或 Artifact replacement commit
+和 journal reference 是持久恢复边界，started-only 崩溃窗仍可继续，committed 后重启不得重复压缩。第二次
+overflow、output cap、普通 invalid request、本地 `CurrentUserInputTooLarge` 和可见流错误均直接分类失败，不进入循环，
+也不伪装为 fallback。
 
 ## 教学 Provider 防腐层
 
@@ -394,3 +408,9 @@ Docker/Jobe 报告时 sandbox 项为 `not_verified`。完整一键门禁见
 凭据，把合成库及中间状态限制在有界清理的私有临时目录，并在 artifact 生成后再次执行敏感数据审计；
 内部 `scripts/accept_r2.sh` 由该入口调用，集中验证两种 wire mode、五窗、SSE/socket、API replay、journal/
 finalizer/operation 和脱敏恢复演示；`--dry-run` 只验证调用图，不构成后端通过证据。
+
+R4.3 另有 12 条稳定 lineage 的 scope-isolated context fidelity corpus。离线 runner 使用生产确定性摘要器，分别
+报告约束、实体、operation、approval、citation、Artifact 保真、scope leak、压缩比、重复触发率和估算误差；
+门槛由测试或评测命令配置，离线默认不调用外部模型。通用 lineage 审计也会双生成该 corpus 并阻断 provenance
+缺失、跨 split 族/语义/scope 重叠、敏感字段或非确定生成；估算误差使用固定离线 reference counter，不声称是真实
+Provider tokenizer usage。

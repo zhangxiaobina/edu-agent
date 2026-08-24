@@ -10,6 +10,10 @@ from pathlib import Path
 
 from edu_agent.data import db, generate
 from edu_agent.eval.corpus import build_lineage_corpus
+from edu_agent.eval.context_fidelity import (
+    build_context_fidelity_corpus,
+    validate_context_fidelity_corpus,
+)
 from edu_agent.eval.lineage import audit_lineage, build_lineage_manifest, lineage_gate_passed
 from edu_agent.eval.provenance import credential_literals, sanitize_artifact
 from edu_agent.eval.tasks_test import (
@@ -54,6 +58,20 @@ def main() -> int:
         first = _build_corpus(root, "first")
         second = _build_corpus(root, "second")
         report = audit_lineage(first, repeated_tasks=second)
+        fidelity_report = validate_context_fidelity_corpus(
+            build_context_fidelity_corpus(),
+            repeated_cases=build_context_fidelity_corpus(),
+        )
+        report["context_fidelity"] = fidelity_report
+        report["checks"]["context_fidelity_lineage"] = fidelity_report["passed"]
+        if not fidelity_report["passed"]:
+            report["errors"] = sorted(
+                set(
+                    report["errors"]
+                    + [f"context_fidelity:{error}" for error in fidelity_report["errors"]]
+                )
+            )
+            report["passed"] = False
         report["dataset_generation"] = {
             "train_dev": {"seed": BASE_SEED, "source": "existing_synthetic_generator"},
             "test": {
@@ -61,6 +79,11 @@ def main() -> int:
                 "n_classes": TEST_N_CLASSES,
                 "courses_per_class": TEST_COURSES_PER_CLASS,
                 "source": "existing_synthetic_generator",
+            },
+            "context_fidelity": {
+                "generator": "build_context_fidelity_corpus",
+                "source": "synthetic-context-fidelity",
+                "version": "r4.3.v1",
             },
         }
         report["manifest"] = build_lineage_manifest(first)

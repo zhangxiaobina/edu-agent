@@ -1,0 +1,12 @@
+{
+  "constraint_fidelity": 1.0,
+  "entity_fidelity": 1.0,
+  "operation_fidelity": 1.0,
+  "approval_fidelity": 1.0,
+  "citation_fidelity": 1.0,
+  "artifact_fidelity": 1.0,
+  "scope_leak_rate": 0.0,
+  "compression_ratio": 0.55,
+  "duplicate_trigger_rate": 0.0,
+  "estimate_absolute_error": 0.10
+}
