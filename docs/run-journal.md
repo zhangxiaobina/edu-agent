@@ -154,6 +154,9 @@ R4.6 的 `015_storage_maintenance` 只增加 retention hold 与 Artifact 两阶�
 GC 只有在 journal 已为 `terminal/cancelled/failed`、finalizer cleanup 完成且不存在恢复、operation/outbox 或 hold
 阻塞时才删除整个过期 session cohort；非终态 journal 引用的 checkpoint 始终保留。
 
+R5.4 的 `016_run_replay_scope` 把 SQLite `user_version` 提升到 16，并持久化 `runs.replay_scope`。恢复构造
+`RunContext` 时必须重用该值；否则同一已提交写会落入不同幂等域，不能仅靠 operation 查询防止双写。
+
 ## R2.7 sequence 与进程 fence
 
 `012_r2_recovery` 将 SQLite `user_version` 提升到 12，并在 `runs.stream_event_sequence` 保存传输 sequence

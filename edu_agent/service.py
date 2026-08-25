@@ -1838,6 +1838,7 @@ class EduAgentService:
             tenant_id=tenant_id,
             role=record["role"] or session_record["role"] or self.config.security.default_role,
             course_ids=set(json.loads(session_record["course_ids_json"] or "[]")),
+            replay_scope=record["replay_scope"],
             run_id=run_id,
             max_model_calls=self.config.runtime.max_model_calls,
             max_tool_calls=self.config.runtime.max_tool_calls,

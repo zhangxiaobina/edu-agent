@@ -1727,6 +1727,7 @@ class ResilientEngine(Engine):
                     "route": primary_route.audit,
                     "request_requirements": requirements.to_event(),
                     "fallback_configured": route_plan.fallback is not None,
+                    "max_retries": self.max_retries,
                     "provider_stream": True,
                 },
             )
@@ -2043,6 +2044,7 @@ class ResilientEngine(Engine):
                     "route": primary_route.audit,
                     "request_requirements": requirements.to_event(),
                     "fallback_configured": route_plan.fallback is not None,
+                    "max_retries": self.max_retries,
                 },
             )
             primary = self._execute_route(

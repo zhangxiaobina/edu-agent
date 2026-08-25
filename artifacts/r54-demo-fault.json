@@ -1,0 +1,735 @@
+{
+  "approval": {
+    "handler_call_count": 1,
+    "payload_hashes": [
+      "e4721446a6167283edb7fa406a2d55596036478c4645c9d673041b52cf743a04"
+    ],
+    "tools": [
+      "create_exam"
+    ]
+  },
+  "assertions": {
+    "approved_idempotent_write": true,
+    "arguments_normalized_without_values": true,
+    "budget_root_settled": true,
+    "context_compaction_recorded": true,
+    "explicit_crash_observed": true,
+    "model_fixture_rebuilt_from_durable_messages": true,
+    "old_stream_writer_fenced": true,
+    "operation_reused_without_duplicate_write": true,
+    "plan_and_evidence_completed": true,
+    "provider_barrier_proved_overlap": true,
+    "real_text_delta_observed": true,
+    "retry_skipped_then_fallback": true,
+    "route_and_api_modes_recorded": true,
+    "run_completed": true,
+    "run_event_sequence_monotonic": true,
+    "single_stream_terminal": true,
+    "single_synthetic_side_effect": true,
+    "two_reads_in_one_concurrent_segment": true
+  },
+  "concurrency_proof": {
+    "arrived_queries": [
+      "class_roster",
+      "exams"
+    ],
+    "barrier_releases": 2,
+    "distinct_worker_count": 2,
+    "max_simultaneous_calls": 2,
+    "proved": true
+  },
+  "event_snapshot": {
+    "approvals": [
+      "create_exam:approved"
+    ],
+    "budget": {
+      "child_settlement": "not_exercised",
+      "finalized": true,
+      "root_outstanding": 0,
+      "status": "recorded"
+    },
+    "concurrent_tools": [
+      [
+        "get_class_roster",
+        "list_exams"
+      ]
+    ],
+    "context": {
+      "checkpoint_count": 1,
+      "reclaimed": true
+    },
+    "fallback_decisions": [
+      "activated"
+    ],
+    "normalization": [
+      "get_class_roster:/page:string_to_integer_v1",
+      "get_class_roster:/page_size:string_to_integer_v1",
+      "list_exams:/page:string_to_integer_v1",
+      "list_exams:/page_size:string_to_integer_v1"
+    ],
+    "plan_steps": [
+      {
+        "accepted_tools": [
+          "get_class_roster",
+          "list_exams"
+        ],
+        "status": "completed",
+        "step": "inspect"
+      },
+      {
+        "accepted_tools": [
+          "create_exam"
+        ],
+        "status": "completed",
+        "step": "publish"
+      }
+    ],
+    "recovery_actions": [
+      "reuse-operation",
+      "terminal-replay"
+    ],
+    "retry_reasons": [
+      "retry_limit_exhausted"
+    ],
+    "route_winners": [
+      "fallback:responses",
+      "primary:chat_completions"
+    ],
+    "stream": {
+      "has_text_delta": true,
+      "sequence_monotonic": true,
+      "terminal_count": 1
+    },
+    "writes": [
+      "create_exam:committed"
+    ]
+  },
+  "evidence_classes": {
+    "fixture_offline_verified": [
+      "seed-314 SyntheticProvider teaching data",
+      "deterministic local model stream and explicit failure switch"
+    ],
+    "implemented": [
+      "Provider route and API-mode selection",
+      "RunEvent v2 text delta transport",
+      "parallel read execution with a provider capability gate",
+      "Plan/Evidence completion gate",
+      "approval-bound idempotent transactional write",
+      "process-reopen recovery and stream-writer fencing",
+      "owner-scoped and redacted Trace review"
+    ],
+    "not_verified": [
+      "private teaching platform",
+      "live model endpoint in this demo",
+      "Docker/Jobe runtime on this machine",
+      "cross-host SQLite consensus"
+    ],
+    "real_model_verified": [
+      "separate fixed R5.2 DashScope evidence; not rerun by this demo"
+    ]
+  },
+  "fault_injection": {
+    "crash_observed": true,
+    "default_off": true,
+    "enabled": true,
+    "old_writer_rejected": true,
+    "point": "after_write_operation_commit_before_result",
+    "recovery_decision": {
+      "action": "reuse-operation",
+      "next_step": "pair-committed-operation-result",
+      "operation_status": "committed",
+      "phase": "tools",
+      "reason": "write operation has a committed idempotent receipt",
+      "stable_boundary": "assistant_envelope_committed",
+      "tool": "create_exam",
+      "tool_call_id": "r54-write"
+    },
+    "terminal_decision": {
+      "action": "terminal-replay",
+      "next_step": "rebuild-chat-result",
+      "operation_status": null,
+      "phase": "terminal",
+      "reason": "durable turn finalizer is terminal",
+      "stable_boundary": "terminal",
+      "tool": null,
+      "tool_call_id": null
+    }
+  },
+  "fixture": {
+    "instance_count": 2,
+    "model_call_sequence": [
+      {
+        "adapter": "fallback",
+        "api_mode": "responses",
+        "kind": "read",
+        "stage": 0
+      },
+      {
+        "adapter": "primary",
+        "api_mode": "chat_completions",
+        "kind": "write",
+        "stage": 1
+      },
+      {
+        "adapter": "primary",
+        "api_mode": "chat_completions",
+        "kind": "final",
+        "stage": 2
+      }
+    ],
+    "model_provider": "deterministic local ProviderAdapter",
+    "network_access": false,
+    "private_platform_access": false,
+    "stage_source": "durable_tool_messages",
+    "teaching_provider": "SyntheticProvider"
+  },
+  "run": {
+    "final_answer_characters": 9,
+    "run_id": "run-r54",
+    "session_id": "session-r54",
+    "status": "completed"
+  },
+  "scenario": "fault",
+  "schema_version": "edu-agent.r54-candidate-demo.v1",
+  "seed": 314,
+  "stream": {
+    "attempts": [
+      0,
+      1
+    ],
+    "event_types": [
+      "completed",
+      "context.compacted",
+      "fallback.activated",
+      "plan.updated",
+      "run.phase",
+      "text.delta",
+      "tool.completed",
+      "tool.started",
+      "tool_call.delta",
+      "usage"
+    ],
+    "sequence_monotonic": true,
+    "terminal_count": 1,
+    "text_delta_count": 2,
+    "tool_call_delta_count": 6
+  },
+  "teaching_state": {
+    "approval_count": 1,
+    "exam_count": 1,
+    "idempotency_keys": [
+      "791383ae8e938abc22d0df4a4c869b8621c9b7395a8d15ea6f83d62ea73d42af"
+    ],
+    "operation_count": 1,
+    "operations": [
+      {
+        "status": "committed",
+        "tool": "create_exam",
+        "tool_call_id": "r54-write"
+      }
+    ]
+  },
+  "timing": {
+    "elapsed_ms": 461.586,
+    "note": "single observation on this machine; not an SLA"
+  },
+  "trace_review": {
+    "approval": [
+      {
+        "decision": "approved",
+        "payload_hash": "e4721446a6167283edb7fa406a2d55596036478c4645c9d673041b52cf743a04",
+        "scope": "tenant:school-r54:actor:teacher-r54:tool:create_exam:course:1",
+        "tool": "create_exam",
+        "tool_call_id": "r54-write"
+      }
+    ],
+    "argument_normalization": [
+      {
+        "original_type": "string",
+        "original_value_exported": false,
+        "pointer": "/page",
+        "result": "applied",
+        "rule": "string_to_integer_v1",
+        "sensitive": false,
+        "target_type": "integer",
+        "tool": "get_class_roster",
+        "tool_call_id": "r54-roster"
+      },
+      {
+        "original_type": "string",
+        "original_value_exported": false,
+        "pointer": "/page_size",
+        "result": "applied",
+        "rule": "string_to_integer_v1",
+        "sensitive": false,
+        "target_type": "integer",
+        "tool": "get_class_roster",
+        "tool_call_id": "r54-roster"
+      },
+      {
+        "original_type": "string",
+        "original_value_exported": false,
+        "pointer": "/page",
+        "result": "applied",
+        "rule": "string_to_integer_v1",
+        "sensitive": false,
+        "target_type": "integer",
+        "tool": "list_exams",
+        "tool_call_id": "r54-exams"
+      },
+      {
+        "original_type": "string",
+        "original_value_exported": false,
+        "pointer": "/page_size",
+        "result": "applied",
+        "rule": "string_to_integer_v1",
+        "sensitive": false,
+        "target_type": "integer",
+        "tool": "list_exams",
+        "tool_call_id": "r54-exams"
+      }
+    ],
+    "budget": {
+      "child_settlement": "not_exercised",
+      "children": [],
+      "estimated_operations": 1,
+      "finalized": true,
+      "limits": {
+        "max_cost_microusd": null,
+        "max_input_tokens": 8192,
+        "max_model_calls": 8,
+        "max_output_tokens": 4096,
+        "max_tool_calls": 12,
+        "max_total_tokens": 12288,
+        "max_wall_time_ms": 120000
+      },
+      "reserved": {
+        "cost_microusd": 0,
+        "input_tokens": 0,
+        "model_calls": 0,
+        "output_tokens": 0,
+        "tool_calls": 0,
+        "total_tokens": 0,
+        "wall_time_ms": 0
+      },
+      "root": {
+        "operations": [
+          {
+            "count": 1,
+            "kind": "deterministic_compression",
+            "status": "committed"
+          },
+          {
+            "count": 1,
+            "kind": "finalizer",
+            "status": "committed"
+          },
+          {
+            "count": 4,
+            "kind": "model_attempt",
+            "status": "committed"
+          },
+          {
+            "count": 3,
+            "kind": "tool_call",
+            "status": "committed"
+          }
+        ],
+        "outstanding_operations": 0,
+        "owner_run_id": "run-r54",
+        "relation": "root",
+        "reserved": {
+          "cost_microusd": 0,
+          "input_tokens": 0,
+          "model_calls": 0,
+          "output_tokens": 0,
+          "tool_calls": 0,
+          "total_tokens": 0,
+          "wall_time_ms": 0
+        },
+        "unknown_cost_operations": 4,
+        "used": {
+          "cost_microusd": 0,
+          "input_tokens": 2286,
+          "model_calls": 4,
+          "output_tokens": 521,
+          "tool_calls": 3,
+          "total_tokens": 2807,
+          "wall_time_ms": 0
+        }
+      },
+      "root_run_id": "run-r54",
+      "status": "recorded",
+      "stop_reason": null,
+      "unknown_cost_operations": 4,
+      "used": {
+        "cost_microusd": 0,
+        "input_tokens": 2286,
+        "model_calls": 4,
+        "output_tokens": 521,
+        "tool_calls": 3,
+        "total_tokens": 2807,
+        "wall_time_ms": 0
+      }
+    },
+    "context": {
+      "checkpoint_count": 1,
+      "compactions": [
+        {
+          "estimated_tokens_after": 469,
+          "estimated_tokens_before": 4770,
+          "estimator": "legacy-json-chars-div4@r4.1.v1",
+          "has_parent_checkpoint": false,
+          "reason": "threshold",
+          "reclaimed_tokens": 4301,
+          "release_threshold": 1638,
+          "source_messages": 12,
+          "strategy": "artifact-first-hysteresis@2026-08-24.r4.3.v1",
+          "trigger_threshold": 3276
+        }
+      ]
+    },
+    "plan_evidence": {
+      "status": "completed",
+      "steps": [
+        {
+          "evidence": [
+            {
+              "count": 1,
+              "kind": "tool_event",
+              "status": "accepted",
+              "tool": "get_class_roster"
+            },
+            {
+              "count": 1,
+              "kind": "tool_event",
+              "status": "accepted",
+              "tool": "list_exams"
+            }
+          ],
+          "position": 0,
+          "retry_count": 0,
+          "status": "completed",
+          "step_id": "inspect"
+        },
+        {
+          "evidence": [
+            {
+              "count": 2,
+              "kind": "tool_event",
+              "status": "accepted",
+              "tool": "create_exam"
+            }
+          ],
+          "position": 1,
+          "retry_count": 0,
+          "status": "completed",
+          "step_id": "publish"
+        }
+      ]
+    },
+    "recovery": [
+      {
+        "action": "reuse-operation",
+        "next_step": "pair-committed-operation-result",
+        "operation_status": "committed",
+        "phase": "tools",
+        "reason": "write operation has a committed idempotent receipt",
+        "source": "startup",
+        "stable_boundary": "assistant_envelope_committed",
+        "tool": "create_exam",
+        "tool_call_id": "r54-write"
+      },
+      {
+        "action": "reuse-operation",
+        "next_step": "pair-committed-operation-result",
+        "operation_status": "committed",
+        "phase": "tools",
+        "reason": "write operation has a committed idempotent receipt",
+        "source": "resume",
+        "stable_boundary": "assistant_envelope_committed",
+        "tool": "create_exam",
+        "tool_call_id": "r54-write"
+      },
+      {
+        "action": "terminal-replay",
+        "next_step": "rebuild-chat-result",
+        "operation_status": null,
+        "phase": "terminal",
+        "reason": "durable turn finalizer is terminal",
+        "source": "resume",
+        "stable_boundary": "terminal",
+        "tool": null,
+        "tool_call_id": null
+      }
+    ],
+    "retry_fallback": {
+      "failed_attempts": [
+        {
+          "attempt": 1,
+          "breaker_state": "closed",
+          "error_class": "ReadError",
+          "failure_kind": "connection",
+          "fallback_allowed": true,
+          "max_retries": 0,
+          "model_call": 1,
+          "retry_decision_reason": "retry_limit_exhausted",
+          "retry_scheduled": false,
+          "retryable": true,
+          "route_role": "primary",
+          "status": "failed",
+          "stream_visible": null
+        }
+      ],
+      "fallbacks": [
+        {
+          "attempt": 2,
+          "capability_compatible": true,
+          "decision": "activated",
+          "model_call": 1,
+          "primary_failure": "connection",
+          "reason": "failure_policy_and_capabilities_allowed"
+        }
+      ],
+      "max_retries": 0,
+      "per_model_call": [
+        {
+          "max_retries": 0,
+          "model_call": 1
+        },
+        {
+          "max_retries": 0,
+          "model_call": 2
+        },
+        {
+          "max_retries": 0,
+          "model_call": 3
+        }
+      ],
+      "retries": []
+    },
+    "route": {
+      "provider_attempts": [
+        {
+          "attempt": 1,
+          "breaker_state": "closed",
+          "error_class": "ReadError",
+          "failure_kind": "connection",
+          "fallback_allowed": true,
+          "model_call": 1,
+          "retryable": true,
+          "route_role": "primary",
+          "status": "failed",
+          "stream_visible": null
+        },
+        {
+          "attempt": 2,
+          "breaker_state": "closed",
+          "error_class": null,
+          "failure_kind": null,
+          "fallback_allowed": false,
+          "model_call": 1,
+          "retryable": false,
+          "route_role": "fallback",
+          "status": "ok",
+          "stream_visible": null
+        },
+        {
+          "attempt": 1,
+          "breaker_state": "closed",
+          "error_class": null,
+          "failure_kind": null,
+          "fallback_allowed": false,
+          "model_call": 2,
+          "retryable": false,
+          "route_role": "primary",
+          "status": "ok",
+          "stream_visible": null
+        },
+        {
+          "attempt": 1,
+          "breaker_state": "closed",
+          "error_class": null,
+          "failure_kind": null,
+          "fallback_allowed": false,
+          "model_call": 3,
+          "retryable": false,
+          "route_role": "primary",
+          "status": "ok",
+          "stream_visible": null
+        }
+      ],
+      "resolved": [
+        {
+          "api_mode": "chat_completions",
+          "deployment": "offline-primary",
+          "model": "r54-fixture-primary",
+          "provider": "fixture",
+          "role": "primary",
+          "selection_reason": "configured_primary"
+        },
+        {
+          "api_mode": "responses",
+          "deployment": "offline-fallback",
+          "model": "r54-fixture-fallback",
+          "provider": "fixture",
+          "role": "fallback",
+          "selection_reason": "configured_fallback_candidate"
+        }
+      ],
+      "selected": [
+        {
+          "api_mode": "responses",
+          "deployment": "offline-fallback",
+          "model": "r54-fixture-fallback",
+          "model_call": 1,
+          "provider": "fixture",
+          "role": "fallback",
+          "selection_reason": "fallback_completed"
+        },
+        {
+          "api_mode": "chat_completions",
+          "deployment": "offline-primary",
+          "model": "r54-fixture-primary",
+          "model_call": 2,
+          "provider": "fixture",
+          "role": "primary",
+          "selection_reason": "primary_completed"
+        },
+        {
+          "api_mode": "chat_completions",
+          "deployment": "offline-primary",
+          "model": "r54-fixture-primary",
+          "model_call": 3,
+          "provider": "fixture",
+          "role": "primary",
+          "selection_reason": "primary_completed"
+        }
+      ],
+      "selections": [
+        {
+          "api_mode": "chat_completions",
+          "deployment": "offline-primary",
+          "fallback_configured": true,
+          "max_retries": 0,
+          "model": "r54-fixture-primary",
+          "model_call": 1,
+          "provider": "fixture",
+          "role": "primary",
+          "selection_reason": "configured_primary"
+        },
+        {
+          "api_mode": "chat_completions",
+          "deployment": "offline-primary",
+          "fallback_configured": true,
+          "max_retries": 0,
+          "model": "r54-fixture-primary",
+          "model_call": 2,
+          "provider": "fixture",
+          "role": "primary",
+          "selection_reason": "configured_primary"
+        },
+        {
+          "api_mode": "chat_completions",
+          "deployment": "offline-primary",
+          "fallback_configured": true,
+          "max_retries": 0,
+          "model": "r54-fixture-primary",
+          "model_call": 3,
+          "provider": "fixture",
+          "role": "primary",
+          "selection_reason": "configured_primary"
+        }
+      ],
+      "winners": [
+        {
+          "api_mode": "responses",
+          "deployment": "offline-fallback",
+          "model": "r54-fixture-fallback",
+          "model_calls": 1,
+          "provider": "fixture",
+          "role": "fallback",
+          "selection_reason": "fallback_completed"
+        },
+        {
+          "api_mode": "chat_completions",
+          "deployment": "offline-primary",
+          "model": "r54-fixture-primary",
+          "model_calls": 2,
+          "provider": "fixture",
+          "role": "primary",
+          "selection_reason": "primary_completed"
+        }
+      ]
+    },
+    "run_id": "run-r54",
+    "schema_version": "edu-agent.trace-review.v1",
+    "tools": {
+      "concurrent_segments": [
+        "segment-000"
+      ],
+      "segments": [
+        {
+          "calls": [
+            {
+              "call_index": 0,
+              "idempotent_replay": false,
+              "operation_status": null,
+              "status": "ok",
+              "tool": "get_class_roster",
+              "tool_call_id": "r54-roster"
+            },
+            {
+              "call_index": 1,
+              "idempotent_replay": false,
+              "operation_status": null,
+              "status": "ok",
+              "tool": "list_exams",
+              "tool_call_id": "r54-exams"
+            }
+          ],
+          "concurrent": true,
+          "mode": "parallel",
+          "model_attempt": 1,
+          "parallel": true,
+          "segment": "segment-000"
+        },
+        {
+          "calls": [
+            {
+              "call_index": 0,
+              "idempotent_replay": false,
+              "operation_status": "committed",
+              "status": "ok",
+              "tool": "create_exam",
+              "tool_call_id": "r54-write"
+            },
+            {
+              "call_index": 0,
+              "idempotent_replay": true,
+              "operation_status": "committed",
+              "status": "ok",
+              "tool": "create_exam",
+              "tool_call_id": "r54-write"
+            }
+          ],
+          "concurrent": false,
+          "mode": "barrier",
+          "model_attempt": 2,
+          "parallel": false,
+          "segment": "segment-000"
+        }
+      ]
+    },
+    "writes": [
+      {
+        "idempotency_key": "791383ae8e938abc22d0df4a4c869b8621c9b7395a8d15ea6f83d62ea73d42af",
+        "payload_hash": "e4721446a6167283edb7fa406a2d55596036478c4645c9d673041b52cf743a04",
+        "plan_step_id": "publish",
+        "status": "committed",
+        "tool": "create_exam",
+        "tool_call_id": "r54-write"
+      }
+    ]
+  }
+}

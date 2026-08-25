@@ -1,0 +1,351 @@
+{
+  "commit": "d3d3ea7c2b3da237ee4d510bfea1215483fb12fa",
+  "config": {
+    "input_hashes": {
+      "edu_agent/eval/harness.py": "c82c9d24fe22f20b24a667cd730bd4c807a28043b5250a0ebdbe22e939dacdd4",
+      "edu_agent/eval/lineage.py": "3598740cfbb454cc083b28bc63717a2d3bacd1183923343f7aab726ae99a32b7",
+      "edu_agent/eval/metrics.py": "939cddc18f9dd68142dd852c0c0280c35d3d6b83252176c0ae1c6cd8a43e5a9c",
+      "edu_agent/eval/tasks.py": "af5769543b13e67de45564b19c2cda876f75f770f88156cc231a377203f77cef",
+      "edu_agent/eval/tasks_test.py": "5ad3d5cc31d4f7d7cd5c0650d7947a935d88cd3fd676f872b1b1d8218096ddb0",
+      "pyproject.toml": "c6e1c6fd141deba0b3d83514a6c34355a308b29b175c8945273c76b0ce2d6d09",
+      "scripts/eval_demo.py": "5803e98828b971fde4a9dc4ecb7d528345f174292e48ae249de55853e31a6686",
+      "uv.lock": "48977aafec9e01daa735c7232c326f209555e858dad0c3fa5fb9e443771608aa"
+    },
+    "lineage_manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+    "model": {
+      "mode": "offline_oracle",
+      "name": "oracle"
+    },
+    "repeats": 3,
+    "seed": 314,
+    "split": "test"
+  },
+  "config_hash": "5f5235d1b53d15e9d1086241e456b087406df3da41b92840910ba047dbf69d62",
+  "environment": {
+    "architecture": "arm64",
+    "os": "Darwin",
+    "os_release": "25.5.0",
+    "python": "3.12.13",
+    "python_implementation": "CPython",
+    "sqlite": "3.50.4"
+  },
+  "evidence": {
+    "harness": {
+      "scope": "harness_only",
+      "source": "offline_oracle",
+      "status": "verified"
+    },
+    "real_model": {
+      "metrics": null,
+      "source": null,
+      "status": "not_run"
+    }
+  },
+  "evidence_mode": "development",
+  "failed_trajectories": null,
+  "generated_at": "2026-08-25T03:16:02.495796+00:00",
+  "git": {
+    "available": true,
+    "dirty": false
+  },
+  "lineage": {
+    "checks": {
+      "all_splits_present": true,
+      "complete_provenance": true,
+      "cross_split_duplicates": true,
+      "deterministic_declarations": true,
+      "deterministic_generation": true,
+      "semantic_group_isolation": true,
+      "sensitive_fields": true,
+      "stable_ids": true,
+      "template_family_isolation": true
+    },
+    "deterministic_generation": {
+      "error": null,
+      "first_hash": "40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b",
+      "passed": true,
+      "sample_count": 73,
+      "second_hash": "40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b"
+    },
+    "errors": [],
+    "manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+    "passed": true,
+    "sample_count": 73,
+    "schema_version": "edu-agent.eval-lineage.v1",
+    "split_counts": {
+      "dev": 12,
+      "test": 6,
+      "train": 55
+    },
+    "template_families": {
+      "irrelevance.concept_explanation": [
+        "dev"
+      ],
+      "irrelevance.greeting": [
+        "dev"
+      ],
+      "irrelevance.out_of_scope": [
+        "dev"
+      ],
+      "irrelevance.thanks": [
+        "dev"
+      ],
+      "multi.class_weakness_practice": [
+        "train"
+      ],
+      "multi.failure_count_distribution": [
+        "train"
+      ],
+      "multi.flagship_remediation": [
+        "train"
+      ],
+      "multi.paper_create_exam": [
+        "train"
+      ],
+      "multi.prerequisite_path": [
+        "train"
+      ],
+      "multi.student_diagnosis_path": [
+        "train"
+      ],
+      "parallel.score_distributions": [
+        "dev"
+      ],
+      "relevance.class_weakness": [
+        "train"
+      ],
+      "relevance.exam_overview": [
+        "dev"
+      ],
+      "relevance.practice_search": [
+        "dev"
+      ],
+      "single.class_roster": [
+        "dev"
+      ],
+      "single.code_execution": [
+        "dev"
+      ],
+      "single.exam_list": [
+        "dev"
+      ],
+      "single.practice_search": [
+        "dev"
+      ],
+      "single.score_distribution": [
+        "dev"
+      ],
+      "test.compare_class_sizes": [
+        "test"
+      ],
+      "test.exam_top_performer": [
+        "test"
+      ],
+      "test.knowledge_neighbors": [
+        "test"
+      ],
+      "test.knowledge_skill_catalog": [
+        "test"
+      ],
+      "test.student_course_progress": [
+        "test"
+      ],
+      "test.student_exam_history": [
+        "test"
+      ]
+    }
+  },
+  "model": {
+    "mode": "offline_oracle",
+    "name": "oracle"
+  },
+  "provenance_gate": {
+    "reasons": [],
+    "required": false,
+    "status": "not_enforced"
+  },
+  "provenance_schema_version": "edu-agent.eval-provenance.v1",
+  "repetitions": {
+    "completed": 3,
+    "mean": 1.0,
+    "requested": 3,
+    "run_ids": [
+      "offline_oracle-1",
+      "offline_oracle-2",
+      "offline_oracle-3"
+    ],
+    "trajectory_success_rates": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "variance": 0.0
+  },
+  "runs": [
+    {
+      "metrics": {
+        "avg_model_calls": 2.1666666666666665,
+        "avg_tool_calls": 1.3333333333333333,
+        "by_category": {
+          "multi_step": {
+            "avg_model_calls": 3.0,
+            "avg_tool_calls": 2.0,
+            "early_termination_rate": 0.0,
+            "n": 1,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          },
+          "parallel": {
+            "avg_model_calls": 2.0,
+            "avg_tool_calls": 2.0,
+            "early_termination_rate": 0.0,
+            "n": 1,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          },
+          "single": {
+            "avg_model_calls": 2.0,
+            "avg_tool_calls": 1.0,
+            "early_termination_rate": 0.0,
+            "n": 4,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          }
+        },
+        "early_termination_rate": 0.0,
+        "n_tasks": 6,
+        "param_accuracy": 1.0,
+        "relevance_accuracy": null,
+        "step_completion_rate": 1.0,
+        "tool_precision": 1.0,
+        "tool_recall": 1.0,
+        "tool_selection_f1": 1.0,
+        "trajectory_success_rate": 1.0
+      },
+      "run_id": "offline_oracle-1"
+    },
+    {
+      "metrics": {
+        "avg_model_calls": 2.1666666666666665,
+        "avg_tool_calls": 1.3333333333333333,
+        "by_category": {
+          "multi_step": {
+            "avg_model_calls": 3.0,
+            "avg_tool_calls": 2.0,
+            "early_termination_rate": 0.0,
+            "n": 1,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          },
+          "parallel": {
+            "avg_model_calls": 2.0,
+            "avg_tool_calls": 2.0,
+            "early_termination_rate": 0.0,
+            "n": 1,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          },
+          "single": {
+            "avg_model_calls": 2.0,
+            "avg_tool_calls": 1.0,
+            "early_termination_rate": 0.0,
+            "n": 4,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          }
+        },
+        "early_termination_rate": 0.0,
+        "n_tasks": 6,
+        "param_accuracy": 1.0,
+        "relevance_accuracy": null,
+        "step_completion_rate": 1.0,
+        "tool_precision": 1.0,
+        "tool_recall": 1.0,
+        "tool_selection_f1": 1.0,
+        "trajectory_success_rate": 1.0
+      },
+      "run_id": "offline_oracle-2"
+    },
+    {
+      "metrics": {
+        "avg_model_calls": 2.1666666666666665,
+        "avg_tool_calls": 1.3333333333333333,
+        "by_category": {
+          "multi_step": {
+            "avg_model_calls": 3.0,
+            "avg_tool_calls": 2.0,
+            "early_termination_rate": 0.0,
+            "n": 1,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          },
+          "parallel": {
+            "avg_model_calls": 2.0,
+            "avg_tool_calls": 2.0,
+            "early_termination_rate": 0.0,
+            "n": 1,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          },
+          "single": {
+            "avg_model_calls": 2.0,
+            "avg_tool_calls": 1.0,
+            "early_termination_rate": 0.0,
+            "n": 4,
+            "param_accuracy": 1.0,
+            "step_completion_rate": 1.0,
+            "tool_f1": 1.0,
+            "tool_precision": 1.0,
+            "tool_recall": 1.0,
+            "trajectory_success_rate": 1.0
+          }
+        },
+        "early_termination_rate": 0.0,
+        "n_tasks": 6,
+        "param_accuracy": 1.0,
+        "relevance_accuracy": null,
+        "step_completion_rate": 1.0,
+        "tool_precision": 1.0,
+        "tool_recall": 1.0,
+        "tool_selection_f1": 1.0,
+        "trajectory_success_rate": 1.0
+      },
+      "run_id": "offline_oracle-3"
+    }
+  ],
+  "schema_version": "edu-agent.model-eval.v1",
+  "seed": 314,
+  "split": "test"
+}

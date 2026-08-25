@@ -66,8 +66,9 @@ from .turn_finalizer import (
 
 _UNSET = object()
 _SCOPED_ARTIFACT_REFERENCE_TYPE = "edu-agent.scoped-artifact.v1"
-STATE_SCHEMA_VERSION = 15
+STATE_SCHEMA_VERSION = 16
 STORAGE_MAINTENANCE_MIGRATION = "015_storage_maintenance"
+RUN_REPLAY_SCOPE_MIGRATION = "016_run_replay_scope"
 
 
 class SessionLeaseUnavailable(RuntimeError):
@@ -301,6 +302,7 @@ class StateStore:
                     CHECKPOINT_MIGRATION,
                     "014_run_budget_ledger",
                     STORAGE_MAINTENANCE_MIGRATION,
+                    RUN_REPLAY_SCOPE_MIGRATION,
                 }
                 present = {
                     str(row["version"])
@@ -430,6 +432,7 @@ class StateStore:
                     owner_id TEXT,
                     fencing_token INTEGER,
                     request_text TEXT,
+                    replay_scope TEXT,
                     model TEXT,
                     context_tokens INTEGER NOT NULL DEFAULT 0,
                     omitted_messages INTEGER NOT NULL DEFAULT 0,
@@ -729,6 +732,7 @@ class StateStore:
                 "owner_id": "TEXT",
                 "fencing_token": "INTEGER",
                 "request_text": "TEXT",
+                "replay_scope": "TEXT",
                 "queued_at": "TEXT",
                 "heartbeat_at": "TEXT",
                 "cancel_requested_at": "TEXT",
@@ -959,6 +963,17 @@ class StateStore:
             )
             if self._migration_fault_injector is not None:
                 self._migration_fault_injector("after_015_marker_before_user_version")
+            if self._migration_fault_injector is not None:
+                self._migration_fault_injector("after_016_schema_before_marker")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO state_schema_migrations(version, applied_at)
+                VALUES (?, ?)
+                """,
+                (RUN_REPLAY_SCOPE_MIGRATION, self.now_iso()),
+            )
+            if self._migration_fault_injector is not None:
+                self._migration_fault_injector("after_016_marker_before_user_version")
             connection.execute(f"PRAGMA user_version = {STATE_SCHEMA_VERSION}")
 
     @staticmethod
@@ -1174,8 +1189,8 @@ class StateStore:
                 """
                 INSERT INTO runs(
                     id, session_id, status, actor_id, tenant_id, role,
-                    request_text, queued_at, started_at
-                ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                    request_text, replay_scope, queued_at, started_at
+                ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     context.run_id,
@@ -1184,6 +1199,7 @@ class StateStore:
                     context.tenant_id,
                     context.role,
                     redact_sensitive_text(request_text),
+                    context.replay_scope,
                     now,
                     now,
                 ),

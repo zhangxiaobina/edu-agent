@@ -1,0 +1,18 @@
+{
+  "schema_version": "edu-agent.r52-harness-failure.v1",
+  "stage": "R5.2",
+  "status": "harness_bug",
+  "classification": "harness_bug",
+  "code_version": "d3d3ea7c2b3da237ee4d510bfea1215483fb12fa",
+  "runner": "scripts/eval_real_r52.py",
+  "repeat_index": 1,
+  "requests_started": 6,
+  "requests_evidence_persisted": false,
+  "formal_result_counted": false,
+  "error_type": "KeyError",
+  "error_code": "missing_records_in_aggregated_report",
+  "error_detail": "format_report was called on a metrics aggregate without the records field.",
+  "prompt_repair_or_model_tuning": false,
+  "holdout_status": "not_counted",
+  "action": "fixed runner aggregation before any formal result was claimed"
+}

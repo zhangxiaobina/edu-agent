@@ -1,0 +1,259 @@
+{
+  "budget": {
+    "committed_or_unknown_cost_usd": 0.124011,
+    "cost_status": "estimated_unverified_price",
+    "estimated_cost_usd": 0.124011,
+    "guarded_model_requests": 50,
+    "max_cost_usd": 30.0,
+    "potential_cost_ceiling_usd": 1.922804,
+    "provider_billing_cost_usd": null,
+    "unknown_cost_usd": 0.0
+  },
+  "commit": "d3d3ea7c2b3da237ee4d510bfea1215483fb12fa",
+  "config_hash": "bcad006da31385a2069cb42ccbdab4ffc7592797b2045a77c16c102492350d60",
+  "elapsed_seconds": 157.631889,
+  "environment": {
+    "architecture": "arm64",
+    "os": "Darwin",
+    "os_release": "25.5.0",
+    "python": "3.12.13",
+    "python_implementation": "CPython",
+    "sqlite": "3.50.4"
+  },
+  "evidence_mode": "development",
+  "failed_traces": {
+    "artifact": null,
+    "records": 0,
+    "redacted": true
+  },
+  "frozen_parameters": {
+    "concurrency": 4,
+    "effective_model_concurrency": 1,
+    "max_output_tokens": 8192,
+    "max_retries": 2,
+    "seed": null,
+    "temperature": 0.0,
+    "timeout_seconds": 1800.0
+  },
+  "generated_at": "2026-08-25T04:53:53.417317+00:00",
+  "git": {
+    "available": true,
+    "dirty": true
+  },
+  "lineage": {
+    "checks": {
+      "all_splits_present": true,
+      "complete_provenance": true,
+      "cross_split_duplicates": true,
+      "deterministic_declarations": true,
+      "deterministic_generation": true,
+      "semantic_group_isolation": true,
+      "sensitive_fields": true,
+      "stable_ids": true,
+      "template_family_isolation": true
+    },
+    "deterministic_generation": {
+      "error": null,
+      "first_hash": "40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b",
+      "passed": true,
+      "sample_count": 73,
+      "second_hash": "40a0a59d5d909c425c995bbc5d267934911af7047d768594a34e9a27954a7b0b"
+    },
+    "errors": [],
+    "manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+    "passed": true,
+    "sample_count": 73,
+    "schema_version": "edu-agent.eval-lineage.v1",
+    "split_counts": {
+      "dev": 12,
+      "test": 6,
+      "train": 55
+    },
+    "template_families": {
+      "irrelevance.concept_explanation": [
+        "dev"
+      ],
+      "irrelevance.greeting": [
+        "dev"
+      ],
+      "irrelevance.out_of_scope": [
+        "dev"
+      ],
+      "irrelevance.thanks": [
+        "dev"
+      ],
+      "multi.class_weakness_practice": [
+        "train"
+      ],
+      "multi.failure_count_distribution": [
+        "train"
+      ],
+      "multi.flagship_remediation": [
+        "train"
+      ],
+      "multi.paper_create_exam": [
+        "train"
+      ],
+      "multi.prerequisite_path": [
+        "train"
+      ],
+      "multi.student_diagnosis_path": [
+        "train"
+      ],
+      "parallel.score_distributions": [
+        "dev"
+      ],
+      "relevance.class_weakness": [
+        "train"
+      ],
+      "relevance.exam_overview": [
+        "dev"
+      ],
+      "relevance.practice_search": [
+        "dev"
+      ],
+      "single.class_roster": [
+        "dev"
+      ],
+      "single.code_execution": [
+        "dev"
+      ],
+      "single.exam_list": [
+        "dev"
+      ],
+      "single.practice_search": [
+        "dev"
+      ],
+      "single.score_distribution": [
+        "dev"
+      ],
+      "test.compare_class_sizes": [
+        "test"
+      ],
+      "test.exam_top_performer": [
+        "test"
+      ],
+      "test.knowledge_neighbors": [
+        "test"
+      ],
+      "test.knowledge_skill_catalog": [
+        "test"
+      ],
+      "test.student_course_progress": [
+        "test"
+      ],
+      "test.student_exam_history": [
+        "test"
+      ]
+    }
+  },
+  "model": {
+    "mode": "real_openai_compatible",
+    "name": "qwen-plus"
+  },
+  "network_preflight": {
+    "address_count": 6,
+    "elapsed_ms": 47.872708,
+    "status": "passed"
+  },
+  "offline_oracle_comparison": {
+    "artifact": "artifacts/r52-oracle-test-eval.json",
+    "scope": "harness_only"
+  },
+  "preflight_artifact": "artifacts/r52-real-model-live-preflight.json",
+  "prior_attempts": [
+    {
+      "artifact": "artifacts/r52-real-model-harness-failure-01.json",
+      "classification": "harness_bug",
+      "counted_as_model_evidence": false
+    },
+    {
+      "artifact": "artifacts/r52-real-model-env-failure-01.json",
+      "classification": "environment_not_verified",
+      "counted_as_model_evidence": false,
+      "requests_completed": 0
+    }
+  ],
+  "provenance_gate": {
+    "reasons": [
+      "git_worktree_dirty"
+    ],
+    "required": false,
+    "status": "not_enforced"
+  },
+  "provenance_schema_version": "edu-agent.eval-provenance.v1",
+  "raw_runs": {
+    "artifact": "r52-real-model-eval.raw.jsonl",
+    "records": 50,
+    "redacted": true
+  },
+  "real_model": {
+    "evidence_scope": "independent_test",
+    "recovery_safety": {
+      "reason": "The fixed Test run does not inject crash/replay faults; recovery remains covered only by offline runtime tests.",
+      "status": "not_exercised"
+    },
+    "requests_completed": 50,
+    "status": "verified"
+  },
+  "route": {
+    "api_mode": "chat_completions",
+    "deployment": "dashscope-compatible",
+    "endpoint_identity_sha256": "5891aed827c4e67b2d7c0c73ea819327ce3f2b6ef72213cd79669486a26b1ead",
+    "model": "qwen-plus",
+    "provider": "dashscope"
+  },
+  "schema_version": "edu-agent.r52-real-model-eval.v1",
+  "seed": 314,
+  "split": "test",
+  "summary": {
+    "cost": {
+      "estimated_cost_usd": 0.124011,
+      "provider_billing_cost_usd": null,
+      "status": "estimated_unverified_price"
+    },
+    "failure_classification": {},
+    "latency_ms": {
+      "total_mean": 3121.22826166,
+      "total_p95": 9635.69025
+    },
+    "plan_evidence": {
+      "early_termination_mean": 0.0,
+      "plan_observed": false,
+      "scope": "agent_harness_step_evidence",
+      "step_completion_mean": 1.0
+    },
+    "recovery_safety": {
+      "reason": "The fixed Test run does not inject crash/replay faults; recovery remains covered only by offline runtime tests.",
+      "status": "not_exercised"
+    },
+    "repeats": 3,
+    "tool_f1": {
+      "mean": 0.9121693121693122,
+      "variance": 0.0020833683267545743
+    },
+    "tool_precision": {
+      "mean": 0.8796296296296297,
+      "variance": 0.002743484224965709
+    },
+    "tool_recall": {
+      "mean": 1.0,
+      "variance": 0.0
+    },
+    "trajectory_success_rate": {
+      "mean": 1.0,
+      "values": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variance": 0.0
+    },
+    "usage": {
+      "input_tokens": 294257,
+      "output_tokens": 5238,
+      "provider_attempts": 50,
+      "total_tokens": 299495
+    }
+  }
+}

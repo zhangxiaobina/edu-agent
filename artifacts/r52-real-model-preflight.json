@@ -1,0 +1,155 @@
+{
+  "schema_version": "edu-agent.r52-real-model-preflight.v1",
+  "stage": "R5.2",
+  "status": "blocked",
+  "preflight_config_hash": "176400d6ec6d8503dba4e10130942395a418613bb3ca641ae7b724c1a415c7cb",
+  "generated_at": "2026-08-25T03:16:55Z",
+  "code_version": {
+    "commit": "d3d3ea7c2b3da237ee4d510bfea1215483fb12fa",
+    "git_worktree_dirty_at_preflight": false
+  },
+  "candidate_route": {
+    "source": "config.example.toml",
+    "provider": "dashscope",
+    "api_mode": "chat_completions",
+    "model": "qwen-plus",
+    "deployment": "dashscope-compatible",
+    "endpoint_identity_sha256": "5891aed827c4e67b2d7c0c73ea819327ce3f2b6ef72213cd79669486a26b1ead",
+    "credential_ref": "EDU_AGENT_API_KEY"
+  },
+  "frozen_parameters": {
+    "temperature": 0.0,
+    "seed": null,
+    "seed_status": "provider_adapter_does_not_send_seed",
+    "max_output_tokens": 8192,
+    "route_max_concurrency": 4,
+    "timeout_seconds": 1800.0,
+    "max_retries": 2,
+    "split": "test",
+    "test_seed": 314,
+    "test_task_count": 6,
+    "repeats_required": 3
+  },
+  "budget_and_pricing": {
+    "runtime_limits": {
+      "model_calls": 12,
+      "input": 96000,
+      "output": 24000,
+      "total": 120000,
+      "wall_seconds": 1800.0
+    },
+    "max_cost_usd": null,
+    "pricing_version": "example-prices@2026-08-24.v1",
+    "pricing_status": "unverified_example_only",
+    "price_route": "dashscope:qwen-plus",
+    "price_input_per_million_usd": "0.4",
+    "price_output_per_million_usd": "1.2"
+  },
+  "preflight": {
+    "capability": {
+      "status": "passed",
+      "source": "ProviderGateway static route validation",
+      "tool_calling": true,
+      "structured_output": false,
+      "usage": true,
+      "streaming": true,
+      "context_window": 131072,
+      "max_output_tokens": 8192,
+      "capability_gaps": []
+    },
+    "test_lineage": {
+      "status": "passed",
+      "source": "scripts/audit_eval_lineage.py",
+      "manifest": "artifacts/eval-lineage.json",
+      "manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+      "sample_count": 73,
+      "split_counts": {
+        "train": 55,
+        "dev": 12,
+        "test": 6
+      },
+      "deterministic_generation": true,
+      "template_family_isolation": true,
+      "semantic_group_isolation": true,
+      "cross_split_duplicates": false
+    },
+    "sensitive_data": {
+      "status": "passed",
+      "source": "lineage sensitive-field audit and synthetic Test generator",
+      "dataset": "synthetic_only",
+      "student_data": "not_used"
+    },
+    "credential": {
+      "status": "blocked",
+      "credential_ref": "EDU_AGENT_API_KEY",
+      "present": false,
+      "value_recorded": false,
+      "reason": "No authorized credential is present in the environment."
+    },
+    "spend_consent": {
+      "status": "blocked",
+      "reason": "No explicit authorization for paid external requests was provided."
+    },
+    "budget_cap": {
+      "status": "blocked",
+      "max_cost_usd": null,
+      "pricing_status": "unverified_example_only",
+      "reason": "No executable spend ceiling is configured and the example price is not verified."
+    },
+    "network": {
+      "status": "not_verified",
+      "endpoint_identity_sha256": "5891aed827c4e67b2d7c0c73ea819327ce3f2b6ef72213cd79669486a26b1ead",
+      "outbound_probe": "not_run",
+      "reason": "No outbound probe was authorized before credential and fee preconditions were met."
+    }
+  },
+  "runner_readiness": {
+    "status": "not_ready_for_live_evidence",
+    "runner": "scripts/eval_demo.py",
+    "known_metric_gaps": [
+      "first_token_latency",
+      "total_request_latency",
+      "recovery_safety",
+      "per-run provider usage and cost aggregation",
+      "frozen max_output_tokens is not supplied by the current openai eval path"
+    ],
+    "reason": "No provider request was issued; the existing runner cannot produce the full R5.2 metric contract without additional instrumentation."
+  },
+  "offline_comparison": {
+    "status": "verified_harness_only",
+    "artifact": "artifacts/r52-oracle-test-eval.json",
+    "repeats": 3,
+    "trajectory_success_rate": {
+      "mean": 1.0,
+      "variance": 0.0,
+      "values": [1.0, 1.0, 1.0]
+    },
+    "tool_precision_mean": 1.0,
+    "tool_recall_mean": 1.0,
+    "tool_f1_mean": 1.0,
+    "param_accuracy_mean": 1.0,
+    "step_completion_mean": 1.0,
+    "early_termination_mean": 0.0,
+    "scope": "harness_only"
+  },
+  "data_boundary_artifact": "artifacts/r52-data-boundary-audit.json",
+  "real_model": {
+    "status": "not_run",
+    "requests_completed": 0,
+    "raw_json_artifact": null,
+    "failed_trace_artifact": null,
+    "cost_status": "not_run"
+  },
+  "blockers": [
+    "missing CredentialRef EDU_AGENT_API_KEY value",
+    "missing explicit fee authorization",
+    "missing executable max_cost_usd and verified route pricing",
+    "network transport remains not_verified",
+    "live metric instrumentation gaps in the existing runner"
+  ],
+  "next_session_requirements": [
+    "Provide an authorized EDU_AGENT_API_KEY through the secret manager/environment only, explicit bounded spend authorization, and a verified versioned dashscope:qwen-plus price catalog with max_cost_usd; never write credential material to files, traces, or replies.",
+    "Provide network access to the frozen DashScope endpoint identity and rerun capability, network, fee, sensitive-data, and Test-lineage preflight before any request.",
+    "Complete or validate runner instrumentation for first-token/total latency, recovery safety, usage, cost, and frozen max output, then run Test only with the same route for at least three repeats without prompt repair."
+  ]
+}

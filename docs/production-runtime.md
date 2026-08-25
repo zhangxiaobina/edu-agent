@@ -419,6 +419,9 @@ R4.4 的 `014_run_budget_ledger` 将 schema version 提升到 14；同一迁移�
 R4.6 的 `015_storage_maintenance` 将 schema version 提升到 15，增加精确 retention hold 与 Artifact
 `gc_pending_at` 两阶段续收标记。在线 backup/restore、引用校验、删除资格和运维命令见
 [SQLite 状态备份、恢复与 Retention/GC](storage-operations.md)。
+R5.4 的 `016_run_replay_scope` 将 schema version 提升到 16，把 run 创建时的 replay scope 持久化到
+`runs.replay_scope`；恢复时从该列重建幂等域，避免 operation commit 后重开进程派生新 key。旧库迁移幂等，
+新库和恢复路径使用同一字段，不存在 demo 专用旁路。
 
 `StateStore` 的 WAL、lease、fencing 和 GC 只适用于能共享同一个 SQLite 文件的本机 Worker；它们不提供
 跨主机共识、网络分区一致性或共享文件系统锁语义。多主机部署必须替换状态协调层，不能沿用单机 SQLite 声明。

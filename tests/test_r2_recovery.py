@@ -267,6 +267,7 @@ def test_five_process_reopen_crash_windows(
                 course_ids={1},
                 session_id=SESSION,
                 run_id=RUN,
+                replay_scope="r2:fixed-write-recovery" if kind == "write" else None,
                 db_conn=first_connection,
             )
     finally:
@@ -282,6 +283,12 @@ def test_five_process_reopen_crash_windows(
         tenant_id=TENANT,
     )
     assert crash_snapshot.stable_boundary is expected_boundary
+    if kind == "write":
+        assert crashed.get_run_status(
+            RUN,
+            actor_id=ACTOR,
+            tenant_id=TENANT,
+        )["replay_scope"] == "r2:fixed-write-recovery"
     old_fence = crash_snapshot.fencing_token
     if kind == "write":
         with db.connect(business_path) as connection:

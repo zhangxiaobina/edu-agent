@@ -1,140 +1,151 @@
-# EduAgent 10 分钟现场演示
+# EduAgent 10 分钟候选版演示
 
-演示前执行 `uv sync --frozen --extra dev --extra mcp`，确认只使用合成数据。所有 Python 命令都通过
-`uv run --frozen`。如果真实 Docker 后端未启动，明确跳过该项并展示 `not_verified`，不要用 fake
-provider 替代。
+这是一条完整主线，不是多个 demo 的拼盘。默认只使用固定 seed `314` 的合成教学库和本地确定性模型
+fixture；不读取私有平台，不请求临时外网数据，也不依赖 Docker。脚本每次重建自己名下的
+`r54-state.db`、`r54-teaching.db` 和 `r54-artifacts`，因此重复运行不会累积考试或 operation。
 
-## 0:00-1:00：环境与问题
-
-```bash
-uv run --frozen python --version
-uv run --frozen python -m edu_agent.data.generate
-```
-
-讲清主线：模型能调工具不等于运行可靠；演示重点是早停门禁、写入重放、恢复、Trace 和诚实评测。
-本演示只使用 `SyntheticProvider`；真实 `TeachingPlatformProvider` 尚未实现，仍是 L1，不能把合成/fake
-合同结果讲成真实平台集成证据。
-
-## 1:00-3:00：正常多步链
+演示前完成依赖同步；正式演示命令均使用锁定依赖和离线模式：
 
 ```bash
-uv run --frozen python scripts/agent_demo.py
-uv run --frozen python scripts/plan_runtime_demo.py
-uv run --frozen python scripts/mcp_demo.py
+uv lock --check
+uv run --frozen --offline python -m pytest -p no:cacheprovider \
+  tests/test_r54_candidate_demo.py -q
 ```
 
-指出真实 user turn 只有一个，工具调用与结果原子配对；Plan 第一次无证据回答被拦截，真实 tool event
-绑定后才完成。MCP demo 的模型可见 schema 来自同一个冻结 Manifest；stdio server 的 discovery 必须与本地
-source/version/schema hash/effect/capability 目录一致，调用仍经过本地参数、角色/课程、timeout/cancel 和结果预算。
+专项测试比较关键事件快照，不比较最终回答全文。
 
-## 3:00-5:00：事务故障与恢复
+## 0:00-0:45：范围和证据口径
+
+先说明任务：“读取课程考试与名单，分析成绩后创建考试，并复盘写入证据”。模型 fixture 只决定何时发出
+固定工具调用；route、流式传输、参数规范化、并发执行、Plan/Evidence、审批、事务写、journal、恢复、
+Trace、上下文和预算都走正式 Runtime。
+
+现场只使用下面四类口径：
+
+| 类别 | 本演示可说内容 |
+|---|---|
+| 已实现 | Provider route/API mode、RunEvent text delta、只读工具并发、Plan/Evidence、审批幂等写、进程重开恢复、Trace review |
+| fixture/离线验证 | seed `314` SyntheticProvider、本地确定性 ProviderAdapter、显式崩溃开关、无网络 smoke |
+| 真实模型已验证 | R5.2 固定 DashScope `qwen-plus` Test split 三次重复；这是独立证据，不是本演示实时调用 |
+| 尚未验证 | 私有 TeachingPlatformProvider、本机 Docker/Jobe runtime、本演示的 live 模型端点、跨主机 SQLite 共识 |
+
+## 0:45-2:00：正常路径和真实 text delta
 
 ```bash
-uv run --frozen python scripts/transactional_tools_demo.py
-uv run --frozen python scripts/runtime_recovery_demo.py
-uv run --frozen --offline python scripts/r2_recovery_demo.py
+uv run --frozen --offline python scripts/r54_candidate_demo.py \
+  --scenario normal \
+  --work-dir /tmp/edu-agent-r54-normal \
+  --report artifacts/r54-demo-normal.json
 ```
 
-展示 Scheduler 在“业务提交后进程失败”场景重试仍只有一个考试；outbox 重投但消费者只产生一次副作用；
-再展示 session 争抢、旧 fencing token 被拒、取消和 stale run 恢复；第三条命令关闭崩溃 Service，用同一
-SQLite 文件构造新 Service，并从公开 API 输出脱敏 `replay-read -> terminal-replay` 决策与 Trace。强调范围是
-单 SQLite 文件，EventBus 不保存历史 delta。
+先看终端中所有 assertion 均为 `true`，再打开
+[r54-demo-normal.json](../artifacts/r54-demo-normal.json)：
 
-## 5:00-6:30：受限子 Agent 与代码执行边界
+- `trace_review.route.resolved/selections/winners` 说明 primary 是
+  `chat_completions`，fallback candidate 是 `responses`，正常路径 winner 是 primary。
+- `stream.text_delta_count > 0` 来自真实 `RunEventBus -> RunStreamWriter -> subscription`；不是把最终文本拆成
+  假 delta。
+- `stream.sequence_monotonic=true`、`terminal_count=1` 证明单 writer 序列和唯一 terminal。
+
+这里的“真实”指真实运行事件，不指真实外部模型；外部模型证据必须归入 R5.2。
+
+## 2:00-3:30：两个只读工具并发和参数规范化
+
+看同一报告：
+
+- `trace_review.tools.segments` 把 `get_class_roster`、`list_exams` 放在同一个 `parallel` segment。
+- `concurrency_proof` 使用两方 `threading.Barrier`，要求两个独立 worker 都进入 Provider 后才放行；
+  timeout 只负责 fail closed，没有用 `sleep` 猜时序。
+- `trace_review.argument_normalization` 只显示 JSON pointer、原/目标类型和
+  `string_to_integer_v1` 规则；不导出原值。`class_id/course_id` 本来就是整数，只有 `page/page_size`
+  走允许的无歧义修复。
+
+写工具是 barrier，不与读取或其他写并发。
+
+## 3:30-5:00：Plan/Evidence、审批和幂等写
+
+看以下字段：
+
+- `trace_review.plan_evidence.steps` 是 `inspect -> publish`；两个步骤均为 `completed`，Evidence 状态为
+  `accepted`，并绑定真实 tool event。
+- `trace_review.approval` 只有一条 `create_exam:approved`。
+- `trace_review.writes` 只有一条 committed operation，并显示稳定 idempotency key 和 payload hash。
+- `teaching_state` 中 exam、operation、approval 都是 `1`。
+
+脚本使用固定 `replay_scope=r54:seed314:create-exam`。再次执行同一命令会先重建合成库，仍然只产生一个考试，
+而不是依赖已有成功数据。
+
+## 5:00-7:00：fallback、崩溃和恢复
+
+故障注入只有显式场景会启用，默认正常路径关闭：
 
 ```bash
-uv run --frozen python scripts/multi_agent_demo.py
-uv run --frozen python scripts/code_sandbox_demo.py --provider docker --e2e --require-all
+uv run --frozen --offline python scripts/r54_candidate_demo.py \
+  --scenario fault \
+  --work-dir /tmp/edu-agent-r54-fault \
+  --report artifacts/r54-demo-fault.json
 ```
 
-子 Agent 只看到任务投影和收窄后的只读工具面。第二条命令必须连接真实后端；失败或无服务就把该项记为
-未验证。通过时展示固定 digest、禁网、无挂载、资源上限、逃逸探针、取消与容器清理结果。
+按 [r54-demo-fault.json](../artifacts/r54-demo-fault.json) 讲：
 
-## 6:30-8:00：Trace Inspector
+- primary 在任何可见 delta 前发生 fixture transport failure；`max_retries=0`，因此
+  `retry_decision_reason=retry_limit_exhausted`，没有伪造 retry。
+- capability 检查允许 fallback，winner 切到 `responses`，随后仍产生真实 text delta。
+- 显式故障点是 `after_write_operation_commit_before_result`：业务考试、ToolOperation 和 outbox 已提交，
+  tool result 尚未进入 run journal。
+- 测试时钟显式前进 1 秒后，新 Service 领取更高 fencing token；旧 stream writer 的迟到发布被拒绝。
+- 恢复 Service 同时创建全新的模型 fixture；它只根据 StateStore 恢复出的 durable tool messages 推导下一阶段，
+  不共享崩溃前的进程内 stage 计数器。
+- 首个恢复选择为 `reuse-operation`，恢复后的同一次写标记 `idempotent_replay=true`；终态再次恢复选择
+  `terminal-replay`。exam、operation、approval 仍各为 `1`。
 
-先生成包含 run、调度和 checkpoint 的状态：
+不要把这讲成任意指令位置都能无损续跑；不确定写仍会进入 `manual-review`。
+
+## 7:00-9:00：Trace、上下文和预算复盘
+
+面试官无需读 SQLite：
 
 ```bash
-EDU_AGENT_PRODUCTION_DEMO_STATE=/tmp/edu_agent_production_demo.db \
-  uv run --frozen python scripts/production_runtime_demo.py
-uv run --frozen python scripts/trace_inspector.py \
-  --state /tmp/edu_agent_production_demo.db \
-  --actor teacher-demo --tenant default --format summary --limit 50
+uv run --frozen --offline python scripts/trace_inspector.py \
+  --state /tmp/edu-agent-r54-fault/r54-state.db \
+  --actor teacher-r54 \
+  --tenant school-r54 \
+  --run run-r54 \
+  --format review
 ```
 
-按输出讲 timeline、budget、latency、plan/subagent tree、Artifact metadata 和 recovery recommendation。
-再展示机器导出：
+`review` 先校验 run 的 actor/tenant scope，再做字段最小化和二次脱敏。它直接回答：
 
-```bash
-uv run --frozen python scripts/trace_inspector.py \
-  --state /tmp/edu_agent_production_demo.db \
-  --actor teacher-demo --tenant default --format jsonl --limit 10
-```
+- 选了哪个 route/API mode，哪个 route 最终获胜；
+- 每个 `model_call` 内的失败是否 retry、为何不 retry、为何允许或拒绝 fallback；
+- 哪些调用属于同一并发 segment；
+- 哪些参数按什么规则规范化，且不显示原值；
+- Plan/Evidence、审批和稳定写引用；
+- checkpoint 在哪里触发、压缩前后估算和回收量；
+- `reuse-operation -> terminal-replay` 的恢复边界；
+- root 预算的 reservation/usage/finalization。
 
-说明导出先做 owner scope，再二次脱敏；Inspector 只读。
+本 run 没有子 Agent，所以 `child_settlement=not_exercised`，不会伪造 child。专项测试另用真实
+`RunBudgetLedger` fixture 断言有 child 时分别输出 `settled` 和 `outstanding`。
 
-## 8:00-9:15：API 安全与幂等
+## 9:00-10:00：耗时、边界和收尾
 
-另一个终端用本地配置启动：
+两个报告都记录 `timing.elapsed_ms`，只代表这台目标机器的一次观测；不得写成 SLA、吞吐或容量承诺。
+最后展示 `event_snapshot`：它只固定 route、事件类型、工具集合、规则、Plan 状态、恢复动作和预算结算，
+不固定脆弱回答文本或动态 UUID。
 
-```bash
-EDU_AGENT_DEMO_TOKEN=local-only-demo uv run --frozen python scripts/api_server.py
-```
+R5.2 真实模型报告
+[r52-real-model-eval.json](../artifacts/r52-real-model-eval.json) 只能这样描述：固定
+`qwen-plus/chat_completions`、独立 Test 6 条、三次重复、trajectory success `1.0`、tool precision
+约 `0.8889`、参数准确率约 `0.6667`；实际账单未知，live run 未注入恢复故障，不能扩展到其他 Provider
+或真实学生数据。
 
-请求使用占位教学内容，不使用真实学生数据：
+## 失败时的讲解路径
 
-```bash
-curl -sS -H 'Authorization: Bearer local-only-demo' \
-  -H 'X-Request-ID: demo-request-1' -H 'Content-Type: application/json' \
-  -d '{"message":"列出课程考试"}' http://127.0.0.1:8080/v1/chat
-curl -sS -H 'Authorization: Bearer local-only-demo' \
-  'http://127.0.0.1:8080/v1/traces?run_id=<run_id>&limit=20'
-```
-
-重复第一条 request id 返回相同 run；换 payload 返回冲突。跨 actor/tenant 的拒绝由专项测试展示，避免在
-现场放第二组真实凭据。
-
-## 9:15-10:00：综合评测与收尾
-
-先演示 lineage/数据审计、API recovery socket 契约和大 Trace：
-
-```bash
-uv run --frozen --offline python scripts/audit_eval_lineage.py \
-  --output artifacts/eval-lineage.json
-uv run --frozen python scripts/audit_data_boundaries.py \
-  --fail-on-findings \
-  /tmp/edu_agent_production_demo.db /tmp/edu_agent_production_demo.db-wal \
-  /tmp/edu_agent_production_demo.db-shm artifacts
-uv run --frozen python -m pytest \
-  tests/test_stage8_boundaries_recovery_trace.py -q
-uv run --frozen python scripts/benchmark_trace_scaling.py \
-  --events 10000 --page-size 100 --output artifacts/trace-scaling.json
-uv run --frozen python -m pytest -p no:cacheprovider \
-  tests/test_builtin_tool_contract_matrix.py tests/test_tool_arguments.py \
-  tests/test_tool_batch.py tests/test_r36_boundaries.py tests/test_mcp.py -q
-```
-
-讲解 73 条样本按模板族分成 Train 55 / Dev 12 / Test 6，Test 使用独立 seed/实体/意图而非随机行切分；
-lineage 审计会因跨 split 重复、族/等价语义重叠、缺 provenance、敏感字段或重复生成不一致而失败。数据
-审计报告只给分类/位置/计数、不回显秘密；API 测试经过 `127.0.0.1:0` 真 socket，包含 run 完成但
-response 未提交后的恢复与首次/重放字节一致；benchmark 证明每页读取不超过 page size+1，峰值内存不随
-总历史线性增长。R3 专项同时展示 16 工具契约、坏参数 corpus、冻结 Manifest、MCP/plugin 攻击面和连续 7 轮
-P95 串并行对照；报告断言写副作用、ACL 泄漏和孤立 tool result 均为 0。不要把本机一次耗时写成容量承诺。
-
-最后运行完整门禁：
-
-```bash
-zsh scripts/accept_stage8.sh
-```
-
-该入口会先校验 `uv.lock`、按需准备 `.python-version` 指定的解释器和依赖；业务门禁随后使用离线模式。
-运行期数据库和中间报告在本次私有临时目录中，并在成功或失败后清理。现场只检查调用图时可给同一入口增加
-`--dry-run`，但 dry-run 不是通过证据。
-
-打开该命令生成的 `artifacts/eval-lineage.json` 和 `artifacts/system-eval.json`，先确认 lineage gate，
-再按 Agent、RAG、Reliability、Transaction、Multi-agent、Sandbox、Performance 分栏讲。Agent oracle
-只证明独立 Test harness，真实模型为 `not_run`；没有传当次真实代码执行报告时 Sandbox 为 `not_verified`。
-最后给出技术债：真实语义/模型评测、跨主机协调、强取消、生产认证、trace 冷存储和自由文本 DLP。
-
-`accept_stage8.sh` 是唯一对外完整门禁；它会显式调用 Stage 7 内部回归边界，再运行一次全量测试。Stage 7
-只保留用于独立调试，不作为第二个公开完整入口，也不重复全量测试。
+- 离线依赖缺失：说明目标机器准备未完成；先在允许的准备阶段执行 frozen sync。不要临时换网络数据或删掉
+  `--offline` 后把结果混入正式报告。
+- 正常脚本 assertion 失败：保留 traceback 和 `/tmp/edu-agent-r54-normal`，指出缺失的真实事件；不要展示旧成功
+  report 冒充本次结果。
+- 故障脚本 assertion 失败：正常路径证据仍可单独讲，但恢复结论必须标为失败/尚未验证；不要关闭故障开关后宣称恢复通过。
+- 外网或 R5.2 endpoint 不可用：本演示不需要联网。展示已保存报告并明确它的日期、固定 route 和局限，不现场重跑凑结果。
+- Docker daemon 不可用：保持 Docker/Jobe 为 `not_verified`。它不阻塞这条 R5.4 合成演示，也不能由静态检查升级为运行验收。

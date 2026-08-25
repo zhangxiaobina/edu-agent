@@ -10,6 +10,7 @@ import pytest
 
 from edu_agent.runtime.models import RunContext
 from edu_agent.state import (
+    RUN_REPLAY_SCOPE_MIGRATION,
     RUN_JOURNAL_MIGRATION,
     RUN_JOURNAL_SCHEMA_VERSION,
     STATE_SCHEMA_VERSION,
@@ -635,6 +636,10 @@ def test_old_database_migration_is_idempotent_and_recovers_missing_marker(tmp_pa
             "SELECT COUNT(*) FROM state_schema_migrations WHERE version=?",
             ("012_r2_recovery",),
         ).fetchone()[0]
+        replay_scope_marker_count = connection.execute(
+            "SELECT COUNT(*) FROM state_schema_migrations WHERE version=?",
+            (RUN_REPLAY_SCOPE_MIGRATION,),
+        ).fetchone()[0]
         table_count = connection.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='run_journals'"
         ).fetchone()[0]
@@ -644,7 +649,9 @@ def test_old_database_migration_is_idempotent_and_recovers_missing_marker(tmp_pa
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert marker_count == table_count == 1
     assert recovery_marker_count == 1
+    assert replay_scope_marker_count == 1
     assert "stream_event_sequence" in run_columns
+    assert "replay_scope" in run_columns
     assert user_version == STATE_SCHEMA_VERSION
     assert reopened.get_messages("legacy") == [{"role": "user", "content": "preserve-me"}]
     assert reopened.get_run_journal_snapshot(
@@ -677,10 +684,10 @@ def test_newer_database_schema_is_never_downgraded(tmp_path):
             CREATE TABLE state_schema_migrations(
                 version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
             );
-            INSERT INTO state_schema_migrations VALUES ('016_future', 't0');
+            INSERT INTO state_schema_migrations VALUES ('017_future', 't0');
             """
         )
-    with pytest.raises(StateSchemaVersionError, match="016_future"):
+    with pytest.raises(StateSchemaVersionError, match="017_future"):
         StateStore(marker_path)
 
 

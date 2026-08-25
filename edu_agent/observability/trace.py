@@ -7,6 +7,7 @@ import json
 import sqlite3
 import uuid
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Iterator
@@ -33,6 +34,16 @@ _SOURCE_ORDER = {
     "audit.decision": 150,
 }
 
+_BUDGET_AMOUNT_FIELDS = (
+    "model_calls",
+    "tool_calls",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cost_microusd",
+    "wall_time_ms",
+)
+
 
 def _loads(value: Any, default: Any) -> Any:
     if value is None or value == "":
@@ -54,6 +65,36 @@ def _duration_ms(start: str | None, end: str | None) -> float | None:
 
 def _event_id(source: str, identity: Any, event_type: str) -> str:
     return uuid.uuid5(uuid.NAMESPACE_URL, f"edu-agent:{source}:{identity}:{event_type}").hex
+
+
+def _budget_amount(value: Any) -> dict[str, int]:
+    payload = value if isinstance(value, Mapping) else _loads(value, {})
+    return {
+        field: int(payload.get(field, 0) or 0)
+        if isinstance(payload.get(field, 0), (int, float))
+        and not isinstance(payload.get(field, 0), bool)
+        else 0
+        for field in _BUDGET_AMOUNT_FIELDS
+    }
+
+
+def _add_budget_amount(target: dict[str, int], value: Any) -> None:
+    for field, amount in _budget_amount(value).items():
+        target[field] += amount
+
+
+def _route_review_fields(value: Any, *, provider: str | None = None) -> dict[str, Any]:
+    payload = dict(value) if isinstance(value, Mapping) else {}
+    return {
+        key: item
+        for key, item in {
+            "provider": payload.get("provider") or provider,
+            "deployment": payload.get("deployment"),
+            "api_mode": payload.get("api_mode"),
+            "model": payload.get("model"),
+        }.items()
+        if item is not None
+    }
 
 
 @dataclass(frozen=True)
@@ -917,6 +958,596 @@ class TraceRepository:
         if format == "json":
             yield "]}"
 
+    def _run_review(
+        self,
+        run_id: str,
+        *,
+        actor_id: str,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """Build a scoped, value-minimized explanation from durable runtime truth."""
+
+        with self.state_store.connect() as connection:
+            _, session_id, _ = self._scope(
+                connection,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                run_id=run_id,
+                session_id=None,
+            )
+            tables = self._tables(connection)
+            provider_rows = connection.execute(
+                """
+                SELECT id, provider, event, attempt, error_class, details_json
+                FROM provider_events WHERE run_id=? ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+            tool_rows = connection.execute(
+                """
+                SELECT t.id, t.run_id, t.tool_call_id, t.operation_id,
+                       t.operation_status, t.tool_name, t.outcome_json,
+                       c.model_attempt, c.call_index
+                FROM tool_events t
+                LEFT JOIN agent_tool_calls c
+                  ON c.run_id=t.run_id AND c.tool_call_id=t.tool_call_id
+                WHERE t.run_id=? ORDER BY t.id
+                """,
+                (run_id,),
+            ).fetchall()
+            audit_rows = connection.execute(
+                """
+                SELECT id, action, resource, decision, details_json
+                FROM audit_events
+                WHERE actor_id=? AND tenant_id=?
+                  AND action IN (
+                    'tool.argument_repair', 'tool.approval', 'run.recovery_decision'
+                  )
+                ORDER BY id
+                """,
+                (actor_id, tenant_id),
+            ).fetchall()
+            checkpoint_rows = connection.execute(
+                """
+                SELECT source_messages, estimated_tokens_before,
+                       estimated_tokens_after, strategy_version,
+                       estimator_version, preserved_items_json,
+                       parent_checkpoint_id
+                FROM context_checkpoints
+                WHERE session_id=? AND created_run_id=?
+                ORDER BY created_at, id
+                """,
+                (session_id, run_id),
+            ).fetchall()
+            write_rows = connection.execute(
+                """
+                SELECT idempotency_key, payload_hash, tool_name, status,
+                       plan_step_id, tool_call_id
+                FROM tool_operation_refs
+                WHERE run_id=? AND actor_id=? AND tenant_id=?
+                ORDER BY updated_at, operation_id
+                """,
+                (run_id, actor_id, tenant_id),
+            ).fetchall()
+            plan_rows = connection.execute(
+                """
+                SELECT id, status FROM plans
+                WHERE run_id=? AND actor_id=? AND tenant_id=?
+                ORDER BY created_at, id
+                """,
+                (run_id, actor_id, tenant_id),
+            ).fetchall()
+            plan_steps: list[sqlite3.Row] = []
+            evidence_rows: list[sqlite3.Row] = []
+            for plan in plan_rows:
+                plan_steps.extend(
+                    connection.execute(
+                        """
+                        SELECT step_id, position, status, retry_count
+                        FROM plan_steps WHERE plan_id=? ORDER BY position, step_id
+                        """,
+                        (plan["id"],),
+                    ).fetchall()
+                )
+                evidence_rows.extend(
+                    connection.execute(
+                        """
+                        SELECT step_id, kind, status, tool_name
+                        FROM evidence WHERE plan_id=? ORDER BY id
+                        """,
+                        (plan["id"],),
+                    ).fetchall()
+                )
+
+            root_run_id = run_id
+            ledger_row = connection.execute(
+                "SELECT * FROM run_budget_ledgers WHERE root_run_id=?",
+                (root_run_id,),
+            ).fetchone()
+            if ledger_row is None and "delegation_runs" in tables:
+                delegated = connection.execute(
+                    """
+                    SELECT root_run_id FROM delegation_runs
+                    WHERE id=? AND actor_id=? AND tenant_id=?
+                    """,
+                    (run_id, actor_id, tenant_id),
+                ).fetchone()
+                if delegated is not None:
+                    root_run_id = delegated["root_run_id"]
+                    ledger_row = connection.execute(
+                        "SELECT * FROM run_budget_ledgers WHERE root_run_id=?",
+                        (root_run_id,),
+                    ).fetchone()
+            budget_rows = []
+            if (
+                ledger_row is not None
+                and ledger_row["actor_id"] == actor_id
+                and ledger_row["tenant_id"] == tenant_id
+            ):
+                budget_rows = connection.execute(
+                    """
+                    SELECT owner_run_id, kind, status, reserved_json, actual_json,
+                           usage_source, cost_status, parent_operation_id
+                    FROM run_budget_operations
+                    WHERE root_run_id=? ORDER BY created_at, operation_id
+                    """,
+                    (root_run_id,),
+                ).fetchall()
+            elif ledger_row is not None:
+                raise PermissionError("trace budget root does not belong to actor/tenant")
+
+        resolved_routes: list[dict[str, Any]] = []
+        route_by_role: dict[str, dict[str, Any]] = {}
+        route_selections: list[dict[str, Any]] = []
+        selected_routes: list[dict[str, Any]] = []
+        winner_counts: Counter[tuple[str, str, str, str, str, str]] = Counter()
+        provider_attempts: list[dict[str, Any]] = []
+        retry_events: list[dict[str, Any]] = []
+        fallback_events: list[dict[str, Any]] = []
+        current_model_call = 0
+        max_retries_by_call: dict[int, int | None] = {}
+        for row in provider_rows:
+            details = _loads(row["details_json"], {})
+            event = row["event"]
+            role = str(details.get("route_role") or "unknown")
+            if event == "route_resolved":
+                route = {
+                    "role": role,
+                    **_route_review_fields(details, provider=row["provider"]),
+                    "selection_reason": details.get("selection_reason"),
+                }
+                if route not in resolved_routes:
+                    resolved_routes.append(route)
+                route_by_role[role] = route
+            elif event == "route_selected":
+                current_model_call += 1
+                selected_route = _route_review_fields(
+                    details.get("route"), provider=row["provider"]
+                )
+                configured_max_retries = details.get("max_retries")
+                max_retries_by_call[current_model_call] = (
+                    int(configured_max_retries)
+                    if isinstance(configured_max_retries, int)
+                    and not isinstance(configured_max_retries, bool)
+                    else None
+                )
+                selection = {
+                    "model_call": current_model_call,
+                    "role": role,
+                    **selected_route,
+                    "selection_reason": details.get("selection_reason"),
+                    "fallback_configured": bool(details.get("fallback_configured")),
+                    "max_retries": max_retries_by_call[current_model_call],
+                }
+                route_selections.append(selection)
+            elif event == "provider_result_selected":
+                route = route_by_role.get(role, {})
+                key = (
+                    role,
+                    str(route.get("provider") or row["provider"] or "unknown"),
+                    str(route.get("deployment") or "unknown"),
+                    str(route.get("api_mode") or "unknown"),
+                    str(route.get("model") or "unknown"),
+                    str(details.get("selection_reason") or "selected"),
+                )
+                winner_counts[key] += 1
+                selected_routes.append(
+                    {
+                        "model_call": current_model_call or None,
+                        "role": role,
+                        "provider": key[1],
+                        "deployment": key[2],
+                        "api_mode": key[3],
+                        "model": key[4],
+                        "selection_reason": key[5],
+                    }
+                )
+            elif event == "provider_attempt":
+                provider_attempts.append(
+                    {
+                        "model_call": current_model_call or None,
+                        "route_role": role,
+                        "attempt": int(row["attempt"]),
+                        "status": details.get("status"),
+                        "failure_kind": details.get("failure_kind"),
+                        "retryable": bool(details.get("retryable")),
+                        "fallback_allowed": bool(details.get("fallback_allowed")),
+                        "stream_visible": details.get("stream_visible"),
+                        "breaker_state": details.get("breaker_state"),
+                        "error_class": row["error_class"],
+                    }
+                )
+            elif event == "retry_scheduled":
+                retry_events.append(
+                    {
+                        "model_call": current_model_call or None,
+                        "attempt": int(row["attempt"]),
+                        "delay_source": details.get("delay_source"),
+                        "delay_seconds": details.get("delay_seconds"),
+                    }
+                )
+            elif event in {"fallback_activated", "fallback_rejected"}:
+                compatibility = details.get("compatibility")
+                fallback_events.append(
+                    {
+                        "model_call": current_model_call or None,
+                        "decision": (
+                            "activated" if event == "fallback_activated" else "rejected"
+                        ),
+                        "attempt": int(row["attempt"]),
+                        "reason": details.get("selection_reason") or details.get("reason"),
+                        "primary_failure": details.get("primary_failure"),
+                        "capability_compatible": (
+                            compatibility.get("compatible")
+                            if isinstance(compatibility, Mapping)
+                            else None
+                        ),
+                    }
+                )
+
+        configured_retry_limits = {
+            value for value in max_retries_by_call.values() if value is not None
+        }
+        max_retries = (
+            next(iter(configured_retry_limits))
+            if len(configured_retry_limits) == 1
+            else None
+        )
+        failed_attempts = []
+        scheduled_attempts = {
+            (item["model_call"], item["attempt"]) for item in retry_events
+        }
+        for attempt in provider_attempts:
+            if attempt["status"] != "failed":
+                continue
+            retry_scheduled = (
+                attempt["model_call"], attempt["attempt"]
+            ) in scheduled_attempts
+            retry_limit = (
+                0
+                if attempt["route_role"] == "fallback"
+                else max_retries_by_call.get(attempt["model_call"])
+            )
+            if retry_scheduled:
+                retry_reason = "scheduled"
+            elif attempt.get("stream_visible"):
+                retry_reason = "visible_stream_forbids_retry"
+            elif not attempt["retryable"]:
+                retry_reason = "failure_not_retryable"
+            elif retry_limit is not None and attempt["attempt"] >= retry_limit + 1:
+                retry_reason = "retry_limit_exhausted"
+            elif attempt.get("breaker_state") == "open":
+                retry_reason = "circuit_open"
+            else:
+                retry_reason = "not_recorded"
+            failed_attempts.append(
+                {
+                    **attempt,
+                    "max_retries": retry_limit,
+                    "retry_scheduled": retry_scheduled,
+                    "retry_decision_reason": retry_reason,
+                }
+            )
+
+        winners = [
+            {
+                "role": key[0],
+                "provider": key[1],
+                "deployment": key[2],
+                "api_mode": key[3],
+                "model": key[4],
+                "selection_reason": key[5],
+                "model_calls": count,
+            }
+            for key, count in sorted(winner_counts.items())
+        ]
+
+        tool_groups: dict[tuple[int, str], dict[str, Any]] = {}
+        for row in tool_rows:
+            outcome = _loads(row["outcome_json"], {})
+            meta = outcome.get("meta") if isinstance(outcome.get("meta"), Mapping) else {}
+            segment = str(meta.get("tool_batch_segment") or "unsegmented")
+            model_attempt = int(row["model_attempt"] or 0)
+            key = (model_attempt, segment)
+            group = tool_groups.setdefault(
+                key,
+                {
+                    "model_attempt": model_attempt,
+                    "segment": segment,
+                    "mode": str(meta.get("tool_batch_mode") or "unknown"),
+                    "parallel": bool(meta.get("tool_batch_parallel")),
+                    "calls": [],
+                },
+            )
+            group["parallel"] = group["parallel"] and bool(
+                meta.get("tool_batch_parallel")
+            )
+            group["calls"].append(
+                {
+                    "tool": row["tool_name"],
+                    "tool_call_id": row["tool_call_id"],
+                    "call_index": row["call_index"],
+                    "status": "ok" if outcome.get("ok") else "failed",
+                    "operation_status": row["operation_status"],
+                    "idempotent_replay": bool(meta.get("idempotent_replay")),
+                }
+            )
+        tools = []
+        for group in tool_groups.values():
+            distinct_calls = {
+                str(item.get("tool_call_id")) for item in group["calls"]
+            }
+            group["concurrent"] = bool(
+                group["mode"] == "parallel"
+                and group["parallel"]
+                and len(distinct_calls) > 1
+            )
+            group["calls"].sort(
+                key=lambda item: (
+                    item["call_index"] if item["call_index"] is not None else 1_000_000,
+                    str(item["tool_call_id"]),
+                )
+            )
+            tools.append(group)
+        tools.sort(key=lambda item: (item["model_attempt"], item["segment"]))
+
+        argument_normalization: list[dict[str, Any]] = []
+        approvals: list[dict[str, Any]] = []
+        recovery: list[dict[str, Any]] = []
+        for row in audit_rows:
+            details = _loads(row["details_json"], {})
+            details_run_id = details.get("run_id")
+            if row["action"] != "run.recovery_decision" and details_run_id != run_id:
+                continue
+            if row["action"] == "run.recovery_decision" and row["resource"] != f"run:{run_id}":
+                continue
+            if row["action"] == "tool.argument_repair":
+                for repair in details.get("repairs", []):
+                    if not isinstance(repair, Mapping):
+                        continue
+                    argument_normalization.append(
+                        {
+                            "tool": row["resource"],
+                            "tool_call_id": details.get("tool_call_id"),
+                            "pointer": repair.get("pointer"),
+                            "original_type": repair.get("original_type"),
+                            "target_type": repair.get("target_type"),
+                            "rule": repair.get("rule_id"),
+                            "result": repair.get("result"),
+                            "sensitive": bool(repair.get("sensitive")),
+                            "original_value_exported": False,
+                        }
+                    )
+            elif row["action"] == "tool.approval":
+                approvals.append(
+                    {
+                        "tool": row["resource"],
+                        "decision": row["decision"],
+                        "tool_call_id": details.get("tool_call_id"),
+                        "payload_hash": details.get("payload_hash"),
+                        "scope": details.get("scope"),
+                    }
+                )
+            else:
+                recovery.append(
+                    {
+                        "action": row["decision"],
+                        "source": details.get("source"),
+                        "reason": details.get("reason"),
+                        "next_step": details.get("next_step"),
+                        "phase": details.get("phase"),
+                        "stable_boundary": details.get("stable_boundary"),
+                        "tool": details.get("tool_name"),
+                        "tool_call_id": details.get("tool_call_id"),
+                        "operation_status": details.get("operation_status"),
+                    }
+                )
+        argument_normalization.sort(
+            key=lambda item: (
+                str(item["tool"]),
+                str(item["tool_call_id"]),
+                str(item["pointer"]),
+            )
+        )
+
+        contexts = []
+        for row in checkpoint_rows:
+            policy = next(
+                (
+                    item
+                    for item in _loads(row["preserved_items_json"], [])
+                    if isinstance(item, Mapping) and item.get("type") == "compaction_policy"
+                ),
+                {},
+            )
+            before = int(row["estimated_tokens_before"])
+            after = int(row["estimated_tokens_after"] or 0)
+            contexts.append(
+                {
+                    "source_messages": int(row["source_messages"]),
+                    "estimated_tokens_before": before,
+                    "estimated_tokens_after": after,
+                    "reclaimed_tokens": max(0, before - after),
+                    "strategy": row["strategy_version"],
+                    "estimator": row["estimator_version"],
+                    "reason": policy.get("reason"),
+                    "trigger_threshold": policy.get("trigger_threshold"),
+                    "release_threshold": policy.get("release_threshold"),
+                    "has_parent_checkpoint": row["parent_checkpoint_id"] is not None,
+                }
+            )
+
+        evidence_counts: Counter[tuple[str, str, str, str | None]] = Counter()
+        for row in evidence_rows:
+            evidence_counts[
+                (
+                    row["step_id"],
+                    row["kind"],
+                    row["status"],
+                    row["tool_name"],
+                )
+            ] += 1
+        evidence_by_step: dict[str, list[dict[str, Any]]] = {}
+        for (step_id, kind, status, tool), count in sorted(
+            evidence_counts.items(),
+            key=lambda item: tuple(str(part) for part in item[0]),
+        ):
+            evidence_by_step.setdefault(step_id, []).append(
+                {"kind": kind, "status": status, "tool": tool, "count": count}
+            )
+        plan_review = {
+            "status": plan_rows[-1]["status"] if plan_rows else "not_created",
+            "steps": [
+                {
+                    "step_id": row["step_id"],
+                    "position": int(row["position"]),
+                    "status": row["status"],
+                    "retry_count": int(row["retry_count"]),
+                    "evidence": evidence_by_step.get(row["step_id"], []),
+                }
+                for row in plan_steps
+            ],
+        }
+
+        owners: dict[str, dict[str, Any]] = {}
+        for row in budget_rows:
+            owner = owners.setdefault(
+                row["owner_run_id"],
+                {
+                    "owner_run_id": row["owner_run_id"],
+                    "relation": (
+                        "root" if row["owner_run_id"] == root_run_id else "child"
+                    ),
+                    "reserved": {field: 0 for field in _BUDGET_AMOUNT_FIELDS},
+                    "used": {field: 0 for field in _BUDGET_AMOUNT_FIELDS},
+                    "operation_counts": Counter(),
+                    "unknown_cost_operations": 0,
+                    "outstanding_operations": 0,
+                },
+            )
+            owner["operation_counts"][(row["kind"], row["status"])] += 1
+            if row["status"] == "reserved":
+                _add_budget_amount(owner["reserved"], row["reserved_json"])
+                owner["outstanding_operations"] += 1
+            elif row["status"] == "committed":
+                _add_budget_amount(owner["used"], row["actual_json"])
+            if row["cost_status"] == "unknown":
+                owner["unknown_cost_operations"] += 1
+        owner_reviews = []
+        for owner in owners.values():
+            counts = owner.pop("operation_counts")
+            owner["operations"] = [
+                {"kind": kind, "status": status, "count": count}
+                for (kind, status), count in sorted(counts.items())
+            ]
+            owner_reviews.append(owner)
+        owner_reviews.sort(key=lambda item: (item["relation"] != "root", item["owner_run_id"]))
+        root_owner = next(
+            (item for item in owner_reviews if item["relation"] == "root"),
+            {
+                "owner_run_id": root_run_id,
+                "relation": "root",
+                "reserved": {field: 0 for field in _BUDGET_AMOUNT_FIELDS},
+                "used": {field: 0 for field in _BUDGET_AMOUNT_FIELDS},
+                "operations": [],
+                "unknown_cost_operations": 0,
+                "outstanding_operations": 0,
+            },
+        )
+        children = [item for item in owner_reviews if item["relation"] == "child"]
+        budget_review: dict[str, Any] = {"status": "not_recorded", "children": []}
+        if ledger_row is not None:
+            child_outstanding = sum(item["outstanding_operations"] for item in children)
+            budget_review = {
+                "status": "recorded",
+                "root_run_id": root_run_id,
+                "limits": _loads(ledger_row["limits_json"], {}),
+                "used": _budget_amount(ledger_row["used_json"]),
+                "reserved": _budget_amount(ledger_row["reserved_json"]),
+                "finalized": ledger_row["finalized_at"] is not None,
+                "stop_reason": ledger_row["stop_reason"],
+                "estimated_operations": int(ledger_row["estimated_operations"]),
+                "unknown_cost_operations": int(ledger_row["unknown_cost_operations"]),
+                "root": root_owner,
+                "children": children,
+                "child_settlement": (
+                    "not_exercised"
+                    if not children
+                    else "settled"
+                    if child_outstanding == 0
+                    else "outstanding"
+                ),
+            }
+
+        review = {
+            "schema_version": "edu-agent.trace-review.v1",
+            "run_id": run_id,
+            "route": {
+                "resolved": resolved_routes,
+                "selections": route_selections,
+                "selected": selected_routes,
+                "winners": winners,
+                "provider_attempts": provider_attempts,
+            },
+            "retry_fallback": {
+                "max_retries": max_retries,
+                "per_model_call": [
+                    {"model_call": model_call, "max_retries": retry_limit}
+                    for model_call, retry_limit in sorted(max_retries_by_call.items())
+                ],
+                "failed_attempts": failed_attempts,
+                "retries": retry_events,
+                "fallbacks": fallback_events,
+            },
+            "tools": {
+                "segments": tools,
+                "concurrent_segments": [
+                    item["segment"] for item in tools if item["concurrent"]
+                ],
+            },
+            "argument_normalization": argument_normalization,
+            "plan_evidence": plan_review,
+            "approval": approvals,
+            "writes": [
+                {
+                    "tool": row["tool_name"],
+                    "tool_call_id": row["tool_call_id"],
+                    "plan_step_id": row["plan_step_id"],
+                    "status": row["status"],
+                    "idempotency_key": row["idempotency_key"],
+                    "payload_hash": row["payload_hash"],
+                }
+                for row in write_rows
+            ],
+            "context": {
+                "checkpoint_count": len(contexts),
+                "compactions": contexts,
+            },
+            "recovery": recovery,
+            "budget": budget_review,
+        }
+        return self.redaction.redact(review)
+
     def inspect_run(self, run_id: str, *, actor_id: str, tenant_id: str = "default") -> dict:
         page = self.list_events(
             actor_id=actor_id, tenant_id=tenant_id, run_id=run_id, limit=500
@@ -961,5 +1592,10 @@ class TraceRepository:
             "plan_tree": plan_tree,
             "subagent_tree": subagents,
             "artifacts": artifacts,
+            "review": self._run_review(
+                run_id,
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+            ),
             "timeline": [event.to_dict() for event in events],
         }

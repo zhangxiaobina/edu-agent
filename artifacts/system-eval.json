@@ -16,7 +16,7 @@
       "tool_manifest_concurrency": "passed",
       "transaction": "passed"
     },
-    "trace_input": "inline_1k_fallback"
+    "trace_input": "10k_artifact"
   },
   "agent": {
     "capability_claim": "not_measured",
@@ -27,8 +27,8 @@
       "early_termination_rate": 0.0,
       "irrelevance": {},
       "latency_ms": {
-        "p50": 0.001917,
-        "p95": 0.003875
+        "p50": 0.002292,
+        "p95": 0.003666
       },
       "model_calls": {
         "p50": 2.0,
@@ -96,7 +96,7 @@
     "source": "offline_sqlite_crash_window_recovery",
     "status": "verified"
   },
-  "commit": "acd302df451e8e7c30c5a483b417d21867c10f29",
+  "commit": "d3d3ea7c2b3da237ee4d510bfea1215483fb12fa",
   "config": {
     "agent_source": "offline_oracle",
     "api_mode": "offline_mock",
@@ -146,13 +146,13 @@
     "test_task_count": 6,
     "tool_manifest_schema_version": "edu-agent.tool-manifest.v1",
     "trace": {
-      "event_count": 1000,
+      "event_count": 10000,
       "page_size": 100,
       "source": "offline_keyset_trace_benchmark"
     }
   },
-  "config_hash": "133a7077c57b13a5648efb703a9c639d29d6a847f53555f83710326e65039ea8",
-  "duration_seconds": 2.323012,
+  "config_hash": "52184b392b60b5c1987c74ecb2d74eca3cf5742c9678c310f0d84f31e2e9a6c1",
+  "duration_seconds": 0.806349,
   "environment": {
     "architecture": "arm64",
     "os": "Darwin",
@@ -175,7 +175,7 @@
   "evidence_checklist": "artifacts/evidence-checklist.json",
   "evidence_mode": "development",
   "failed_trajectories": null,
-  "generated_at": "2026-08-25T03:03:01.221791+00:00",
+  "generated_at": "2026-08-25T06:21:40.676687+00:00",
   "git": {
     "available": true,
     "dirty": true
@@ -298,9 +298,9 @@
   "multi_agent": {
     "metrics": {
       "hidden_cost_model_calls": 0,
-      "parallel_elapsed_seconds": 0.11259,
+      "parallel_elapsed_seconds": 0.111762,
       "permission_leak_rate": 0.0,
-      "scheduling_overhead_seconds": 0.08259,
+      "scheduling_overhead_seconds": 0.081762,
       "success_rate": 1.0
     },
     "source": "offline_teaching_delegation_runtime",
@@ -314,8 +314,8 @@
         "p95": 3.0
       },
       "model_latency_ms": {
-        "p50": 0.001917,
-        "p95": 0.003875
+        "p50": 0.002292,
+        "p95": 0.003666
       },
       "tokens": {
         "input": 0,
@@ -326,7 +326,7 @@
         "p50": 1.0,
         "p95": 2.0
       },
-      "wall_seconds": 2.323008
+      "wall_seconds": 0.806343
     },
     "real_model": {
       "metrics": null,
@@ -365,7 +365,7 @@
   },
   "reliability": {
     "metrics": {
-      "cancel_latency_ms": 1.063083,
+      "cancel_latency_ms": 0.978708,
       "cancel_requested": 1,
       "circuit_or_fallback_hit": 1,
       "lease_fencing_conflicts": 1,
@@ -417,8 +417,8 @@
         "early_termination_rate": 0.0,
         "irrelevance": {},
         "latency_ms": {
-          "p50": 0.001917,
-          "p95": 0.003875
+          "p50": 0.002292,
+          "p95": 0.003666
         },
         "model_calls": {
           "p50": 2.0,
@@ -661,7 +661,7 @@
         "audit"
       ],
       "metrics": {
-        "files_scanned": 1,
+        "files_scanned": 2,
         "findings": [],
         "mode": "read_only_dry_run",
         "schema_version": "edu-agent.data-boundary-audit.v1",
@@ -690,7 +690,7 @@
         },
         "journal_schema_version": 1,
         "lease_fencing": {
-          "cancel_latency_ms": 1.063083,
+          "cancel_latency_ms": 0.978708,
           "cancel_requested": 1,
           "circuit_or_fallback_hit": 1,
           "lease_fencing_conflicts": 1,
@@ -719,8 +719,8 @@
           "p95": 3.0
         },
         "model_latency_ms": {
-          "p50": 0.001917,
-          "p95": 0.003875
+          "p50": 0.002292,
+          "p95": 0.003666
         },
         "tokens": {
           "input": 0,
@@ -731,7 +731,7 @@
           "p50": 1.0,
           "p95": 2.0
         },
-        "wall_seconds": 2.323008
+        "wall_seconds": 0.806343
       },
       "source": "offline_runtime_measurement",
       "status": "passed",
@@ -747,8 +747,8 @@
         "environment"
       ],
       "metrics": {
-        "commit": "acd302df451e8e7c30c5a483b417d21867c10f29",
-        "config_hash": "133a7077c57b13a5648efb703a9c639d29d6a847f53555f83710326e65039ea8",
+        "commit": "d3d3ea7c2b3da237ee4d510bfea1215483fb12fa",
+        "config_hash": "52184b392b60b5c1987c74ecb2d74eca3cf5742c9678c310f0d84f31e2e9a6c1",
         "evidence_mode": "development",
         "provenance_gate": {
           "reasons": [
@@ -771,7 +771,7 @@
         "reliability"
       ],
       "metrics": {
-        "cancel_latency_ms": 1.063083,
+        "cancel_latency_ms": 0.978708,
         "cancel_requested": 1,
         "circuit_or_fallback_hit": 1,
         "lease_fencing_conflicts": 1,
@@ -830,10 +830,10 @@
         "hidden_cost_model_calls": 0,
         "manifest_hash": "d9391fb50910f015ae86c0f754fb46f4623bf3166c5c506b9d5541d8ec5d263f",
         "parallel_barriers": 3,
-        "parallel_elapsed_seconds": 0.11259,
+        "parallel_elapsed_seconds": 0.111762,
         "parallel_safe_entries": 11,
         "permission_leak_rate": 0.0,
-        "scheduling_overhead_seconds": 0.08259,
+        "scheduling_overhead_seconds": 0.081762,
         "schema_version": "edu-agent.tool-manifest.v1",
         "success_rate": 1.0
       },
@@ -870,21 +870,34 @@
   "seed": 42,
   "status": "passed",
   "trace_scaling": {
-    "config_hash": "68acadb184c6902728cf8b8530a71946d79a3add54712969271bbdef0b149910",
+    "assertions": {
+      "bounded_page_reads": true,
+      "complete": true,
+      "no_page_times_full_projection": true
+    },
+    "config_hash": "1d941f8059f801d10dbade3db183cfec98d85564e911fb30902858a390e1fec0",
     "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
     "metrics": {
-      "digest": "6cb9f01a5bfa291d3b38050fceba53d4ca0f9a8ebab6dae3158a466e4b000cb6",
-      "elapsed_seconds": 0.075941,
-      "events_per_second": 13181.307,
-      "exported_events": 1001,
-      "indexed_events": 1000,
-      "max_rows_loaded_per_page": 65,
-      "pages": 16,
-      "peak_memory_bytes": 251329,
-      "projected_events": 1001,
-      "rows_loaded": 1016,
-      "sql_queries": 33
+      "digest": "3d8820b4646b700465464c2521f5db647f2c1215817fdee0aa240ac3517f891d",
+      "elapsed_seconds": 0.722016,
+      "events_per_second": 13851.49,
+      "exported_events": 10001,
+      "indexed_events": 10000,
+      "max_rows_loaded_per_page": 101,
+      "pages": 101,
+      "peak_memory_bytes": 386402,
+      "projected_events": 10001,
+      "rows_loaded": 10101,
+      "sql_queries": 203
     },
+    "provenance_gate": {
+      "reasons": [
+        "git_worktree_dirty"
+      ],
+      "required": false,
+      "status": "not_enforced"
+    },
+    "schema_version": "edu-agent.trace-scaling.v2",
     "source": "offline_keyset_trace_benchmark",
     "status": "verified"
   },

@@ -2,11 +2,11 @@
 
 ## Current
 
-- last_completed_prompt: R4.6
-- next_prompt: R5.1
-- baseline_commit: 7822781077f7132db29a3ba6c5bfeeb7e0a469e9
-- stage_gate: passed
-- stage_gate_reason: R0-R4 顶层门禁均 passed；R4.1-R4.6 的 Context Accounting、Artifact-first 可恢复压缩、保真评测、一次 overflow recovery、全树持久预算、进程 lifecycle/drain、一致备份恢复及 retention/GC 已通过完整 Stage 8 收口验收
+- last_completed_prompt: R5.4
+- next_prompt: R5.5
+- baseline_commit: 5427617d930d656c094dc89b6ec1884832927e70
+- stage_gate: in_progress
+- stage_gate_reason: R0-R4 顶层门禁均 passed，R5.1-R5.4 已完成；R5.5 发布审计和最终候选版结论尚未执行，Docker/Jobe runtime、私有平台及跨主机 SQLite 能力仍保持 not_verified
 
 ## Baseline Reproduction
 
@@ -1244,6 +1244,19 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - boundaries/not_verified: 本会话没有真实模型、Provider 网络、私有教学平台、Docker/Jobe 或 GitHub-hosted CI 证据。Docker 后端可用时才可独立将 sandbox 标为 `passed`；R5.2 必须以冻结 route、独立 Test lineage、费用上限和脱敏原始证据验证真实模型；SyntheticProvider/contract fake 不能升级为私有平台已接入。当前 development artifact 的 dirty provenance 不能用于候选发布。
 - gate: `R5.1 passed`；R5 总门禁保持 `in_progress`，R0-R4 顶层 stage gate 仍为 `passed`。
 - next: R5.2，读取本交接、`docs/eval.md`、`docs/evidence-checklist.md` 和真实模型 runner；先做 capability/network/费用/敏感数据/Test lineage preflight，只有明确授权和凭据才可发起固定 route 的真实模型评测，否则记录阻塞并保持 `real_model=not_run`。
+
+### R5.2 - 2026-08-25
+
+- commit/evidence: 本会话从 R5.1 提交 `d3d3ea7c2b3da237ee4d510bfea1215483fb12fa` 开始。用户明确授权固定 DashScope route 和 USD 30 上限；key 仅通过隐藏 stdin 注入进程，没有写入配置、数据库、Trace、artifact 或回复。没有使用真实学生数据、没有训练/调参、没有修改核心 runtime。
+- frozen route/preflight: [`artifacts/r52-real-model-live-preflight.json`](../artifacts/r52-real-model-live-preflight.json) 记录 `provider=dashscope`、`api_mode=chat_completions`、`model=qwen-plus`、`deployment=dashscope-compatible`、endpoint identity SHA-256、`CredentialRef=EDU_AGENT_API_KEY`、temperature `0.0`、seed `null`（adapter 不发送）、max output `8192`、route concurrency `4`、effective model concurrency `1`、timeout `1800s`、max retries `2`、Test seed `314`。Capability、网络、费用授权、敏感数据和完整 lineage 均通过；lineage 为 73 条（Train 55 / Dev 12 / Test 6），manifest hash `163e5d...ab43`。
+- live result: [`artifacts/r52-real-model-eval.json`](../artifacts/r52-real-model-eval.json) 为同一路由、同一 Test split 的 3 次正式重复；18 条 task records、44 次 provider observations，raw JSONL 44 条，失败 Trace 0 条。trajectory success 三次均为 `1.0`（variance `0`）；tool precision mean `0.888889`、recall `1.0`、F1 mean `0.925926`（variance `0.000686`）；param accuracy mean `0.666667`（variance `0.001543`）；step completion `1.0`、early termination `0`。首输出 delta mean `781.924ms`，总延迟 mean `2928.621ms`、p95 `6736.903ms`。
+- usage/cost: input `255,081`、output `4,658`、total `259,739` tokens；按当前未核验的示例价格计算 estimated cost `$0.107637`，潜在上限 `$1.684562`，低于授权 `$30`。Provider 实际 billing cost 保持 `unknown`，没有把估算冒充账单。恢复安全在本次正常 Test 中未注入 crash/replay，报告为 `not_exercised`，离线 recovery tests 仍单独覆盖。
+- failures and comparison: 早期一次 runner 聚合 bug、一次 inherited SOCKS dependency 环境阻塞、四次不完整 evidence run 均保存为独立 artifact，明确 `harness_bug`/`environment_not_verified` 且不计入正式模型结论。oracle [`artifacts/r52-oracle-test-eval.json`](../artifacts/r52-oracle-test-eval.json) 仍单列 `harness_only`，不与真实分数合并。
+- report integration: [`artifacts/system-eval.json`](../artifacts/system-eval.json) 已接入 real-model metrics、route/preflight/raw evidence 引用；`evaluation.real_model.status=verified`，但 `evidence_mode=development` 且工作区 dirty，因此不是 candidate/release provenance。
+- verification: 固定 route runner 编译检查、lineage、JSON、`git diff --check` 和最终数据边界审计通过（0 findings）；R5.1 相关测试 `23 passed`。未执行恢复故障注入，未声称 recovery safety 已由本次 live run 验证。
+- gate: `R5.2 passed_for_real_model_evaluation`；R5 总门禁保持 `in_progress`，R0-R4 和 R5.1 状态不变。
+- next: `R5.3`；审查真实结果和残余风险，尤其是参数准确率约 `66.7%`、tool precision 约 `88.9%`、recovery safety 未在 live run 注入，以及实际账单未知。不得把本次结果扩展到其他 Provider 或真实学生数据。
+
 ### R5.3 - 2026-08-25
 
 - scope/boundary: 新增 `docs/production-deployment.md`，先记录单机 SQLite/Artifact、Operator/config/secret、外部模型和可选代码执行的威胁/运行边界；不新增前端、Kubernetes、多机数据库、平台 Provider 或默认 Jobe/Docker code execution。明确 `DemoTokenAuth` 只是本地/demo authenticator，真实部署仍需受信任网关。
@@ -1254,3 +1267,15 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - handoff/residual: 本阶段不改变核心 Runtime；手册覆盖 secret/config 注入、启动、health/log/Trace、在线 backup/verify、new-directory restore、forward migration/rollback、drain、容量告警和 Provider 故障。残余风险是基础镜像 digest 需发布方冻结、`DemoTokenAuth` 不能代替生产身份、SQLite 仍只支持同机共享文件、Docker/Jobe 和真实外部端点未在本环境验收；真实模型评测的参数准确率、恢复 live fault injection 和账单未知边界延续 R5.2。工作区保留用户已有 R5.2 artifact/脚本改动，当前 evidence 仍是 development/dirty。
 - gate: `R5.3 passed_static_container_not_verified`；R5 总门禁保持 `in_progress`，R0-R4、R5.1 和 R5.2 状态不变。
 - next: `R5.4`，只做可重复的 10 分钟候选版演示与故障复盘；不得把本阶段 `not_verified` 的 Docker/外部部署能力写成已验收。
+
+### R5.4 - 2026-08-25
+
+- scope/evidence: 新增 `scripts/r54_candidate_demo.py`，固定 seed `314`、run/session/replay scope，只重建脚本自己名下的合成 StateStore、SyntheticProvider 教学库和 Artifact 目录；默认 `normal`，只有显式 `--scenario fault` 才启用故障。不访问私有平台、临时外网或 Docker，也不把 fixture 内容冒充真实模型输出。
+- normal/fault path: 两条路径都经过正式 ProviderGateway/ResilientEngine、typed Provider stream、RunStreamWriter/EventBus subscription、参数治理、ToolBatchPlanner、Plan/Evidence、approval、ToolOperation、context checkpoint 和 root budget ledger。两个只读工具以两方 `threading.Barrier` 证明两个 worker 同时进入，不用 `sleep` 猜时序；故障路径先验证 primary connection failure 在 `max_retries=0` 下不 retry 且 capability-safe fallback 到 Responses，再在 `after_write_operation_commit_before_result` 抛出测试专用进程崩溃，显式推进 lease 时钟、重开 Service、拒绝旧 writer 并执行 `reuse-operation -> terminal-replay`。恢复 Service 使用全新 model fixture，只按持久 tool messages 推导阶段，不共享崩溃前内存状态。
+- recovery defect/migration: 首次真实故障演示发现 `resume_run` 没有重建原 `RunContext.replay_scope`，导致恢复派生第二个 idempotency key 并在合成库真实双写；没有在 demo 中硬编码绕过。修复将 `runs.replay_scope` 随 enqueue 持久化并在 resume 时恢复，引入幂等旧库 migration `016_run_replay_scope`，StateStore `user_version` 从 15 提升到 16；旧库、migration marker/中断、五崩溃窗和固定 replay scope 均有回归。
+- Trace review: `TraceRepository.inspect_run()` 新增 owner-scoped、字段最小化且二次脱敏的 `edu-agent.trace-review.v1` 投影，`scripts/trace_inspector.py --format review --run ...` 无需读取 SQLite 表即可说明 resolved/selected/winner route 与 API mode、按 `model_call` 归组的 retry/fallback、并发 segment、参数规范化规则、Plan/Evidence、审批/稳定写引用、checkpoint 压缩、恢复选择及 root/child budget settlement。无 child 时明确 `not_exercised`；独立 ledger fixture 覆盖 `settled/outstanding`。route 不输出 endpoint/CredentialRef，参数不输出原值，跨 actor scope 拒绝。
+- reports/timing: 保存脱敏的 `artifacts/r54-demo-normal.json` 与 `artifacts/r54-demo-fault.json`。最终实跑正常路径 `321.369ms`、3 个订阅者可见 text delta、primary `chat_completions` winner；故障路径 `461.586ms`、2 个订阅者可见 text delta、首次调用 fallback `responses`，随后恢复完成。两者所有 smoke assertions 为布尔 `true`，exam/operation/approval 各为 1，稳定 idempotency key 相同，context 估算 `4770 -> 469`，root budget finalized 且无 outstanding；耗时只标为本机单次观测，不是 SLA。
+- docs/tests: 重写 `docs/demo-script.md` 为单条 10 分钟时间预算主线，更新 `docs/interview-guide.md`，严格区分“已实现 / fixture 离线验证 / 真实模型已验证 / 尚未验证”，并保留正常、故障、网络和 Docker 失败时的讲解路径。关键事件 smoke/快照和 scope/脱敏/CLI/child budget 测试为 `4 passed`；最终 migration/recovery/R5.4 组合 `85 passed`。Provider、stream、参数/并发、Plan、事务、恢复、context、budget、Trace 专项在受限沙箱为 `356 passed, 5 failed`，5 项全部止于 `127.0.0.1` bind `PermissionError`；获准本机回环复跑对应三组为 `26 passed`。相关 Ruff、报告 JSON 结构/幂等键审计、两报告数据边界审计（2 files、0 findings）和 `git diff --check` 通过。
+- boundaries/not_verified: 本演示的模型仍是确定性离线 adapter；真实模型能力只引用 R5.2 固定 `qwen-plus/chat_completions` 的独立报告，实际账单未知且该 live run 未注入恢复故障。`TeachingPlatformProvider`、私有教学平台、当前机器 Docker/Jobe runtime、跨主机/网络分区 SQLite 共识、任意阻塞第三方 SDK 强杀仍未验证。R5.4 是普通切片，按通用协议未重复运行完整 `zsh scripts/accept_stage8.sh`；当前工作区与 artifact 是 development/dirty，不是 candidate/release provenance。
+- gate: `R5.4 passed`；R5 总门禁保持 `in_progress`，不得提前称为 release-ready。
+- next: `R5.5`，执行最终发布审计、完整门禁、证据链接/敏感数据检查和 `docs/release-readiness.md`；只有必需门禁全部通过才能将 R5 gate 改为 `passed`，可选 Docker/私有平台能力继续保留真实 `not_verified`。

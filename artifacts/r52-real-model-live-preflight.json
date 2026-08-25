@@ -1,0 +1,136 @@
+{
+  "schema_version": "edu-agent.r52-real-model-live-preflight.v1",
+  "stage": "R5.2",
+  "status": "passed",
+  "code_version": {
+    "commit": "d3d3ea7c2b3da237ee4d510bfea1215483fb12fa",
+    "git_worktree_dirty": true
+  },
+  "candidate_route": {
+    "provider": "dashscope",
+    "api_mode": "chat_completions",
+    "model": "qwen-plus",
+    "deployment": "dashscope-compatible",
+    "endpoint_identity_sha256": "5891aed827c4e67b2d7c0c73ea819327ce3f2b6ef72213cd79669486a26b1ead",
+    "credential_ref": "EDU_AGENT_API_KEY"
+  },
+  "frozen_parameters": {
+    "temperature": 0.0,
+    "seed": null,
+    "seed_status": "provider_adapter_does_not_send_seed",
+    "max_output_tokens": 8192,
+    "route_max_concurrency": 4,
+    "effective_model_concurrency": 1,
+    "timeout_seconds": 1800.0,
+    "max_retries": 2,
+    "split": "test",
+    "test_seed": 314,
+    "test_task_count": 6,
+    "repeats": 3
+  },
+  "budget": {
+    "max_cost_usd": 30.0,
+    "pricing_version": "example-prices@2026-08-24.v1",
+    "pricing_status": "unverified_example_only",
+    "provider_billing_cost_usd": null,
+    "estimated_cost_usd": 0.107637,
+    "potential_cost_ceiling_usd": 1.684562
+  },
+  "checks": {
+    "capability": {
+      "status": "passed",
+      "tool_calling": true,
+      "usage": true,
+      "streaming": true,
+      "context_window": 131072,
+      "max_output_tokens": 8192,
+      "gaps": []
+    },
+    "network": {
+      "status": "passed",
+      "address_count": 6,
+      "transport": "direct_tcp_after_unsetting_inherited_socks_proxy"
+    },
+    "test_lineage": {
+      "status": "passed",
+      "manifest_hash": "163e5d232270403fb846d61135fae000d5ba3d67705162d7588dbde27a68ab43",
+      "sample_count": 73,
+      "split_counts": {
+        "train": 55,
+        "dev": 12,
+        "test": 6
+      },
+      "deterministic_generation": true,
+      "template_family_isolation": true,
+      "semantic_group_isolation": true,
+      "cross_split_duplicates": false
+    },
+    "sensitive_data": {
+      "status": "passed",
+      "dataset": "synthetic_only",
+      "student_data": "not_used"
+    },
+    "credential_ref": {
+      "status": "present_in_process_only",
+      "value_recorded": false
+    },
+    "spend_consent": {
+      "status": "authorized",
+      "max_cost_usd": 30.0
+    },
+    "runner": {
+      "status": "passed",
+      "script": "scripts/eval_real_r52.py",
+      "max_output_enforced": true,
+      "first_output_delta_latency": true,
+      "total_latency": true,
+      "usage": true,
+      "cost_guard": true,
+      "failure_classification": true
+    }
+  },
+  "prior_attempts": [
+    {
+      "artifact": "artifacts/r52-real-model-harness-failure-01.json",
+      "classification": "harness_bug",
+      "counted_as_model_evidence": false
+    },
+    {
+      "artifact": "artifacts/r52-real-model-env-failure-01.json",
+      "classification": "environment_not_verified",
+      "counted_as_model_evidence": false,
+      "requests_completed": 0
+    },
+    {
+      "artifact": "artifacts/r52-real-model-eval-attempt-uncounted-budget.json",
+      "classification": "harness_bug",
+      "counted_as_model_evidence": false,
+      "reason": "model-call accounting was incomplete"
+    },
+    {
+      "artifact": "artifacts/r52-real-model-eval-before-raw-enhancement.json",
+      "classification": "harness_bug",
+      "counted_as_model_evidence": false,
+      "reason": "per-task raw trajectory evidence was incomplete"
+    },
+    {
+      "artifact": "artifacts/r52-real-model-eval-before-safe-raw.json",
+      "classification": "harness_bug",
+      "counted_as_model_evidence": false,
+      "reason": "raw latency fields were removed by the central sensitive-key classifier"
+    },
+    {
+      "artifact": "artifacts/r52-real-model-eval-before-full-raw.json",
+      "classification": "harness_bug",
+      "counted_as_model_evidence": false,
+      "reason": "raw JSONL retained only the last observation per task"
+    }
+  ],
+  "formal_evidence": {
+    "artifact": "artifacts/r52-real-model-eval.json",
+    "raw_runs": "artifacts/r52-real-model-eval.raw.jsonl",
+    "failed_traces": null,
+    "requests_completed": 44,
+    "real_model_status": "verified"
+  }
+}

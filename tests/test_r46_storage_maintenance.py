@@ -337,6 +337,8 @@ def test_restore_runs_idempotent_migration_from_v14_snapshot(tmp_path):
         connection.execute("DROP INDEX idx_artifacts_gc_pending")
         connection.execute("ALTER TABLE artifacts DROP COLUMN gc_pending_at")
         connection.execute("DELETE FROM state_schema_migrations WHERE version='015_storage_maintenance'")
+        connection.execute("DELETE FROM state_schema_migrations WHERE version='016_run_replay_scope'")
+        connection.execute("ALTER TABLE runs DROP COLUMN replay_scope")
         connection.execute("PRAGMA user_version=14")
     manifest_path = backup / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -347,21 +349,31 @@ def test_restore_runs_idempotent_migration_from_v14_snapshot(tmp_path):
             item["size_bytes"] = database.stat().st_size
     manifest["schema_version"] = 14
     manifest["integrity"]["schema_version"] = 14
-    manifest["migration_ids"] = [item for item in manifest["migration_ids"] if item != "015_storage_maintenance"]
+    manifest["migration_ids"] = [
+        item
+        for item in manifest["migration_ids"]
+        if item not in {"015_storage_maintenance", "016_run_replay_scope"}
+    ]
     from edu_agent.state.maintenance import _manifest_hash
     manifest["manifest_sha256"] = _manifest_hash(manifest)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
 
     restored = StateMaintenance.restore(backup, tmp_path / "restored")
     assert restored.source_schema_version == 14
-    assert restored.restored_schema_version == 15
+    assert restored.restored_schema_version == 16
     with StateStore(restored.state_path, read_only=True).connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM state_schema_migrations WHERE version='015_storage_maintenance'").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM state_schema_migrations WHERE version='016_run_replay_scope'").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize(
     "fault_point",
-    ["after_015_schema_before_marker", "after_015_marker_before_user_version"],
+    [
+        "after_015_schema_before_marker",
+        "after_015_marker_before_user_version",
+        "after_016_schema_before_marker",
+        "after_016_marker_before_user_version",
+    ],
 )
 def test_migration_interruption_rolls_back_and_restart_applies_once(tmp_path, fault_point):
     path = tmp_path / "state.db"
@@ -371,6 +383,8 @@ def test_migration_interruption_rolls_back_and_restart_applies_once(tmp_path, fa
         connection.execute("DROP INDEX idx_artifacts_gc_pending")
         connection.execute("ALTER TABLE artifacts DROP COLUMN gc_pending_at")
         connection.execute("DELETE FROM state_schema_migrations WHERE version='015_storage_maintenance'")
+        connection.execute("DELETE FROM state_schema_migrations WHERE version='016_run_replay_scope'")
+        connection.execute("ALTER TABLE runs DROP COLUMN replay_scope")
         connection.execute("PRAGMA user_version=14")
 
     def interrupt(point: str) -> None:
@@ -382,6 +396,7 @@ def test_migration_interruption_rolls_back_and_restart_applies_once(tmp_path, fa
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 14
         assert connection.execute("SELECT COUNT(*) FROM state_schema_migrations WHERE version='015_storage_maintenance'").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM state_schema_migrations WHERE version='016_run_replay_scope'").fetchone()[0] == 0
     recovered = StateStore(path)
     assert recovered.migration_ready()
 

@@ -4,6 +4,8 @@ Examples:
   uv run --frozen python scripts/trace_inspector.py --state /tmp/state.db \
       --actor teacher-1 --tenant school-1 --run RUN_ID --format summary
   uv run --frozen python scripts/trace_inspector.py --state /tmp/state.db \
+      --actor teacher-1 --tenant school-1 --run RUN_ID --format review
+  uv run --frozen python scripts/trace_inspector.py --state /tmp/state.db \
       --actor teacher-1 --tenant school-1 --run RUN_ID --format jsonl > trace.jsonl
 """
 from __future__ import annotations
@@ -30,8 +32,14 @@ def main() -> int:
     parser.add_argument("--component")
     parser.add_argument("--cursor", help="opaque versioned cursor returned by a previous page")
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--format", choices=("summary", "json", "jsonl"), default="summary")
+    parser.add_argument(
+        "--format",
+        choices=("summary", "review", "json", "jsonl"),
+        default="summary",
+    )
     args = parser.parse_args()
+    if args.format == "review" and not args.run:
+        parser.error("--format review requires --run")
     repository = TraceRepository(StateStore(args.state, read_only=True))
     query = {
         "actor_id": args.actor,
@@ -51,6 +59,14 @@ def main() -> int:
             payload = page.to_dict()
         else:
             payload = repository.inspect_run(args.run, actor_id=args.actor, tenant_id=args.tenant)
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.format == "review":
+        payload = repository.inspect_run(
+            args.run,
+            actor_id=args.actor,
+            tenant_id=args.tenant,
+        )["review"]
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.format == "json":
