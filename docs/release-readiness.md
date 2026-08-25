@@ -2,25 +2,28 @@
 
 ## Binary Decision
 
-**NOT READY. Remain at R5.5.**
+**READY. R5.5 and the R5 gate passed for the audited candidate.**
 
-The intended package version is `0.1.0`. There is no candidate commit or tag.
-This audit was performed on a dirty working tree based on
-`a661e3669ca6bce7af6727eb90e18a0698feaade`; no commit, push, image publication,
-deployment, release, or tag was created.
+The intended package version is `0.1.0`. The audited candidate commit is
+`fb1eeb6073694409f0c2c48ef34916f420e9fdab` on `main`. Before and after both
+candidate runs, `HEAD` and `origin/main` matched that commit, divergence was
+`0/0`, and the worktree was clean.
 
-Two required publication proofs are missing:
+Both required publication proofs now exist in the ignored local
+`ci-artifacts/` directory:
 
-1. The complete Stage 8 gate has passed in `development` mode, but has not run
-   against a clean commit with `--evidence-mode candidate`.
-2. The saved real-model report is a completed R5.2 run on commit
-   `d3d3ea7c2b3da237ee4d510bfea1215483fb12fa` with
-   `evidence_mode=development` and `git.dirty=true`. It is not real-model
-   provenance for the current candidate source.
+1. The complete Stage 8 gate passed with `--evidence-mode candidate`.
+2. The fixed R5.2 real-model Test passed with three repeats in candidate mode.
 
-Neither failure can be waived by documentation. Optional Docker/private
-platform checks remain honestly `not_verified` and are not the reason for the
-binary decision.
+Both reports record the same clean commit, `evidence_mode=candidate`, and a
+passed provenance gate. The final seven-file data-boundary audit found no
+credential or identifiable-data leakage. No image was published, no service
+was deployed, and no release or tag was created.
+
+This document update happened after the evidence was produced and is recorded
+as a separate documentation-only commit. It records the result; it is not part
+of the audited candidate commit, is not a replacement candidate, and must not
+be used to rewrite the audited provenance.
 
 ## Candidate Identity
 
@@ -28,162 +31,118 @@ binary decision.
 |---|---|
 | Package | `edu-agent 0.1.0` |
 | Intended release line | R0-R5 public candidate |
-| Base Git commit | `a661e3669ca6bce7af6727eb90e18a0698feaade` |
-| Candidate commit | unavailable; working tree contains the R5.5 fixes |
-| Evidence mode | `development` |
-| Git state in current system/Trace reports | `dirty=true`, publication gate not enforced |
+| Branch | `main` |
+| Candidate commit | `fb1eeb6073694409f0c2c48ef34916f420e9fdab` |
+| Upstream | `origin/main`, divergence `0/0` during both runs |
+| Evidence mode | `candidate` |
+| Git state in candidate reports | available, `dirty=false`, provenance `passed` |
 | Release tag/image/deployment | none |
 
 ## R0-R5 Audit
 
-| Gate | Result | Reproducible evidence | Release interpretation |
-|---|---|---|---|
-| R0 provenance, frozen dependencies, CI contract, lineage and data boundary | `passed` for implementation; current candidate proof `blocked` | [CI workflow](../.github/workflows/ci.yml), [system report](../artifacts/system-eval.json), [lineage](../artifacts/eval-lineage.json), [data audit](../artifacts/data-boundary-audit.json) | Local development gate passes; no clean current candidate artifact or hosted CI run exists |
-| R1 Provider gateway, 429/retry/fallback and route capability checks | `passed` | [architecture](architecture.md), [provider tests](../tests/test_provider_resilience.py), [stream tests](../tests/test_provider_streaming.py) | Fixture and local contract evidence; not a multi-vendor production claim |
-| R2 RunEvent, stream cancellation, journal/finalizer and five crash windows | `passed` | [journal design](run-journal.md), [recovery tests](../tests/test_r2_recovery.py), [socket boundary tests](../tests/test_api_sse_cancellation.py) | Process-reopen SQLite recovery is verified; arbitrary third-party process killing is not claimed |
-| R3 manifest, parameter governance, concurrency barriers and transactional writes | `passed` | [argument contract](tool-argument-normalization.md), [manifest drift tests](../tests/test_r36_boundaries.py), [batch tests](../tests/test_tool_batch.py), [transaction tests](../tests/test_transactional_tools.py) | Synthetic teaching storage and contract fakes do not prove a private platform integration |
-| R4 context overflow, full-tree budget, lifecycle, migration and storage recovery | `passed` | [runtime](production-runtime.md), [context tests](../tests/test_r43_context_recovery.py), [budget tests](../tests/test_run_budget_ledger.py), [lifecycle tests](../tests/test_lifecycle.py), [storage tests](../tests/test_r46_storage_maintenance.py) | Single-host SQLite boundary only |
-| R5.1 acceptance/report contract | `passed` in development; candidate run `blocked` | [acceptance script](../scripts/accept_stage8.sh), [evidence checklist](evidence-checklist.md) | Candidate/release reports now write to ignored `ci-artifacts/` so they do not dirty their source commit |
-| R5.2 fixed real-model Test | completed development evidence; candidate proof `blocked` | [R5.2 report](../artifacts/r52-real-model-eval.json), [evaluation method](eval.md) | Old dirty evidence cannot establish current candidate model behavior |
-| R5.3 container/runbook | static `verified`; runtime `not_verified` | [deployment runbook](production-deployment.md), [container tests](../tests/test_container_deployment.py) | Docker daemon was unavailable; runtime checks remain optional and unverified |
-| R5.4 normal/fault demonstration | `passed` | [normal report](../artifacts/r54-demo-normal.json), [fault report](../artifacts/r54-demo-fault.json), [demo script](demo-script.md) | Deterministic local model fixture; separate old R5.2 evidence is not candidate provenance |
-| R5.5 final publication decision | `blocked` | this document and [progress ledger](optimization-progress.md) | R5 gate must not be changed to `passed` |
+| Gate | Result | Evidence boundary |
+|---|---|---|
+| R0 provenance, frozen dependencies, CI contract, lineage and data boundary | `passed` | Candidate reports use real clean Git provenance; lineage and final artifact audit passed |
+| R1 Provider gateway, retry/fallback and route capability checks | `passed` | Offline contract and fault tests; not a multi-vendor production claim |
+| R2 RunEvent, stream cancellation, journal/finalizer and crash recovery | `passed` | Process-reopen SQLite recovery and fencing verified |
+| R3 manifest, parameter governance, concurrency and transactional writes | `passed` | Frozen ToolManifest, validation, barriers and operation/outbox tests passed |
+| R4 context, budget, lifecycle, migration and storage recovery | `passed` | State schema 16, bounded drain, backup/restore and GC verified |
+| R5.1 acceptance/report contract | `passed` | Stage 8 candidate exit 0 and coverage checklist passed |
+| R5.2 fixed real-model Test | `passed` | Candidate report has 18/18 successful task-runs and 45/45 completed observations |
+| R5.3 container/runbook | static `verified`; runtime `not_verified` | Static checks are not represented as container runtime acceptance |
+| R5.4 normal/fault demonstration | `passed` | Deterministic local normal and recovery scenarios passed |
+| R5.5 final publication decision | `passed` | Both required candidate provenance records match the same clean commit |
 
-## Report Contract Audit
+## Candidate Evidence Audit
 
 | Report | Schema and binding | Audited result |
 |---|---|---|
-| `system-eval.json` | envelope `edu-agent.system-eval.v4`, report contract v5; commit `a661e366...`; config `8e2a020b...a925af2e`; lineage `163e5d23...a68ab43`; development/dirty | offline sections passed; real model `not_run`; sandbox `not_verified`; not candidate provenance |
-| `trace-scaling.json` | `edu-agent.trace-scaling.v2`; same commit; config `4ebdc1cb...ebc06c51`; development/dirty | 10,000 indexed and 10,001 exported; 3/3 assertions true; local bounded-read benchmark, not throughput or SLA |
-| `eval-lineage.json` | `edu-agent.eval-lineage.v1`; manifest `163e5d23...a68ab43` | 73 deterministic samples: Train 55 / Dev 12 / Test 6; all isolation and provenance checks passed |
-| `r52-real-model-eval.json` | `edu-agent.r52-real-model-eval.v1`; commit `d3d3ea7c...`; config `c1fd6550...ccf55`; same lineage; development/dirty | 44 completed provider observations across 6 Test tasks and 3 repeats; valid historical run, invalid current candidate provenance |
-| R5.4 reports | `edu-agent.r54-candidate-demo.v1`; fixed seed 314; offline fixture | normal 17/17 and fault 18/18 assertions true; reports explicitly classify R5.2 as development evidence |
+| `ci-artifacts/system-eval.json` | envelope `edu-agent.system-eval.v4`, report contract v5; config `8e2a020b...a925af2e` | candidate, clean commit, provenance passed; all required offline sections passed |
+| `ci-artifacts/trace-scaling.json` | `edu-agent.trace-scaling.v2`; config `4ebdc1cb...ebc06c51` | candidate, same clean commit; 10,000 indexed / 10,001 exported; 3/3 assertions true |
+| `ci-artifacts/eval-lineage.json` | `edu-agent.eval-lineage.v1`; manifest `163e5d23...a68ab43` | 73 deterministic samples: Train 55 / Dev 12 / Test 6; all checks passed |
+| `ci-artifacts/evidence-checklist.json` | `edu-agent.acceptance-coverage.v1` | Stage 8 and all four mapped regression groups passed |
+| `ci-artifacts/r52-real-model-eval.json` | `edu-agent.r52-real-model-eval.v1`; config `381d9b52...014d7fd` | candidate, same clean commit; real model verified |
+| `ci-artifacts/r52-real-model-eval.raw.jsonl` | redacted JSONL, 45 records | 45 completed, 0 failed; 6 Test tasks x 3 repeats |
+| `ci-artifacts/data-boundary-audit.json` | `edu-agent.data-boundary-audit.v1` | seven files scanned, zero findings |
 
-R5.2 measured trajectory success `1.0`, tool precision `0.888889`, recall
-`1.0`, F1 `0.925926`, and parameter accuracy `0.666667`. It recorded 259,739
-tokens and an estimated `$0.107637` using an unverified example price. Provider
-billing remains unknown, and the live run did not inject crash/replay faults.
+The system, Trace and real-model config hashes were independently rebuilt and
+matched their reports. Twenty-two Stage 8 input hash declarations and seven
+R5.2 input hashes matched the candidate source. The shared lineage manifest,
+schema and split counts matched across Stage 8 and R5.2. The teacher
+ToolManifest rebuilt as schema `edu-agent.tool-manifest.v1`, hash
+`d9391fb50910f015ae86c0f754fb46f4623bf3166c5c506b9d5541d8ec5d263f`,
+with 14 entries, 11 parallel-safe entries and 3 barriers.
 
 ## Verification Results
 
-The final local audit used macOS 26.5.2 / Darwin 25.5.0 arm64, CPython 3.12.13,
+The candidate audit used macOS 26.5.2 / Darwin 25.5.0 arm64, CPython 3.12.13,
 SQLite 3.50.4, uv 0.11.16, and the frozen `uv.lock`.
 
 | Check | Result |
 |---|---|
-| Ruff | full repository, 0 diagnostics |
+| Public Stage 8 candidate gate | exit 0 |
+| Ruff | all scoped invocations passed, 0 diagnostics |
+| Stage 8 boundary tests | 34 passed |
+| R4 context/storage group | 106 passed |
+| R2 recovery group | 148 passed |
+| Stage 7 observability group | 12 passed |
 | Full pytest | 689 passed, 1 skipped |
-| Public Stage 8 development gate | exit 0; boundary 34 passed, R4 group 106 passed, R2 group 148 passed, final 689 passed / 1 skipped |
-| Focused failure matrix | 73 passed; three loopback tests required execution outside the restricted socket sandbox |
-| Normal/fault demo | 17/17 and 18/18 assertions; one exam, operation and approval in each path; no duplicate write |
-| Non-empty backup/restore | schema 16; 1 session, run, journal, operation, checkpoint and managed Artifact; backup, verify, restore and verify-state passed; 0 foreign-key violations |
+| Context fidelity | 12 cases; thresholds passed; scope leak 0 |
 | Trace benchmark | 10,000 indexed / 10,001 exported; 3/3 assertions true |
-| Artifact data-boundary audit | 25 files, 0 findings |
-| Repository publication scan | 258 intended files: 256 indexed plus this new document and its runner test; no database, key/certificate, cookie, dump or file larger than 1 MiB; secret-pattern hits were synthetic test canaries/placeholders |
-| Local Markdown links | all repository-relative targets resolved |
-| Container smoke | 11/11 static checks true; all 8 runtime checks `not_verified` because no Docker daemon was present |
+| State maintenance | schema 16; backup, verify, restore and verify-state passed |
+| Real-model candidate | exit 0; 18/18 task-runs; 45/45 observations; 0 failed traces |
+| Final data-boundary audit | 7 files, 0 findings |
+| Exact credential and generic secret scan | 0 matches |
+| Container smoke | 11/11 static checks true; 8/8 runtime checks remain `not_verified` |
 
-The single pytest skip is
-`tests/test_container_deployment.py::test_container_smoke_reports_runtime_matrix_without_docker_claims`
-with the explicit reason `not_verified: Docker daemon is not available for
-container E2E`. The ignored local `edu_agent/data/edu.db` and `dpo_dumps/` are
-not tracked and were not modified or deleted by this audit.
+The one pytest skip is the Docker runtime matrix test, with the explicit reason
+that the Docker daemon is unavailable. It does not become a runtime pass.
 
-The focused matrix covered 429/`Retry-After` and compatible fallback, failure
-before/after visible stream delta, socket disconnect and late primary data, all
-five process-reopen crash windows, write replay and concurrent idempotency,
-manifest drift, bad argument corpus, read/write barriers, provider context
-overflow and its one-retry limit, root/child ledger exhaustion, SIGTERM drain,
-disk full/read-only/corrupt state, occupied backup targets, and corrupt backup
-checksums.
+## Real-Model Result
 
-## Reproduction
+The fixed route was DashScope `qwen-plus` in `chat_completions` mode, Test split
+only, temperature `0.0`, no transmitted seed, maximum output 8,192 tokens and
+three repeats. The report records:
 
-From the repository root:
+- trajectory success: `1.0` in all three repeats;
+- tool precision mean: `0.916667`;
+- tool recall mean: `1.0`;
+- tool F1 mean: `0.944444`;
+- parameter accuracy mean: `0.703704`;
+- step completion mean: `1.0` and early termination mean: `0.0`;
+- 267,355 input, 4,812 output and 272,167 total tokens;
+- estimated cost `$0.112739` using an unverified example price.
 
-```bash
-export UV_CACHE_DIR=/tmp/edu-agent-uv-cache
-uv lock --check
-uv sync --frozen --python 3.12 --managed-python --extra dev --extra mcp
-uv pip check
-uv run --frozen --offline ruff check .
-uv run --frozen --offline python -m pytest -p no:cacheprovider tests -q
-zsh scripts/accept_stage8.sh
-```
-
-The publishable offline gate must be run only after the fixes are committed and
-the tree is clean. Its dynamic reports stay outside the Git index:
-
-```bash
-zsh scripts/accept_stage8.sh --evidence-mode candidate
-```
-
-Normal and fault demonstrations:
-
-```bash
-demo_root=$(mktemp -d /tmp/edu-agent-r54-audit.XXXXXX)
-uv run --frozen --offline python scripts/r54_candidate_demo.py \
-  --scenario normal --work-dir "$demo_root/normal" --report "$demo_root/normal.json"
-uv run --frozen --offline python scripts/r54_candidate_demo.py \
-  --scenario fault --work-dir "$demo_root/fault" --report "$demo_root/fault.json"
-```
-
-Lineage, Trace, data and container checks:
-
-```bash
-uv run --frozen --offline python scripts/audit_eval_lineage.py --quiet
-uv run --frozen --offline python scripts/benchmark_trace_scaling.py \
-  --events 10000 --page-size 100 --output /tmp/trace-scaling.json
-uv run --frozen --offline python scripts/audit_data_boundaries.py \
-  --fail-on-findings artifacts
-uv run --frozen --offline python scripts/container_smoke.py
-```
-
-The real-model candidate command requires a new explicit network/cost/credential
-authorization. It fails before reading credentials or making a request when
-Git provenance or the output boundary is invalid:
-
-```bash
-uv run --frozen python scripts/eval_real_r52.py --repeats 3 \
-  --evidence-mode candidate --output ci-artifacts/r52-real-model-eval.json
-```
+Provider billing remains unknown. The normal Test run did not inject
+crash/replay faults, so `recovery_safety=not_exercised`; recovery continues to
+be supported by separate offline fault tests. The model result is not evidence
+for other providers, production traffic or real student data.
 
 ## Configuration, Migration, And Compatibility
 
-- Writes require approval by default. Local code execution is false;
-  `code_execution.enabled=false`, provider `disabled`, network policy
-  `disabled`, and security attestation false. Knowledge retrieval, Scheduler,
-  and OTLP export are opt-in. Credentials are environment references, never
-  config values.
-- State schema is 16 with idempotent `016_run_replay_scope`. Migration from an
-  older v14 snapshot, interruption rollback/restart, retained legacy messages,
-  and rejection of future schema versions have regression coverage.
-- The legacy `base_url` model configuration and the thin OpenAI-compatible
-  facade remain tested. CI is fixed to Python 3.12; package metadata still
-  declares `>=3.10` compatibility.
-- Restore never overwrites live state. It validates the manifest, hashes,
-  schema, SQLite integrity, foreign keys and managed Artifact paths before
-  publishing into a new or empty directory.
+- Writes require approval by default. Local code execution, Scheduler,
+  knowledge retrieval and OTLP export remain opt-in or disabled by default.
+- State schema is 16 with idempotent `016_run_replay_scope`; older snapshot
+  migration, interruption recovery and future-schema rejection are covered.
+- Runtime schemas remain consistent: checkpoint 2, budget ledger 1, run journal
+  1, runtime event v1 and run event v2.
+- Restore validates manifest and payload hashes, schema, SQLite integrity,
+  foreign keys and managed Artifact paths before publishing to a new target.
 
 ## Residual Risks And `not_verified`
 
-Required blockers:
+There are no remaining required R5 blockers. These optional, external or
+out-of-contract items remain explicit:
 
-- no clean current candidate Stage 8 provenance;
-- no real-model candidate report bound to that same clean commit.
-
-Optional or external-state items that remain explicit:
-
-- Docker image build and all 8 container runtime checks: non-root inspect,
+- Docker image runtime and all eight container checks: non-root inspection,
   private-file exclusion, read-only rootfs, volume persistence, restart,
   SIGTERM drain, in-container backup/restore and HTTP smoke;
-- Docker/Jobe code-execution E2E on this machine;
-- GitHub-hosted Actions execution for the current unpushed changes;
-- private `TeachingPlatformProvider`, private platform authentication and data;
-- actual model-provider billing, live-model recovery fault injection and other
-  Provider/model routes;
-- production gateway/TLS/identity integration; `DemoTokenAuth` is not a
-  production authenticator;
+- Docker/Jobe code-execution E2E;
+- GitHub-hosted execution of this exact candidate;
+- private `TeachingPlatformProvider`, private authentication and private data;
+- actual provider billing, live-model recovery fault injection and other model
+  routes;
+- production gateway/TLS/identity integration;
 - cross-host/NFS/network-partition SQLite consensus and force-killing arbitrary
   blocking third-party SDK calls, which are outside the supported contract.
 
@@ -191,55 +150,33 @@ Optional or external-state items that remain explicit:
 
 R5.5 does not implement L1 real-platform access, L2 Memory/Skill, L3 Curator,
 frontend workbench, Kubernetes, multi-host storage, a credential pool, external
-data downloads, or a broader Provider matrix. After R5 eventually passes,
-choose exactly one of L1/L2/L3 in response to a real need; do not start all
-three in parallel.
+data downloads or a broad provider matrix. A later stage must select exactly
+one of L1/L2/L3 for a concrete need; it must not start all three by default.
 
-## Rollback
-
-No release was deployed, so the immediate rollback is to stop promotion and
-retain the current evidence for review.
-
-For a later trial deployment:
-
-1. Drain and stop the API; create and verify a backup before changing code or
-   storage.
-2. Start the previous reviewed image only if it supports live schema 16.
-3. If older code cannot read schema 16, restore the pre-upgrade verified backup
-   into a new directory/volume, run `verify-state`, and cut over only after
-   health and API smoke pass.
-4. Keep the old state volume and backup. Do not downgrade in place, overwrite
-   the live database, force-push history, or delete recovery evidence.
-
-The detailed operator sequence is in
-[production-deployment.md](production-deployment.md) and
-[storage-operations.md](storage-operations.md).
-
-## Interview Boundary
+## Publication Boundary
 
 Safe to say:
 
-- the listed Runtime mechanisms are implemented and verified by offline/local
-  tests and the development Stage 8 gate;
-- the R5.4 demonstration exercises production Runtime paths with deterministic
-  local model and teaching fixtures;
-- one old R5.2 DashScope run completed with the exact limited metrics above;
+- R0-R5 and the R5.5 candidate evidence gate passed for commit `fb1eeb6...`;
+- the fixed real-model Test completed with the exact metrics above;
 - container hardening is statically verified while runtime remains
   `not_verified`.
 
 Do not say:
 
-- this source is release-ready or has passed candidate/release provenance;
-- the current candidate model behavior is verified by the old R5.2 report;
-- there are online users, production throughput, production SLA, verified
-  provider billing, private-platform integration, container deployment
-  acceptance, cross-host exactly-once, or SQLite consensus;
-- R5.4 latency or the 10k Trace observation is a production capacity claim.
+- an image, deployment, release or tag exists;
+- the model result proves production quality, throughput, SLA, verified billing
+  or private-platform integration;
+- container runtime acceptance, cross-host exactly-once or SQLite consensus was
+  verified;
+- R5.4 latency or the 10k Trace observation is a production-capacity claim.
 
-## Minimum Next Step
+## Next Step
 
-Create one reviewed local commit containing the R5.5 fixes, leaving the tree
-clean. On that exact commit, run Stage 8 in candidate mode. With separate user
-authorization and credentials, run the fixed R5.2 Test in candidate mode to
-`ci-artifacts/`, then audit that directory and require both reports to carry the
-same clean commit. Only then may R5.5 and the R5 gate be changed to `passed`.
+Revoke the one-time evaluation credential and retain the ignored candidate
+evidence in an approved secure evidence store if it must survive local cleanup.
+Do not enter L1/L2/L3 until a concrete requirement selects exactly one path.
+
+If this documentation commit or any later commit is selected as a replacement
+release candidate, rerun both required candidate provenance gates on that new
+clean commit before promoting it.

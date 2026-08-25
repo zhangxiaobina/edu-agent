@@ -35,7 +35,7 @@ Trace、上下文和预算都走正式 Runtime。
 |---|---|
 | 已实现 | Provider route/API mode、RunEvent text delta、只读工具并发、Plan/Evidence、审批幂等写、进程重开恢复、Trace review |
 | fixture/离线验证 | seed `314` SyntheticProvider、本地确定性 ProviderAdapter、显式崩溃开关、无网络 smoke |
-| 真实模型运行已验证 | R5.2 固定 DashScope `qwen-plus` Test split 三次重复；这是独立的 development evidence，不是本演示实时调用或 candidate provenance |
+| 真实模型运行已验证 | R5.2 固定 DashScope `qwen-plus` Test split 三次重复；独立 candidate evidence 已绑定 clean commit，但仍不是本演示的实时模型调用 |
 | 尚未验证 | 私有 TeachingPlatformProvider、本机 Docker/Jobe runtime、本演示的 live 模型端点、跨主机 SQLite 共识 |
 
 ## 0:45-2:00：正常路径和真实 text delta
@@ -143,12 +143,10 @@ uv run --frozen --offline python scripts/trace_inspector.py \
 最后展示 `event_snapshot`：它只固定 route、事件类型、工具集合、规则、Plan 状态、恢复动作和预算结算，
 不固定脆弱回答文本或动态 UUID。
 
-R5.2 真实模型报告
-[r52-real-model-eval.json](../artifacts/r52-real-model-eval.json) 只能这样描述：旧提交上的一次
-`development/dirty` 真实运行证据，固定
-`qwen-plus/chat_completions`、独立 Test 6 条、三次重复、trajectory success `1.0`、tool precision
-约 `0.8889`、参数准确率约 `0.6667`；实际账单未知，live run 未注入恢复故障，不能扩展到其他 Provider
-或真实学生数据，也不能当作当前候选提交的发布 provenance。
+R5.2 candidate 报告 `ci-artifacts/r52-real-model-eval.json` 只能这样描述：它绑定 clean commit
+`fb1eeb6073694409f0c2c48ef34916f420e9fdab`，固定 `qwen-plus/chat_completions`、独立 Test 6 条、三次重复，
+trajectory success `1.0`、tool precision 约 `0.9167`、F1 约 `0.9444`、参数准确率约 `0.7037`；
+实际账单未知，live run 未注入恢复故障，不能扩展到其他 Provider、生产流量或真实学生数据。
 
 ## 失败时的讲解路径
 

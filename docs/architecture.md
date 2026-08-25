@@ -463,7 +463,8 @@ flowchart TD
 seed、完整 lineage manifest hash 和绑定 lock/workload 的 config hash，并独立报告 `api_recovery` 与
 `trace_scaling`。commit 只从真实 Git 元数据读取；candidate/release 模式拒绝 commit 或 Git 状态不可用以及
 dirty worktree。离线 oracle 只证明 Test harness 与契约；Stage 8 不联网，所以其真实模型栏为 `not_run`。
-R5.2 独立真实运行报告另列，当前保存版本是旧提交上的 development/dirty evidence，不是候选 provenance。
+R5.2 独立真实运行报告另列；当前 candidate 报告与 Stage 8 均绑定 clean commit
+`fb1eeb6073694409f0c2c48ef34916f420e9fdab`，真实模型与离线 oracle 指标仍保持分栏。
 没有当次真实 Docker/Jobe 报告时 sandbox 项为 `not_verified`。完整一键门禁见
 `zsh scripts/accept_stage8.sh`。该入口自动按 `.python-version` 和 `uv.lock` 准备环境，清空真实 Provider
 凭据，把合成库及中间状态限制在有界清理的私有临时目录，并在 artifact 生成后再次执行敏感数据审计；

@@ -42,15 +42,15 @@ Plan/Evidence、审批写、checkpoint、恢复和 root/child budget 投影为 o
 
 ### 真实模型运行已验证
 
-[R5.2 报告](../artifacts/r52-real-model-eval.json) 的范围固定为 DashScope `qwen-plus`、
-`chat_completions`、Test split 6 条、3 次重复。它是旧提交上的 `development/dirty` evidence，可说明该次
-真实请求结果，不能说明当前候选提交已通过发布 provenance。可说：
+[R5.2 方法](eval.md)的当前 candidate 报告位于 `ci-artifacts/r52-real-model-eval.json`，范围固定为
+DashScope `qwen-plus`、`chat_completions`、Test split 6 条、3 次重复，并与 Stage 8 绑定同一 clean
+commit `fb1eeb6073694409f0c2c48ef34916f420e9fdab`。可说：
 
 - trajectory success 三次均为 `1.0`，tool recall `1.0`；
-- tool precision mean 约 `0.8889`，F1 约 `0.9259`；
-- 参数准确率 mean 约 `0.6667`；
-- 44 次 provider observations，失败 Trace 0；
-- 首输出 delta mean 约 `782ms`，总延迟 p95 约 `6737ms`，都只是该报告环境的观测。
+- tool precision mean 约 `0.9167`，F1 约 `0.9444`；
+- 参数准确率 mean 约 `0.7037`；
+- 45 次 provider observations，失败 Trace 0；
+- 首输出 delta mean 约 `692ms`，总延迟 p95 约 `7429ms`，都只是该报告环境的观测。
 
 不可说：这些数字代表其他 Provider、生产流量或真实学生任务；实际 Provider 账单仍未知。该 live run 没有注入
 恢复故障，`recovery_safety=not_exercised`；`plan_observed=false`，不能把 harness step completion 写成
@@ -63,8 +63,8 @@ Plan/Evidence、审批写、checkpoint、恢复和 root/child budget 投影为 o
   SIGTERM smoke 仍为 `not_verified`。
 - SQLite lease/fencing 只覆盖共享同一文件的单机进程，不是跨主机、网络分区或多主共识。
 - 任意阻塞第三方 SDK 的强杀、自由文本完整 DLP、生产身份生命周期和 trace 冷存储尚未验证。
-- R5.5 发布审计结论为 `blocked/not ready`：当前没有 clean candidate Stage 8 与同一 commit 的真实模型
-  candidate provenance，不能称为 release-ready。
+- R5.5/R5 必需 candidate 门禁已通过；这只表示候选证据 ready，不表示 Docker/私有平台/生产部署或实际
+  Provider 账单已经验证，也不表示已经发布 release/tag。
 
 ## 六个高频追问
 

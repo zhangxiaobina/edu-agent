@@ -31,8 +31,10 @@ zsh scripts/accept_stage8.sh
 候选 provenance 分开核对；两者都不伪装成另一类证据。架构与边界见 [`docs/architecture.md`](docs/architecture.md)，
 现场演示见 [`docs/demo-script.md`](docs/demo-script.md)。
 
-当前 R5.5 二元发布结论为 **not ready**：开发门禁已通过，但尚无绑定当前 clean candidate commit 的 Stage 8
-与真实模型双份 provenance。最终审计、残余风险和最小下一步见
+当前 R5.5 二元发布结论为 **ready**：Stage 8 candidate 与固定 R5.2 真实模型 candidate 已在同一 clean
+commit `fb1eeb6073694409f0c2c48ef34916f420e9fdab` 上通过 provenance 和数据边界审计。该结论表示
+R5 门禁完成，不表示已经发布镜像、部署、创建 release/tag，或验证了仍明确为 `not_verified` 的外部能力。最终审计与
+残余风险见
 [`docs/release-readiness.md`](docs/release-readiness.md)。
 
 GitHub Actions 使用单一 Ubuntu / Python 3.12 环境，按 `uv.lock` frozen 安装后离线运行 ruff、全量
@@ -323,9 +325,10 @@ export EDU_AGENT_MODEL=...      # 如 qwen-plus / Qwen/Qwen3-14B
 且能区分对错，见 `tests/test_eval.py`）；**真实模型能力须接真引擎后用同一 `run_eval` 跑出。**
 
 历史 PlanGraph 消融还报告步骤完成率、提前结束率和平均模型/工具调用数，但只消费 Train/Dev。当前 R5.2
-真实运行数字只以 [`artifacts/r52-real-model-eval.json`](artifacts/r52-real-model-eval.json) 为准：它包含独立
-Test lineage、配置 hash、三次重复和脱敏 raw records，但绑定旧提交的 `development/dirty` 工作区，不能作为
-当前候选提交的发布 provenance。oracle 仍只验证 harness；Stage 8 离线报告的真实模型栏保持 `not_run`。
+candidate 真实运行数字以本地 `ci-artifacts/r52-real-model-eval.json` 为准：它包含独立 Test lineage、配置
+hash、三次重复和脱敏 raw records，并与 Stage 8 candidate 绑定同一 clean commit
+`fb1eeb6073694409f0c2c48ef34916f420e9fdab`。仓库内 `artifacts/r52-real-model-eval.json` 仅保留旧
+`development/dirty` 运行记录。oracle 仍只验证 harness；Stage 8 离线报告的真实模型栏保持 `not_run`。
 
 ## 与算法仓的连接
 
