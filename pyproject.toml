@@ -1,7 +1,7 @@
 [project]
 name = "edu-agent"
 version = "0.1.0"
-description = "全域教学教务多工具 Agent —— mirror 真实在线教学平台的工具形态，用自微调+量化的 Qwen3-14B 当工具调用引擎"
+description = "可恢复、可审计的多工具教学 Agent Runtime"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

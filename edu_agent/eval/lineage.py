@@ -29,7 +29,7 @@ SPLITS = ("train", "dev", "test")
 
 _PRIVATE_PATH = re.compile(r"(?<![A-Za-z0-9:])/(?:Users|home|private|tmp|var/folders)/[^\s\"'<>]*")
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-_PHONE = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
+_PHONE = re.compile(r"(?<![0-9A-Fa-f])(?:\+?86[- ]?)?1[3-9]\d{9}(?![0-9A-Fa-f])")
 
 
 class LineageValidationError(ValueError):

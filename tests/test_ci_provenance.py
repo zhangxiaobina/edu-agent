@@ -200,6 +200,21 @@ def test_redacted_evaluation_shape_has_no_boundary_findings(tmp_path):
     assert audit_paths([artifact])["findings"] == []
 
 
+def test_hex_provenance_with_phone_like_digits_is_not_redacted_or_flagged(tmp_path):
+    digest = "a" * 8 + "13800138000" + "b" * 45
+    assert len(digest) == 64
+    report = sanitize_artifact({"config_hash": digest})
+    assert report["config_hash"] == digest
+
+    artifact = tmp_path / "report.json"
+    artifact.write_text(json.dumps(report), encoding="utf-8")
+    assert audit_paths([artifact])["findings"] == []
+
+    assert "[REDACTED]" in sanitize_artifact({"message": "phone=13800138000"})[
+        "message"
+    ]
+
+
 def test_trace_benchmark_always_records_shared_provenance():
     report = benchmark(event_count=5, page_size=2)
     assert report["schema_version"] == "edu-agent.trace-scaling.v2"

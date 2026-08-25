@@ -468,8 +468,9 @@ R0.4 已把历史冻结题、DPO 派生集和新 Test 统一纳入 stable lineag
 
 切分在模板族声明时完成，不做随机行切分。自动门禁复查跨 split sample/query 重复、模板族与等价语义
 组重叠、缺 provenance、敏感字段和两次生成不一致。真实模型 runner 在完整 corpus preflight 后只消费
-Test，并保存模型参数、lineage/config hash、重复 run、均值/方差和脱敏失败轨迹；当前仍未运行真实模型。
-Oracle 继续只证明 harness 正确。
+Test，并保存模型参数、lineage/config hash、重复 run、均值/方差和脱敏失败轨迹。R5.2 已保存一次旧提交
+上的 `development/dirty` 真实运行 evidence；它证明该次请求完成，但不是当前
+候选 commit 的发布 provenance。Oracle 继续只证明 harness 正确。
 
 ## 7. 实施路线与验收门禁
 
@@ -606,9 +607,9 @@ context overflow 不盲重试；fallback 不选择 capability 不兼容模型；
 
 | 表述 | 可接受证据 | 当前示例 |
 |---|---|---|
-| 已实现 | 源码 + 专项测试 + 一键验收 | Plan/Evidence、事务工具、lease/fencing、Trace、ToolManifest、只读 SyntheticProvider |
+| 已实现 | 源码 + 专项测试 + 一键验收 | Plan/Evidence、事务工具、lease/fencing、Trace、ToolManifest、参数治理、只读并发、统一预算 |
 | 已接入但未线上验证 | 协议/故障测试通过，真实环境报告明确 `not_run/not_verified` | 新 Provider adapter、外部数据 Adapter |
-| 计划中 | 只出现在本文，不写入 README “技术亮点” | 参数治理/工具并发、统一预算总账、Background Review |
+| 计划中 | 只出现在本文，不写入 README “技术亮点” | TeachingPlatformProvider、Memory/Skill、Background Review、Curator |
 
 ## 9. 当前下一步
 
@@ -624,14 +625,15 @@ R0-R5 拆成 33 个可独立验收和交接的提示词；前一编号未满足�
 4. R3 已完成：ToolManifest、参数规范化/repair audit、事务/operation/outbox 和受控并发均已通过阶段门禁。
 5. R4 已完成：Context/overflow recovery、全树预算、lifecycle/drain、一致 backup/restore 和 retention/GC 已通过
    `accept_stage8.sh` 收口门禁。
-6. 当前下一步为 R5.1：只收口候选版验收编排、版本化报告 schema 和证据清单；之后再按 R5 提示词独立完成真实模型
-   Test、部署运行手册、演示与候选版冻结。
+6. R5.1-R5.4 已完成各自 development 门禁；R5.5 审计因当前工作区和保存的真实模型报告都不具备当前
+   candidate provenance 而停在 `not ready`。最小下一步是提交修复后在 clean commit 上运行 candidate Stage 8，
+   再经单独授权运行 R5.2 candidate evidence；不得用旧 development 报告降级门禁。
 
 R5 前明确不做：消息平台 Gateway、桌面工作台、通用浏览器/终端、多媒体工具、全量多 Provider、完整
 credential pool、自动 Skill 激活、XES/MOOCCube 大规模下载和跨主机协调。公开数据尚未下载不能阻塞
 Runtime 主线，合成 Demo 已通过也不能冒充真实模型结果。
 
-R5 后再根据真实需求选择 L1/L2/L3，不要求三个方向同时推进。接入私有平台无需提前读取生产数据行；
+R5 通过后再根据真实需求从 L1/L2/L3 只选择一个方向，不默认并行。接入私有平台无需提前读取生产数据行；
 数据库只读核验也必须使用专用账号，任何私有 DDL、凭据、原始行和可识别 Trace 都不得进入公开仓库。
 
 现有实现与边界继续以 [`architecture.md`](architecture.md)、

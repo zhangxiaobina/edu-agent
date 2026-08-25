@@ -85,15 +85,31 @@ acceptance_cleanup_owned_dir() {
   command rm -rf -- "$resolved_directory"
 }
 
+acceptance_artifact_directory() {
+  local repo_root=$1
+  local evidence_mode=${2:-development}
+  case $evidence_mode in
+    development) print -r -- "$repo_root/artifacts" ;;
+    candidate|release) print -r -- "$repo_root/ci-artifacts" ;;
+    *)
+      acceptance_die "unsupported evidence mode: $evidence_mode"
+      return 2
+      ;;
+  esac
+}
+
 acceptance_configure_environment() {
   local root=$1
   local repo_root=$2
+  local evidence_mode=${acceptance_evidence_mode:-development}
+  local artifact_directory
+  artifact_directory=$(acceptance_artifact_directory "$repo_root" "$evidence_mode")
   command mkdir -p -- "$root/runtime" "$root/uv-cache" "$root/ruff-cache"
 
   export EDU_AGENT_ACCEPTANCE_ROOT=$root
   export EDU_AGENT_DB="$root/edu.db"
   export EDU_AGENT_PRODUCTION_DEMO_STATE="$root/production-demo.db"
-  export EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR="$repo_root/artifacts"
+  export EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR=$artifact_directory
   export TMPDIR="$root/runtime"
   export RUFF_CACHE_DIR="$root/ruff-cache"
   export UV_CACHE_DIR="$root/uv-cache"

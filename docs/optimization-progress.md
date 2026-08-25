@@ -4,9 +4,9 @@
 
 - last_completed_prompt: R5.4
 - next_prompt: R5.5
-- baseline_commit: 5427617d930d656c094dc89b6ec1884832927e70
-- stage_gate: in_progress
-- stage_gate_reason: R0-R4 顶层门禁均 passed，R5.1-R5.4 已完成；R5.5 发布审计和最终候选版结论尚未执行，Docker/Jobe runtime、私有平台及跨主机 SQLite 能力仍保持 not_verified
+- baseline_commit: a661e3669ca6bce7af6727eb90e18a0698feaade
+- stage_gate: blocked
+- stage_gate_reason: R0-R4 顶层门禁和 R5.1-R5.4 development 门禁通过，但当前工作区没有 clean candidate Stage 8 provenance，保存的 R5.2 真实模型报告也只绑定旧提交的 development/dirty 状态；R5.5 结论为 not ready，Docker/Jobe runtime、私有平台及跨主机 SQLite 继续保持可选 not_verified/非目标
 
 ## Baseline Reproduction
 
@@ -1279,3 +1279,14 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
 - boundaries/not_verified: 本演示的模型仍是确定性离线 adapter；真实模型能力只引用 R5.2 固定 `qwen-plus/chat_completions` 的独立报告，实际账单未知且该 live run 未注入恢复故障。`TeachingPlatformProvider`、私有教学平台、当前机器 Docker/Jobe runtime、跨主机/网络分区 SQLite 共识、任意阻塞第三方 SDK 强杀仍未验证。R5.4 是普通切片，按通用协议未重复运行完整 `zsh scripts/accept_stage8.sh`；当前工作区与 artifact 是 development/dirty，不是 candidate/release provenance。
 - gate: `R5.4 passed`；R5 总门禁保持 `in_progress`，不得提前称为 release-ready。
 - next: `R5.5`，执行最终发布审计、完整门禁、证据链接/敏感数据检查和 `docs/release-readiness.md`；只有必需门禁全部通过才能将 R5 gate 改为 `passed`，可选 Docker/私有平台能力继续保留真实 `not_verified`。
+
+### R5.5 - 2026-08-25
+
+- decision: [`release-readiness.md`](release-readiness.md) 的二元结论为 `not ready`，停在 R5.5。包版本仍为 `0.1.0`；审计基于 HEAD `a661e3669ca6bce7af6727eb90e18a0698feaade` 上的未提交工作区，没有 candidate commit/tag。未 commit、push、发布镜像、部署或创建 release/tag。
+- release blockers: 当前完整 Stage 8 只形成 `development/dirty` evidence；保存的 R5.2 报告绑定旧提交 `d3d3ea7c2b3da237ee4d510bfea1215483fb12fa` 且同为 `development/dirty`。两者均不能证明当前 clean candidate，且 R5 路线明确要求真实模型候选 evidence，因此不得把 R5 gate 写成 passed。
+- minimal fixes: 修正 SHA-256 被手机号规则误脱敏；R5.2 candidate/release 在读取凭据和联网前拒绝脏 Git，并只允许写入忽略的 `ci-artifacts/` 或仓库外；Stage 8 candidate/release 同样将 system/Trace/lineage/audit 写入 `ci-artifacts/`，避免 evidence 自身污染 provenance。R5.4 报告把 R5.2 明确分类为旧 development evidence；README、architecture、eval、demo、interview、roadmap 和项目 description 删除或降级真实平台、实时模型和当前候选的无证据表述。
+- verification: full Ruff 0 diagnostics；全量 pytest `689 passed, 1 skipped`；完整 development `zsh scripts/accept_stage8.sh` 退出 0（Stage 8 边界 `34 passed`、R4 `106 passed`、R2 `148 passed`、最终 `689 passed, 1 skipped`）。定向故障矩阵合计 `73 passed`；其中 3 个 socket/SIGTERM 用例只因受限沙箱禁止 loopback bind 首轮失败，在获准本机环境复跑 `3 passed`。唯一 skip 是无 Docker daemon 的容器 E2E。
+- evidence: R5.4 正常/故障报告分别 17/17、18/18 assertions；故障路径一份非空 state + 1 个受管 Artifact 的 CLI backup/verify/restore/verify-state 全过，schema 16、1 session/run/journal/operation/checkpoint/artifact、0 foreign-key violations。10k Trace 为 10,000 indexed / 10,001 exported、3/3 assertions；lineage 为 73（55/12/6）、manifest `163e5d23...a68ab43`；25 个受跟踪 artifact 数据审计 0 findings，本地 Markdown 链接无缺失。
+- security/config/compatibility: 拟发布集合 258 文件（Git 索引 256 + 本次新增 readiness 文档和 runner 测试），无数据库、key/cert、cookie、dump 或大于 1 MiB 文件；命中 secret pattern 的内容均为 synthetic canary/placeholder。默认写审批开启，local/code execution、Scheduler、knowledge、OTLP 均 fail-closed/opt-in；migration `016_run_replay_scope` 将 schema 固定为 16，v14 restore migration、中断回滚、legacy config/messages 和 future schema 拒绝均有回归。
+- not_verified: Docker static 11/11 通过，但 daemon 不存在，non-root/private-files/read-only-rootfs/volume/restart/SIGTERM/container backup/API smoke 8 项 runtime 全部 `not_verified`；Docker/Jobe、GitHub-hosted CI、私有 `TeachingPlatformProvider`、实际 Provider 账单、live-model crash injection、生产身份/TLS 和其他模型 route 也未验证。跨主机 SQLite 与任意阻塞 SDK 强杀明确不在支持合同内。
+- gate/next: `R5.5 blocked`，R5 总门禁保持未通过。最小下一步是先经用户授权创建一个包含本次修复的 reviewed clean commit，在同一 commit 运行 `accept_stage8.sh --evidence-mode candidate`；再经单独网络/费用/凭据授权运行 R5.2 candidate 到 `ci-artifacts/`，要求两份报告 commit 一致且数据审计通过。R5 真正通过后只按真实需求从 L1/L2/L3 选择一个方向，不默认三个并行。

@@ -110,13 +110,14 @@
       "owner-scoped and redacted Trace review"
     ],
     "not_verified": [
+      "real-model provenance for the current candidate commit",
       "private teaching platform",
       "live model endpoint in this demo",
       "Docker/Jobe runtime on this machine",
       "cross-host SQLite consensus"
     ],
-    "real_model_verified": [
-      "separate fixed R5.2 DashScope evidence; not rerun by this demo"
+    "real_model_development_evidence": [
+      "separate R5.2 DashScope run on commit d3d3ea7 with development/dirty provenance"
     ]
   },
   "fault_injection": {
@@ -201,7 +202,7 @@
     ]
   },
   "timing": {
-    "elapsed_ms": 321.369,
+    "elapsed_ms": 367.912,
     "note": "single observation on this machine; not an SLA"
   },
   "trace_review": {

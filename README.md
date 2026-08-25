@@ -1,6 +1,6 @@
 # EduAgent · 可恢复、可审计的教学 Agent Runtime
 
-EduAgent 解决的不是“再包一层聊天界面”，而是教学 Agent 的工程失效：多步任务提前结束、写工具重试产生重复副作用、并发 Worker 污染同一会话、检索越权，以及故障发生后无法还原过程。它以 `EduAgentService` 为唯一运行入口，在同一条执行链上组合 Plan/Evidence、课程 RAG、事务写工具、SQLite lease/fencing、受限子 Agent、真实代码执行 Provider 和统一 Trace。
+EduAgent 解决的不是“再包一层聊天界面”，而是教学 Agent 的工程失效：多步任务提前结束、写工具重试产生重复副作用、并发 Worker 污染同一会话、检索越权，以及故障发生后无法还原过程。它以 `EduAgentService` 为唯一运行入口，在同一条执行链上组合 Plan/Evidence、课程 RAG、事务写工具、SQLite lease/fencing、受限子 Agent、可选隔离代码执行 Provider 和统一 Trace。
 
 ```text
 HTTP / Scheduler / Demo
@@ -27,8 +27,13 @@ zsh scripts/accept_stage8.sh
 和 Stage 7 回归，并生成 `artifacts/eval-lineage.json` 与离线综合评测。综合报告中的 oracle/mock、真实模型
 和真实代码执行后端严格分栏。运行期数据库、缓存和中间报告位于本次私有临时目录，成功或失败都会有界
 清理；不会读取或覆盖 `edu_agent/data/edu.db`。Docker 后端不可用时报告保持 `sandbox=not_verified`，
-真实模型未运行保持 `not_run`，都不伪装成已验证。架构与边界见 [`docs/architecture.md`](docs/architecture.md)，
+该离线入口不发送模型请求，因此其 system report 的真实模型栏保持 `not_run`。R5.2 独立真实运行报告与
+候选 provenance 分开核对；两者都不伪装成另一类证据。架构与边界见 [`docs/architecture.md`](docs/architecture.md)，
 现场演示见 [`docs/demo-script.md`](docs/demo-script.md)。
+
+当前 R5.5 二元发布结论为 **not ready**：开发门禁已通过，但尚无绑定当前 clean candidate commit 的 Stage 8
+与真实模型双份 provenance。最终审计、残余风险和最小下一步见
+[`docs/release-readiness.md`](docs/release-readiness.md)。
 
 GitHub Actions 使用单一 Ubuntu / Python 3.12 环境，按 `uv.lock` frozen 安装后离线运行 ruff、全量
 pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计。workflow 显式清空模型/平台凭据，不使用预建 `.venv`、
@@ -36,11 +41,11 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
 
 ## 这是什么 / 为什么
 
-工具的入参与语义对照一套真实 Spring Boot 教学平台的 Controller、知识图谱、AI 出题和代码执行接口抽取；仓库只保留重建后的工具契约和合成数据，不包含真实平台源码或数据。
+工具的入参与语义按教学平台常见的考试、班级、题库、知识图谱和代码执行边界抽象；仓库只保留规范化工具契约和合成数据，不包含私有平台源码、DDL 或数据。私有 `TeachingPlatformProvider` 尚未实现。
 
-## 工具集（16 个，五类，mirror 真实 Controller）
+## 工具集（16 个，五类，规范化教学契约）
 
-| 类别 | 工具 | mirror 的真实端点（语义来源） |
+| 类别 | 工具 | 规范化端点语义 |
 |---|---|---|
 | 查询 | `query_student_scores` 查成绩 | `GET /teacher/v1/exams/{examId}/results` |
 | | `list_exams` 列考试 | `GET /teacher/v1/exams` |
@@ -317,10 +322,10 @@ export EDU_AGENT_MODEL=...      # 如 qwen-plus / Qwen/Qwen3-14B
 离线用确定性 oracle 回放期望轨迹**验证框架本身**（任务加载 / 工具执行回灌 / 指标计算正确
 且能区分对错，见 `tests/test_eval.py`）；**真实模型能力须接真引擎后用同一 `run_eval` 跑出。**
 
-历史 PlanGraph 消融还报告步骤完成率、提前结束率和平均模型/工具调用数，但只消费 Train/Dev。不要从
-README 读取“当前指标”；正式模型结果由 `eval_demo.py --engine openai --split test --output ...` 保存，包含
-lineage/config hash、重复运行、均值/方差和脱敏失败轨迹。oracle 只验证 harness；未运行的真实模型档明确
-标为 `not_run`。
+历史 PlanGraph 消融还报告步骤完成率、提前结束率和平均模型/工具调用数，但只消费 Train/Dev。当前 R5.2
+真实运行数字只以 [`artifacts/r52-real-model-eval.json`](artifacts/r52-real-model-eval.json) 为准：它包含独立
+Test lineage、配置 hash、三次重复和脱敏 raw records，但绑定旧提交的 `development/dirty` 工作区，不能作为
+当前候选提交的发布 provenance。oracle 仍只验证 harness；Stage 8 离线报告的真实模型栏保持 `not_run`。
 
 ## 与算法仓的连接
 
@@ -330,8 +335,8 @@ lineage/config hash、重复运行、均值/方差和脱敏失败轨迹。oracle
 
 ## 历史实验记录（定性 · 非当前门禁证据）
 
-> 下述观察来自 lineage 建立前的 seed-42 19-task 实验，没有可作为当前候选版证据的独立 Test artifact。
-> 它们只保留为研究背景；当前仓库真实模型状态仍是 `not_run`，不能据此声称当前模型能力已验证。
+> 下述观察来自 lineage 建立前的 seed-42 19-task 实验，不能作为当前候选版证据。
+> 它们只保留为研究背景；R5.2 独立 Test 报告是另一份限定范围的 evidence，不能反向证明这些历史实验。
 
 **① 历史三档 agentic 对照（base / fp16 / W4A16，同机同套 19 个 Train/Dev 任务）**
 

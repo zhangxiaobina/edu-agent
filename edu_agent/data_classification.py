@@ -77,7 +77,10 @@ PII_KEYS = frozenset({
 })
 _CREDENTIAL_PARTS = ("password", "passwd", "secret", "token", "cookie", "authorization")
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-_PHONE = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
+# A phone-like run embedded in a hexadecimal digest is not an identifier.
+# Hex boundaries keep SHA/commit provenance stable while standalone values,
+# JSON fields, and ``phone=...`` text remain detectable.
+_PHONE = re.compile(r"(?<![0-9A-Fa-f])(?:\+?86[- ]?)?1[3-9]\d{9}(?![0-9A-Fa-f])")
 _PRIVATE_PATH_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9:])/(?:Users|home|private|tmp|var/folders)/[^\s\"'<>]*"),
     re.compile(r"(?i)\b[A-Z]:\\(?:Users|Documents and Settings|Temp)\\[^\s\"'<>]*"),

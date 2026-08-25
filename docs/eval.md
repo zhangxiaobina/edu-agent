@@ -115,8 +115,17 @@ sample lineage；credential/PII 字段被移除，值与私有路径被中心脱
 Git、dirty 或状态不可判定的工作区，并强制使用 Test split 和持久化输出；Dev 只能生成 development
 诊断，不能被标成正式模型证据。
 
-本仓当前没有执行真实模型请求，`artifacts/system-eval.json` 中真实模型状态应保持 `not_run`。只有上述
-请求实际完成且 artifact 通过数据边界审计后，才能报告真实模型指标。
+Stage 8 自身不执行真实模型请求，因此 `artifacts/system-eval.json` 的真实模型状态应保持 `not_run`。
+仓库另存一份 R5.2 固定 route 的真实运行报告；它通过数据边界审计，但 provenance 为旧提交上的
+`development/dirty`，只能证明该次运行，不能证明当前候选提交。下一次正式候选重跑使用：
+
+```bash
+uv run --frozen python scripts/eval_real_r52.py --repeats 3 \
+  --evidence-mode candidate --output ci-artifacts/r52-real-model-eval.json
+```
+
+runner 会在读取凭据和发请求前拒绝 unavailable/dirty Git；最终报告再次记录同一门禁结果。
+candidate/release 输出必须位于已忽略的 `ci-artifacts/` 或仓库外，避免生成证据本身改变候选 commit。
 
 ## 5. 离线系统报告
 

@@ -1,5 +1,5 @@
 {
-  "files_scanned": 23,
+  "files_scanned": 25,
   "findings": [],
   "mode": "read_only_dry_run",
   "schema_version": "edu-agent.data-boundary-audit.v1",

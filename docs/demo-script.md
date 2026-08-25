@@ -14,6 +14,15 @@ uv run --frozen --offline python -m pytest -p no:cacheprovider \
 
 专项测试比较关键事件快照，不比较最终回答全文。
 
+演示结束后的唯一完整候选门禁是：
+
+```bash
+zsh scripts/accept_stage8.sh --evidence-mode candidate
+```
+
+该命令验证离线 Runtime 与发布 provenance，但不会发送真实模型请求；动态报告写入已忽略的
+`ci-artifacts/`。R5.2 模型证据单独核对。
+
 ## 0:00-0:45：范围和证据口径
 
 先说明任务：“读取课程考试与名单，分析成绩后创建考试，并复盘写入证据”。模型 fixture 只决定何时发出
@@ -26,7 +35,7 @@ Trace、上下文和预算都走正式 Runtime。
 |---|---|
 | 已实现 | Provider route/API mode、RunEvent text delta、只读工具并发、Plan/Evidence、审批幂等写、进程重开恢复、Trace review |
 | fixture/离线验证 | seed `314` SyntheticProvider、本地确定性 ProviderAdapter、显式崩溃开关、无网络 smoke |
-| 真实模型已验证 | R5.2 固定 DashScope `qwen-plus` Test split 三次重复；这是独立证据，不是本演示实时调用 |
+| 真实模型运行已验证 | R5.2 固定 DashScope `qwen-plus` Test split 三次重复；这是独立的 development evidence，不是本演示实时调用或 candidate provenance |
 | 尚未验证 | 私有 TeachingPlatformProvider、本机 Docker/Jobe runtime、本演示的 live 模型端点、跨主机 SQLite 共识 |
 
 ## 0:45-2:00：正常路径和真实 text delta
@@ -135,10 +144,11 @@ uv run --frozen --offline python scripts/trace_inspector.py \
 不固定脆弱回答文本或动态 UUID。
 
 R5.2 真实模型报告
-[r52-real-model-eval.json](../artifacts/r52-real-model-eval.json) 只能这样描述：固定
+[r52-real-model-eval.json](../artifacts/r52-real-model-eval.json) 只能这样描述：旧提交上的一次
+`development/dirty` 真实运行证据，固定
 `qwen-plus/chat_completions`、独立 Test 6 条、三次重复、trajectory success `1.0`、tool precision
 约 `0.8889`、参数准确率约 `0.6667`；实际账单未知，live run 未注入恢复故障，不能扩展到其他 Provider
-或真实学生数据。
+或真实学生数据，也不能当作当前候选提交的发布 provenance。
 
 ## 失败时的讲解路径
 

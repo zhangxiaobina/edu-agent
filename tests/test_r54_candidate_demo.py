@@ -103,6 +103,16 @@ def test_normal_and_fault_demo_smoke_and_stable_event_snapshots(tmp_path):
         "write",
         "final",
     ]
+    for report in (normal, fault):
+        evidence = report["evidence_classes"]
+        assert "real_model_verified" not in evidence
+        assert "development/dirty provenance" in evidence[
+            "real_model_development_evidence"
+        ][0]
+        assert (
+            "real-model provenance for the current candidate commit"
+            in evidence["not_verified"]
+        )
 
     replay = r54_candidate_demo._run("normal", normal_dir)
     assert replay["event_snapshot"] == NORMAL_SNAPSHOT

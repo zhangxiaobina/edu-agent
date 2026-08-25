@@ -8,7 +8,7 @@ integration into real-provider evidence.
 
 | README claim | Source | Focused tests | Report field | Boundary |
 | --- | --- | --- | --- | --- |
-| Agent and Plan enforce ordered tool-backed completion | [`edu_agent/agent/graph.py`](../edu_agent/agent/graph.py), [`edu_agent/planning`](../edu_agent/planning) | [`tests/test_agent.py`](../tests/test_agent.py), [`tests/test_plan_runtime.py`](../tests/test_plan_runtime.py), [`tests/test_eval.py`](../tests/test_eval.py) | `sections.agent_plan` | Oracle is `harness_only`; model capability stays `evaluation.real_model.status=not_run` |
+| Agent and Plan enforce ordered tool-backed completion | [`edu_agent/agent/graph.py`](../edu_agent/agent/graph.py), [`edu_agent/planning`](../edu_agent/planning) | [`tests/test_agent.py`](../tests/test_agent.py), [`tests/test_plan_runtime.py`](../tests/test_plan_runtime.py), [`tests/test_eval.py`](../tests/test_eval.py) | `sections.agent_plan` | Oracle is `harness_only`; Stage 8 does not call a real model and keeps its own `evaluation.real_model.status=not_run` |
 | Provider routes, adapters, retry and fallback are explicit | [`edu_agent/engine/gateway.py`](../edu_agent/engine/gateway.py), [`edu_agent/engine/resilient.py`](../edu_agent/engine/resilient.py) | [`tests/test_provider_gateway.py`](../tests/test_provider_gateway.py), [`tests/test_provider_adapter_contract.py`](../tests/test_provider_adapter_contract.py), [`tests/test_provider_resilience.py`](../tests/test_provider_resilience.py), [`tests/test_r1_fake_provider_acceptance.py`](../tests/test_r1_fake_provider_acceptance.py) | `sections.provider_route_retry` | Fixtures/fault injection do not prove a live vendor route |
 | Stream and cancellation boundaries reject late work | [`edu_agent/engine/streaming.py`](../edu_agent/engine/streaming.py), [`edu_agent/runtime/cancellation.py`](../edu_agent/runtime/cancellation.py), [`edu_agent/api.py`](../edu_agent/api.py) | [`tests/test_provider_streaming.py`](../tests/test_provider_streaming.py), [`tests/test_cancellation.py`](../tests/test_cancellation.py), [`tests/test_api_sse_cancellation.py`](../tests/test_api_sse_cancellation.py) | `sections.stream_cancel` | Socket tests are local contract evidence, not public network capacity evidence |
 | Journal, finalizer, lease and crash recovery are durable | [`edu_agent/state/journal.py`](../edu_agent/state/journal.py), [`edu_agent/state/turn_finalizer.py`](../edu_agent/state/turn_finalizer.py), [`edu_agent/runtime/recovery.py`](../edu_agent/runtime/recovery.py) | [`tests/test_run_journal.py`](../tests/test_run_journal.py), [`tests/test_turn_finalizer.py`](../tests/test_turn_finalizer.py), [`tests/test_r2_recovery.py`](../tests/test_r2_recovery.py), [`tests/test_stage8_boundaries_recovery_trace.py`](../tests/test_stage8_boundaries_recovery_trace.py) | `sections.journal_recovery` | SQLite/shared-file recovery is not cross-host consensus |
@@ -33,8 +33,9 @@ not duplicated.
 - Docker/Jobe requires the pinned image, daemon, and backend health checks. A
   local machine without them records `not_verified`.
 - Real model evaluation requires a separately authorized R5.2 route, frozen
-  Test lineage, cost limit, and redacted raw evidence. R5.1 never sends a
-  request and keeps `evaluation.real_model` at `not_run`.
+  Test lineage, cost limit, redacted raw evidence, and clean candidate/release
+  provenance. The saved R5.2 run proves requests completed, but its
+  `development/dirty` provenance does not prove the current candidate commit.
 - A private teaching platform requires an independently implemented and
   authenticated provider contract. Synthetic SQLite and contract fakes only
   verify the boundary and transaction policy.

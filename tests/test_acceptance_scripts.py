@@ -265,7 +265,11 @@ def test_stage8_controlled_run_bootstraps_and_calls_stage7_once(tmp_path: Path):
     assert not (repo / "edu_agent" / "data" / "edu.db").exists()
     assert artifact_sentinel.read_text(encoding="utf-8") == "user artifact\n"
 
-    eval_entry = next(entry for entry in entries if "scripts/eval_system.py" in entry["args"])
+    eval_entry = next(
+        entry
+        for entry in entries
+        if entry["args"][3:5] == ["python", "scripts/eval_system.py"]
+    )
     assert "--sandbox-report" not in eval_entry["args"]
     final_audit = [
         entry
@@ -273,6 +277,42 @@ def test_stage8_controlled_run_bootstraps_and_calls_stage7_once(tmp_path: Path):
         if entry["args"][3:5] == ["python", "scripts/audit_data_boundaries.py"]
     ][-1]
     assert final_audit["args"][-1] == str(repo / "artifacts")
+
+
+def test_stage8_candidate_evidence_uses_ignored_artifact_directory(tmp_path: Path):
+    repo = _isolated_repo(tmp_path)
+    binary_dir, log_path = _fake_uv(tmp_path)
+    environment = _environment(
+        binary_dir,
+        log_path,
+        TMPDIR=str(tmp_path),
+        ACCEPTANCE_TEST_FAIL_MATCH="scripts/code_sandbox_demo.py",
+    )
+
+    result = _run(
+        repo,
+        "accept_stage8.sh",
+        environment,
+        "--evidence-mode",
+        "candidate",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    entries = _entries(log_path)
+    candidate_directory = str(repo / "ci-artifacts")
+    eval_entry = next(
+        entry
+        for entry in entries
+        if entry["args"][3:5] == ["python", "scripts/eval_system.py"]
+    )
+    assert eval_entry["args"][-1] == f"{candidate_directory}/system-eval.json"
+    final_audit = [
+        entry
+        for entry in entries
+        if entry["args"][3:5] == ["python", "scripts/audit_data_boundaries.py"]
+    ][-1]
+    assert final_audit["args"][-1] == candidate_directory
+    assert not (repo / "artifacts").exists()
 
 
 def test_stage8_propagates_a_stage7_failure(tmp_path: Path):

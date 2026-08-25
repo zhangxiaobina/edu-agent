@@ -1185,10 +1185,12 @@ def _run(scenario: str, work_dir: Path) -> dict[str, Any]:
                     "seed-314 SyntheticProvider teaching data",
                     "deterministic local model stream and explicit failure switch",
                 ],
-                "real_model_verified": [
-                    "separate fixed R5.2 DashScope evidence; not rerun by this demo"
+                "real_model_development_evidence": [
+                    "separate R5.2 DashScope run on commit d3d3ea7 with "
+                    "development/dirty provenance"
                 ],
                 "not_verified": [
+                    "real-model provenance for the current candidate commit",
                     "private teaching platform",
                     "live model endpoint in this demo",
                     "Docker/Jobe runtime on this machine",

@@ -40,10 +40,11 @@ Plan/Evidence、审批写、checkpoint、恢复和 root/child budget 投影为 o
 - child budget 的 `settled/outstanding` 由独立 `RunBudgetLedger` fixture 验证；本次主 run 没有 child，
   因此诚实输出 `not_exercised`。
 
-### 真实模型已验证
+### 真实模型运行已验证
 
 [R5.2 报告](../artifacts/r52-real-model-eval.json) 的范围固定为 DashScope `qwen-plus`、
-`chat_completions`、Test split 6 条、3 次重复。可说：
+`chat_completions`、Test split 6 条、3 次重复。它是旧提交上的 `development/dirty` evidence，可说明该次
+真实请求结果，不能说明当前候选提交已通过发布 provenance。可说：
 
 - trajectory success 三次均为 `1.0`，tool recall `1.0`；
 - tool precision mean 约 `0.8889`，F1 约 `0.9259`；
@@ -62,7 +63,8 @@ Plan/Evidence、审批写、checkpoint、恢复和 root/child budget 投影为 o
   SIGTERM smoke 仍为 `not_verified`。
 - SQLite lease/fencing 只覆盖共享同一文件的单机进程，不是跨主机、网络分区或多主共识。
 - 任意阻塞第三方 SDK 的强杀、自由文本完整 DLP、生产身份生命周期和 trace 冷存储尚未验证。
-- R5 总门禁在 R5.5 发布审计前仍是 `in_progress`，不能提前称为 release-ready。
+- R5.5 发布审计结论为 `blocked/not ready`：当前没有 clean candidate Stage 8 与同一 commit 的真实模型
+  candidate provenance，不能称为 release-ready。
 
 ## 六个高频追问
 

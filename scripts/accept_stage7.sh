@@ -34,6 +34,9 @@ done
 stage7_root=
 stage7_parent=
 if [[ $from_stage8 == 1 ]]; then
+  expected_artifact_directory=$(
+    acceptance_artifact_directory "$repo_root" "$acceptance_evidence_mode"
+  )
   if [[ ${EDU_AGENT_ACCEPTANCE_PREPARED:-0} != 1 ||
         -z ${EDU_AGENT_ACCEPTANCE_ROOT:-} ||
         ! -d ${EDU_AGENT_ACCEPTANCE_ROOT:-} ]]; then
@@ -47,7 +50,7 @@ if [[ $from_stage8 == 1 ]]; then
         ${TMPDIR:-} != "$stage7_root/runtime" ||
         ${UV_CACHE_DIR:-} != "$stage7_root/uv-cache" ||
         ${UV_PROJECT_ENVIRONMENT:-} != "$repo_root/.venv" ||
-        ${EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR:-} != "$repo_root/artifacts" ]]; then
+        ${EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR:-} != "$expected_artifact_directory" ]]; then
     acceptance_die "--from-stage8 received unsafe or inconsistent paths"
     exit 1
   fi

@@ -46,9 +46,11 @@ from edu_agent.eval import (
     tasks_for_split,
 )
 from edu_agent.eval.provenance import (
+    EVIDENCE_MODES,
+    build_provenance,
     credential_literals,
     file_hash,
-    build_provenance,
+    provenance_gate_passed,
     sanitize_artifact,
 )
 from edu_agent.eval.tasks_test import (
@@ -497,13 +499,68 @@ def _summarize_reports(reports: list[dict], observations: list[dict]) -> dict:
     }
 
 
+def _resolve_output_path(
+    requested: str | None,
+    *,
+    evidence_mode: str,
+) -> Path:
+    if requested is None:
+        directory = "ci-artifacts" if evidence_mode in {"candidate", "release"} else "artifacts"
+        return Path(directory) / "r52-real-model-eval.json"
+
+    output = Path(requested)
+    if evidence_mode not in {"candidate", "release"}:
+        return output
+    resolved = output.expanduser().resolve()
+    project_root = PROJECT_ROOT.resolve()
+    if project_root == resolved or project_root in resolved.parents:
+        relative = resolved.relative_to(project_root)
+        if not relative.parts or relative.parts[0] != "ci-artifacts":
+            raise R52PreflightError(
+                "candidate/release output inside the repository must use ci-artifacts"
+            )
+    return output
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="R5.2 fixed DashScope Test evaluation")
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--output", default="artifacts/r52-real-model-eval.json")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="development defaults to artifacts; candidate/release defaults to ci-artifacts",
+    )
+    parser.add_argument(
+        "--evidence-mode",
+        choices=EVIDENCE_MODES,
+        default="development",
+        help="require clean Git provenance for candidate or release evidence",
+    )
     args = parser.parse_args()
     if args.repeats < 3:
         parser.error("R5.2 requires at least 3 repeats")
+    try:
+        output = _resolve_output_path(
+            args.output,
+            evidence_mode=args.evidence_mode,
+        )
+    except R52PreflightError as error:
+        raise SystemExit(f"R5.2 preflight blocked: {error}") from error
+
+    preflight_provenance = build_provenance(
+        repo_root=PROJECT_ROOT,
+        config={"stage": "r52-live-preflight", "split": "test"},
+        seed=TEST_SEED,
+        model_name=ROUTE_MODEL,
+        model_mode="real_openai_compatible",
+        evidence_mode=args.evidence_mode,
+    )
+    if not provenance_gate_passed(preflight_provenance):
+        reasons = preflight_provenance["provenance_gate"]["reasons"]
+        raise SystemExit(
+            "R5.2 preflight blocked: Git provenance gate failed: "
+            + ",".join(reasons)
+        )
     if not os.environ.get(CREDENTIAL_ENV, "").strip():
         raise SystemExit("R5.2 preflight blocked: credential ref is absent")
 
@@ -539,7 +596,6 @@ def main() -> int:
         raise SystemExit(f"R5.2 preflight blocked: capability gaps {gaps}")
 
     guard = R52SpendGuard(max_cost_usd=MAX_COST_USD)
-    output = Path(args.output)
     raw_path = output.with_name(f"{output.stem}.raw.jsonl")
     failed_path = output.with_name(f"{output.stem}.failed-traces.jsonl")
     started = time.perf_counter()
@@ -637,6 +693,7 @@ def main() -> int:
         seed=TEST_SEED,
         model_name=ROUTE_MODEL,
         model_mode="real_openai_compatible",
+        evidence_mode=args.evidence_mode,
     )
     raw_path.write_text(
         "".join(json.dumps(sanitize_artifact(item, secrets=credential_literals()), ensure_ascii=False, sort_keys=True) + "\n" for item in raw_records),
@@ -738,7 +795,7 @@ def main() -> int:
     )
     print(f"脱敏 R5.2 结果已写入 {output}")
     print(json.dumps({"summary": summary, "budget": guard.snapshot()}, ensure_ascii=False, sort_keys=True))
-    return 0
+    return 0 if provenance_gate_passed(provenance) else 1
 
 
 if __name__ == "__main__":

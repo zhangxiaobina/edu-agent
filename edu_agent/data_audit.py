@@ -24,7 +24,7 @@ _BINARY_PATTERNS: dict[DataClass, tuple[re.Pattern[bytes], ...]] = {
     ),
     DataClass.STUDENT_PII: (
         re.compile(rb"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
-        re.compile(rb"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)"),
+        re.compile(rb"(?<![0-9A-Fa-f])(?:\+?86[- ]?)?1[3-9]\d{9}(?![0-9A-Fa-f])"),
     ),
     DataClass.PRIVATE_PATH: (
         re.compile(rb"(?<![A-Za-z0-9:])/(?:Users|home|private|tmp|var/folders)/[^\s\"'<>]*"),
