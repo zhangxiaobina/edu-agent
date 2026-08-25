@@ -24,6 +24,11 @@ from .argument_contract import (
 )
 
 
+# The publication/evaluation layer records this identity alongside the
+# canonical manifest hash.  It is metadata only and does not alter dispatch.
+TOOL_MANIFEST_SCHEMA_VERSION = "edu-agent.tool-manifest.v1"
+
+
 class ToolManifestError(ValueError):
     """Base error for malformed tool metadata or an invalid manifest."""
 

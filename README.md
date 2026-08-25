@@ -236,7 +236,9 @@ uv run --frozen python -m edu_agent.data.generate
 uv run --frozen python -m pytest tests/ -q
 ```
 
-完整门禁会自动执行同一准备步骤，无需先运行上面的命令。只检查调用图和将执行的命令时可运行
+完整门禁会自动执行同一准备步骤，无需先运行上面的命令。`zsh scripts/accept_stage8.sh` 是唯一公开的完整
+验收入口：它串联环境检查、ruff、R1-R4 回归/故障测试、API/Demo、10k Trace、离线评测、lineage 和脱敏数据
+边界审计，并在 `artifacts/system-eval.json` 与 `artifacts/evidence-checklist.json` 留下证据。只检查调用图和将执行的命令时可运行
 `zsh scripts/accept_stage8.sh --dry-run`；dry-run 不执行 Docker，也不会将其标为已验证。缺少 `uv`、
 Python 不兼容或 `uv.lock` 漂移时，准备脚本会在业务测试前停止并给出修复命令。
 

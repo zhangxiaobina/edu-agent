@@ -125,15 +125,44 @@ uv run --frozen --offline python scripts/eval_system.py \
   --output artifacts/system-eval.json
 ```
 
-综合报告使用 schema `edu-agent.system-eval.v4`，其 Agent 分栏只跑独立 Test oracle，并明确
+综合报告保留兼容字段 `schema_version=edu-agent.system-eval.v4`，并新增稳定发布契约
+`report_schema.version=edu-agent.system-eval.v5`。每个章节都必须有
+`passed`/`failed`/`not_run`/`not_verified` 状态、source、tests、metrics 和证据引用；缺失章节或
+缺少 `not_run`/`not_verified` 原因会使报告校验失败。章节固定为 Agent/Plan、Provider route/retry、
+stream/cancel、journal/recovery、ToolManifest/并发、context、budget、transaction、sandbox、
+performance、provenance 和 data boundary。Agent 分栏只跑独立 Test oracle，并明确
 `evidence_scope=harness_only`、`capability_claim=not_measured`。报告 config hash 绑定 lockfile、任务/lineage
 实现和完整 manifest hash；lineage、oracle harness、真实模型、RAG、可靠性、事务、Trace、委派、性能和
 Docker sandbox 均为独立状态。Docker 不可用记 `not_verified`，真实模型未运行记 `not_run`，两者都不混入
 离线失败。
 
+报告还记录 `commit`、`config_hash`、`seed`、`api_mode`、脱敏 model route、runtime/schema/tool-manifest
+版本、测试环境和 elapsed seconds。所有内容先经过中心 `sanitize_artifact()` 再写入；凭据、学生 PII 和
+私有绝对路径不进入 artifact。候选/发布模式要求真实 Git commit 且 clean、lineage gate 通过、每个离线必需
+章节为 `passed`，并拒绝任何必需章节为 `not_run`。Docker 是唯一允许 `not_verified` 的外部能力。
+
+R1-R4 证据映射见 [`docs/evidence-checklist.md`](evidence-checklist.md)。Stage 8 会运行
+`scripts/audit_acceptance_coverage.py`，审计公开入口的真实调用图，而不是只检查测试文件存在；它要求全量
+pytest 恰好一次、R2/Stage 7 边界各一次，以及 lineage、10k Trace、system eval 和数据审计步骤不被重复运行。
+
+候选版运行时使用干净、可追溯的 Git 工作区：
+
+```bash
+zsh scripts/accept_stage8.sh --evidence-mode candidate
+```
+
+该模式不会访问真实模型；它只把 provenance 和所有必需离线章节升级为发布门禁。
+
 system/Trace provenance 只从当前源码根的真实 Git 元数据读取，不接受 `GITHUB_SHA` 等环境变量代替。
 默认 development 模式如实记录 dirty；`--evidence-mode candidate|release` 会把缺失 commit、dirty 或 Git
 状态不可读作为失败。
+
+### 独立验证边界
+
+R5.1 不访问真实模型、不部署服务。Docker/Jobe 只有在具备固定镜像、daemon 和健康后端时才能把 sandbox 标为
+`passed`；否则保留 `not_verified`。真实模型必须在 R5.2 以独立 Test lineage、冻结 route、费用上限和脱敏原始
+证据单独验证，不能把 oracle/fake 结果升级为真实能力。私有教学平台需要独立的认证 provider、实体 scope 和
+事务/幂等验收；SyntheticProvider 与 contract fake 只证明边界，不代表平台接入。
 
 ## 6. 历史诊断入口
 

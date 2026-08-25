@@ -8,12 +8,24 @@ source scripts/acceptance_common.sh
 
 acceptance_dry_run=0
 from_stage8=0
-for argument in "$@"; do
+acceptance_evidence_mode=${EDU_AGENT_ACCEPTANCE_EVIDENCE_MODE:-development}
+while (( $# > 0 )); do
+  argument=$1
   case $argument in
-    --dry-run) acceptance_dry_run=1 ;;
-    --from-stage8) from_stage8=1 ;;
+    --dry-run) acceptance_dry_run=1; shift; continue ;;
+    --from-stage8) from_stage8=1; shift; continue ;;
+    --evidence-mode)
+      (( $# >= 2 )) || { acceptance_die "--evidence-mode requires development, candidate, or release"; exit 2; }
+      acceptance_evidence_mode=$2
+      [[ $acceptance_evidence_mode == development || $acceptance_evidence_mode == candidate || $acceptance_evidence_mode == release ]] || {
+        acceptance_die "unsupported evidence mode: $acceptance_evidence_mode"
+        exit 2
+      }
+      shift 2
+      continue
+      ;;
     *)
-      acceptance_die "usage: zsh scripts/accept_stage7.sh [--dry-run] [--from-stage8]"
+      acceptance_die "usage: zsh scripts/accept_stage7.sh [--dry-run] [--from-stage8] [--evidence-mode development|candidate|release]"
       exit 2
       ;;
   esac
@@ -37,6 +49,10 @@ if [[ $from_stage8 == 1 ]]; then
         ${UV_PROJECT_ENVIRONMENT:-} != "$repo_root/.venv" ||
         ${EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR:-} != "$repo_root/artifacts" ]]; then
     acceptance_die "--from-stage8 received unsafe or inconsistent paths"
+    exit 1
+  fi
+  if [[ ${EDU_AGENT_ACCEPTANCE_EVIDENCE_MODE:-development} != "$acceptance_evidence_mode" ]]; then
+    acceptance_die "--from-stage8 evidence mode does not match prepared environment"
     exit 1
   fi
 else
@@ -99,11 +115,19 @@ else
 fi
 
 system_eval_output="$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/system-eval.json"
+system_eval_args=()
+system_eval_args+=(--evidence-mode "$acceptance_evidence_mode")
+if [[ -n ${EDU_AGENT_ACCEPTANCE_TRACE_REPORT:-} ]]; then
+  system_eval_args+=(--trace-report "$EDU_AGENT_ACCEPTANCE_TRACE_REPORT")
+fi
+if [[ -n ${EDU_AGENT_ACCEPTANCE_CONTEXT_REPORT:-} ]]; then
+  system_eval_args+=(--context-report "$EDU_AGENT_ACCEPTANCE_CONTEXT_REPORT")
+fi
 acceptance_uv_run python scripts/trace_inspector.py \
   --state "$EDU_AGENT_PRODUCTION_DEMO_STATE" --actor teacher-demo \
   --tenant default --format summary --limit 20
 acceptance_uv_run python scripts/eval_system.py \
-  "${sandbox_args[@]}" --output "$system_eval_output"
+  "${sandbox_args[@]}" "${system_eval_args[@]}" --output "$system_eval_output"
 acceptance_uv_run python -c \
   'import json, sys; status=json.load(open(sys.argv[1], encoding="utf-8"))["sandbox"]["status"]; assert status == sys.argv[2], (status, sys.argv[2])' \
   "$system_eval_output" "$expected_sandbox_status"

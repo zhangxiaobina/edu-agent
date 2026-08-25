@@ -79,6 +79,10 @@ if ! acceptance_run uv sync --frozen --python "$required_python" --managed-pytho
     "dependency sync failed for Python $required_python; check interpreter compatibility and uv.lock"
   exit 1
 fi
+if ! acceptance_run uv pip check; then
+  acceptance_die "synchronized environment has dependency conflicts; repair uv.lock or the project environment and retry"
+  exit 1
+fi
 
 version_command=(uv run --frozen --offline python -c \
   'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')

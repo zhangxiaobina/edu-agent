@@ -31,6 +31,16 @@ from .lineage import (
     validate_lineage,
 )
 from .oracle import make_oracle_engine, oracle_policy_for
+from .report import (
+    COMPAT_SCHEMA_VERSION,
+    OFFLINE_REQUIRED_SECTIONS,
+    REPORT_SCHEMA_VERSION,
+    REPORT_SECTIONS,
+    REPORT_STATUS_VALUES,
+    report_gate_passed,
+    report_section,
+    validate_report,
+)
 from .tasks import CATEGORIES, EvalTask, ExpectedCall, SuccessSpec, build_tasks
 from .tasks_derived import build_derived_tasks
 from .tasks_test import build_test_tasks
@@ -47,4 +57,7 @@ __all__ = [
     "render_context_fidelity_summary",
     "validate_context_fidelity_corpus",
     "make_oracle_engine", "oracle_policy_for", "run_eval", "tasks_for_split", "validate_lineage",
+    "COMPAT_SCHEMA_VERSION", "OFFLINE_REQUIRED_SECTIONS", "REPORT_SCHEMA_VERSION",
+    "REPORT_SECTIONS", "REPORT_STATUS_VALUES", "report_gate_passed", "report_section",
+    "validate_report",
 ]

@@ -7,13 +7,25 @@ cd "$repo_root"
 source scripts/acceptance_common.sh
 
 acceptance_dry_run=0
-if (( $# > 1 )) || { (( $# == 1 )) && [[ $1 != --dry-run ]]; }; then
-  acceptance_die "usage: zsh scripts/accept_stage8.sh [--dry-run]"
-  exit 2
-fi
-if (( $# == 1 )); then
-  acceptance_dry_run=1
-fi
+acceptance_evidence_mode=development
+while (( $# > 0 )); do
+  case $1 in
+    --dry-run) acceptance_dry_run=1; shift ;;
+    --evidence-mode)
+      (( $# >= 2 )) || { acceptance_die "--evidence-mode requires development, candidate, or release"; exit 2; }
+      acceptance_evidence_mode=$2
+      [[ $acceptance_evidence_mode == development || $acceptance_evidence_mode == candidate || $acceptance_evidence_mode == release ]] || {
+        acceptance_die "unsupported evidence mode: $acceptance_evidence_mode"
+        exit 2
+      }
+      shift 2
+      ;;
+    *)
+      acceptance_die "usage: zsh scripts/accept_stage8.sh [--dry-run] [--evidence-mode development|candidate|release]"
+      exit 2
+      ;;
+  esac
+done
 
 stage8_parent=${TMPDIR:-/tmp}
 stage8_root=$(acceptance_make_temp_dir edu-agent-stage8)
@@ -36,6 +48,7 @@ prepare_args=()
 [[ $acceptance_dry_run == 1 ]] && prepare_args=(--dry-run)
 acceptance_run_internal zsh scripts/prepare_acceptance.sh "${prepare_args[@]}"
 export EDU_AGENT_ACCEPTANCE_PREPARED=1
+export EDU_AGENT_ACCEPTANCE_EVIDENCE_MODE=$acceptance_evidence_mode
 
 acceptance_uv_run python -c \
   'from pathlib import Path; from edu_agent.state import StateStore; StateStore(Path(__import__("sys").argv[1]))' \
@@ -65,6 +78,7 @@ acceptance_uv_run python scripts/audit_eval_lineage.py \
 acceptance_uv_run python scripts/eval_context_fidelity.py \
   --output "$stage8_root/context-fidelity.json" \
   --thresholds tests/fixtures/context_fidelity_thresholds.json
+export EDU_AGENT_ACCEPTANCE_CONTEXT_REPORT="$stage8_root/context-fidelity.json"
 
 acceptance_uv_run ruff check \
   edu_agent/api.py edu_agent/data_audit.py edu_agent/data_classification.py \
@@ -77,7 +91,9 @@ acceptance_uv_run ruff check \
   scripts/audit_data_boundaries.py scripts/audit_eval_lineage.py \
   scripts/benchmark_trace_scaling.py scripts/eval_context_fidelity.py \
   scripts/eval_system.py scripts/state_maintenance.py \
+  scripts/audit_acceptance_coverage.py \
   tests/test_acceptance_scripts.py tests/test_ci_provenance.py tests/test_eval_lineage.py \
+  tests/test_r51_acceptance.py \
   tests/test_lifecycle.py tests/test_production_runtime_demo.py \
   tests/test_r46_storage_maintenance.py \
   tests/test_stage8_boundaries_recovery_trace.py
@@ -92,7 +108,9 @@ acceptance_uv_run python -m pytest -p no:cacheprovider \
   tests/test_lifecycle.py tests/test_r46_storage_maintenance.py -q
 acceptance_uv_run python scripts/benchmark_trace_scaling.py \
   --events 10000 --page-size 100 \
+  --evidence-mode "$acceptance_evidence_mode" \
   --output "$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/trace-scaling.json"
+export EDU_AGENT_ACCEPTANCE_TRACE_REPORT="$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/trace-scaling.json"
 
 # R2 is an internal recovery boundary. The complete suite still runs once below.
 r2_args=(--from-stage8)
@@ -102,14 +120,23 @@ acceptance_run_internal zsh scripts/accept_r2.sh "${r2_args[@]}"
 # Highest-stage acceptance explicitly includes the preceding regression boundary.
 stage7_args=(--from-stage8)
 [[ $acceptance_dry_run == 1 ]] && stage7_args+=(--dry-run)
+stage7_args+=(--evidence-mode "$acceptance_evidence_mode")
 acceptance_run_internal zsh scripts/accept_stage7.sh "${stage7_args[@]}"
-
-acceptance_uv_run python scripts/audit_data_boundaries.py \
-  --fail-on-findings \
-  "$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR"
 
 # Run the complete suite exactly once. Stage-specific tests above provide early boundary failures.
 acceptance_uv_run python -m pytest -p no:cacheprovider tests -q
+
+acceptance_uv_run python scripts/audit_acceptance_coverage.py \
+  --quiet --output "$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/evidence-checklist.json"
+
+acceptance_uv_run python -c \
+  'import json, sys; report=json.load(open(sys.argv[1], encoding="utf-8")); assert report["status"] == "passed", report["errors"]' \
+  "$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/evidence-checklist.json"
+
+acceptance_uv_run python scripts/audit_data_boundaries.py \
+  --fail-on-findings \
+  --output "$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR/data-boundary-audit.json" \
+  "$EDU_AGENT_ACCEPTANCE_ARTIFACT_DIR"
 
 if [[ $acceptance_dry_run == 1 ]]; then
   print -r -- "stage8 acceptance dry-run complete; no gate result; temporary state cleaned on exit"

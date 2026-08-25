@@ -1233,3 +1233,14 @@ engine、RAG 与系统分栏入口彼此独立；当前没有真实模型运行�
   所以缺少它或 outbox 未发布时 GC 必须保留 cohort。同步第三方调用的进程强杀边界延续 R4.5 的 supervisor 要求。
 - gate: `R4 passed`；R0-R4 顶层 stage gate 均为 `passed`。
 - next: R5.1，仅收口候选版验收编排、版本化报告 schema 和证据清单；不访问真实模型、不部署服务、不新增 Runtime 功能。
+
+### R5.1 - 2026-08-25
+
+- commit/evidence: 会话从 R4 gate=passed 的 `acd302df451e8e7c30c5a483b417d21867c10f29` 开始；本次只修改验收编排、报告契约、证据文档和测试，未访问公网/真实模型、未部署服务、未新增 Runtime 行为。当前工作区仍为 development/dirty，生成的 artifact 不冒充 candidate/release 证据。
+- acceptance orchestration: `zsh scripts/accept_stage8.sh` 仍是唯一公开完整入口。它检查 Python/uv/lock/frozen sync/`uv pip check`，运行 ruff、lineage/context fidelity、备份恢复/GC、10k Trace、R2 内部 gate、Stage 7 API/Demo/故障边界、一次最终全量 pytest、覆盖审计和最终脱敏数据审计；Stage 7/R2 只在 Stage 8 调用一次，昂贵 lineage/Trace/system-eval 步骤不重复执行。`--dry-run` 保留调用图但不声称 gate，`--evidence-mode candidate|release` 传递到 Trace/system report 并要求真实 Git provenance。
+- coverage evidence: 新增 `scripts/audit_acceptance_coverage.py` 与 `artifacts/evidence-checklist.json`。覆盖审计要求 full suite 命令恰好一次、R2/Stage 7 边界各一次、lineage=1、10k Trace=1、system eval=1、数据审计=2，并将 R1 Provider、R2 stream/cancel/journal/recovery、R3 Manifest/provider/arguments/concurrency、R4 context/budget/lifecycle/storage 的专项测试映射到最高阶段调用图；不是只检查文件存在。人工/README 映射见 [`docs/evidence-checklist.md`](evidence-checklist.md)。
+- report schema: `scripts/eval_system.py` 保留兼容 `schema_version=edu-agent.system-eval.v4`，新增 `report_schema.version=edu-agent.system-eval.v5` 和固定 12 章节：Agent/Plan、Provider route/retry、stream/cancel、journal/recovery、ToolManifest/并发、context、budget、transaction、sandbox、performance、provenance、data boundary。每章必须显式 `passed|failed|not_run|not_verified`、source、tests、metrics、reason/evidence；候选/发布模式拒绝 unavailable/dirty commit、lineage 失败和必需离线项 `not_run`。报告记录 commit/config hash/seed/API mode/model route/runtime+tool-manifest schema/环境/耗时，并在落盘前集中脱敏。
+- verification: 报告/覆盖专项 `23 passed`；R1-R4 相关回归专项 `20 passed`、工具 Manifest/budget `35 passed`；首次受限沙箱最高阶段因禁止 `127.0.0.1:0` 绑定出现 `667 passed, 1 failed`，失败止于既有 socket bind；获准本机回环复跑 R2 组 `148 passed`，最终 `zsh scripts/accept_stage8.sh` 完整通过：R4 关键组 `104 passed`、R2 `148 passed`、最终全量 `668 passed`，10k Trace、lineage/context fidelity、覆盖审计和最终数据边界审计均通过，退出时临时状态清理。`artifacts/system-eval.json` 的 12 章节均为 `passed`，Docker/Jobe 为 `not_verified`，`evaluation.real_model.status=not_run`。
+- boundaries/not_verified: 本会话没有真实模型、Provider 网络、私有教学平台、Docker/Jobe 或 GitHub-hosted CI 证据。Docker 后端可用时才可独立将 sandbox 标为 `passed`；R5.2 必须以冻结 route、独立 Test lineage、费用上限和脱敏原始证据验证真实模型；SyntheticProvider/contract fake 不能升级为私有平台已接入。当前 development artifact 的 dirty provenance 不能用于候选发布。
+- gate: `R5.1 passed`；R5 总门禁保持 `in_progress`，R0-R4 顶层 stage gate 仍为 `passed`。
+- next: R5.2，读取本交接、`docs/eval.md`、`docs/evidence-checklist.md` 和真实模型 runner；先做 capability/network/费用/敏感数据/Test lineage preflight，只有明确授权和凭据才可发起固定 route 的真实模型评测，否则记录阻塞并保持 `real_model=not_run`。

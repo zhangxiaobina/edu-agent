@@ -4,7 +4,7 @@
     "complete": true,
     "no_page_times_full_projection": true
   },
-  "commit": "7822781077f7132db29a3ba6c5bfeeb7e0a469e9",
+  "commit": "acd302df451e8e7c30c5a483b417d21867c10f29",
   "config": {
     "event_count": 10000,
     "input_hashes": {
@@ -31,7 +31,7 @@
     "sqlite": "3.50.4"
   },
   "evidence_mode": "development",
-  "generated_at": "2026-08-24T14:59:50.277245+00:00",
+  "generated_at": "2026-08-25T02:52:23.793096+00:00",
   "git": {
     "available": true,
     "dirty": true
@@ -39,13 +39,13 @@
   "interpretation": "This deterministic local sample demonstrates keyset page reads bounded by page_size. It is not a long-term latency or production-capacity claim.",
   "metrics": {
     "digest": "3d8820b4646b700465464c2521f5db647f2c1215817fdee0aa240ac3517f891d",
-    "elapsed_seconds": 0.729452,
-    "events_per_second": 13710.291,
+    "elapsed_seconds": 0.715041,
+    "events_per_second": 13986.62,
     "exported_events": 10001,
     "indexed_events": 10000,
     "max_rows_loaded_per_page": 101,
     "pages": 101,
-    "peak_memory_bytes": 386234,
+    "peak_memory_bytes": 386402,
     "projected_events": 10001,
     "rows_loaded": 10101,
     "sql_queries": 203

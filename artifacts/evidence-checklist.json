@@ -1,0 +1,99 @@
+{
+  "errors": [],
+  "expensive_steps": {
+    "data_audit": 2,
+    "lineage": 1,
+    "system_eval": 1,
+    "trace_10k": 1
+  },
+  "full_suite": {
+    "command": "python -m pytest -p no:cacheprovider tests -q",
+    "count": 1,
+    "status": "passed"
+  },
+  "groups": {
+    "r1_provider": {
+      "claim": "Provider routes, adapters, retry and fallback are explicit",
+      "execution": "stage8_full_suite_plus_explicit_regression_boundary",
+      "missing_anchors": [],
+      "missing_tests": [],
+      "report_fields": [
+        "sections.provider_route_retry"
+      ],
+      "status": "passed",
+      "tests": [
+        "tests/test_provider_gateway.py",
+        "tests/test_provider_adapter_contract.py",
+        "tests/test_provider_resilience.py",
+        "tests/test_chat_completions_adapter.py",
+        "tests/test_responses_adapter.py",
+        "tests/test_provider_streaming.py",
+        "tests/test_r1_fake_provider_acceptance.py"
+      ]
+    },
+    "r2_stream_cancel_journal_recovery": {
+      "claim": "Stream, cancellation, journal and crash recovery reject unsafe late work",
+      "execution": "stage8_full_suite_plus_explicit_regression_boundary",
+      "missing_anchors": [],
+      "missing_tests": [],
+      "report_fields": [
+        "sections.stream_cancel",
+        "sections.journal_recovery"
+      ],
+      "status": "passed",
+      "tests": [
+        "tests/test_run_events.py",
+        "tests/test_run_journal.py",
+        "tests/test_turn_finalizer.py",
+        "tests/test_cancellation.py",
+        "tests/test_api_sse_cancellation.py",
+        "tests/test_r2_recovery.py"
+      ]
+    },
+    "r3_manifest_provider_arguments_concurrency": {
+      "claim": "ToolManifest, provider contracts, argument validation and safe concurrency are frozen",
+      "execution": "stage8_full_suite_plus_explicit_regression_boundary",
+      "missing_anchors": [],
+      "missing_tests": [],
+      "report_fields": [
+        "sections.tool_manifest_concurrency"
+      ],
+      "status": "passed",
+      "tests": [
+        "tests/test_tool_manifest.py",
+        "tests/test_r36_boundaries.py",
+        "tests/test_tool_arguments.py",
+        "tests/test_tool_batch.py",
+        "tests/test_teaching_provider_contract.py",
+        "tests/test_builtin_tool_contract_matrix.py",
+        "tests/test_mcp.py"
+      ]
+    },
+    "r4_context_budget_lifecycle_storage": {
+      "claim": "Context, budget, lifecycle and storage recovery are durable and bounded",
+      "execution": "stage8_full_suite_plus_explicit_regression_boundary",
+      "missing_anchors": [],
+      "missing_tests": [],
+      "report_fields": [
+        "sections.context",
+        "sections.budget",
+        "sections.journal_recovery"
+      ],
+      "status": "passed",
+      "tests": [
+        "tests/test_context_accounting.py",
+        "tests/test_context_checkpoint.py",
+        "tests/test_context_fidelity.py",
+        "tests/test_r43_context_policy.py",
+        "tests/test_r43_context_recovery.py",
+        "tests/test_run_budget_ledger.py",
+        "tests/test_lifecycle.py",
+        "tests/test_r46_storage_maintenance.py"
+      ]
+    }
+  },
+  "highest_stage": "stage8",
+  "public_entrypoint": "zsh scripts/accept_stage8.sh",
+  "schema_version": "edu-agent.acceptance-coverage.v1",
+  "status": "passed"
+}
