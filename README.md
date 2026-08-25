@@ -83,6 +83,11 @@ pytest、lineage 泄漏门禁、综合评测、10k Trace 和敏感数据审计�
   FTS5 长期记忆、上下文窗口、角色工具面、写操作审批、运行轨迹和审计；插件与 MCP 共用
   ToolProvider 契约，SQLite Scheduler 使用租约领取计划任务。详见
   [`docs/production-runtime.md`](docs/production-runtime.md)。
+- **API 容器与最小运行手册**：`deploy/api/Dockerfile` 使用锁定依赖构建多阶段、非 root、默认只读
+  rootfs 的 API 镜像；`deploy/docker-compose.yml` 只启动 API，状态/Artifact/备份边界显式挂载，Jobe 和
+  Docker code execution 默认关闭。迁移 preflight、health/readiness、SIGTERM drain、备份恢复、升级回滚和
+  容量/Provider 故障处置见 [`docs/production-deployment.md`](docs/production-deployment.md)。当前无 Docker
+  daemon 的环境只记录静态验证，容器 E2E 保持 `not_verified`。
 - **PlanGraph + Evidence Verifier**：只为真正复杂的多步教学任务生成严格 DAG；步骤按依赖推进，
   真实 `tool_event`、完整性校验通过的 Artifact 或 citation 才能完成步骤。模型提前回答会被确定性门禁拦截，
   重试或计划预算耗尽后返回 `blocked/budget_exceeded` 与缺失证据；轻量任务不增加 planner 调用。
@@ -153,9 +158,13 @@ edu-agent/
 ├── README.md
 ├── LICENSE                       Apache-2.0
 ├── pyproject.toml / uv.lock      依赖（langgraph / openai / pytest / ruff）
+├── deploy/
+│   ├── api/                      Dockerfile、entrypoint、无凭据容器配置样例
+│   └── docker-compose.yml        仅 API 的本机部署（Jobe 单独可选）
 ├── docs/
 │   ├── architecture.md           系统边界、状态机与故障恢复
 │   ├── production-runtime.md     当前可靠 Runtime 实现
+│   ├── production-deployment.md  API 容器、Compose 与最小生产运行手册
 │   ├── eval.md                   agentic 评测方法学
 │   ├── product-optimization-roadmap.md  Runtime、Provider、真实平台与受控演进路线
 │   └── optimization-implementation-prompts.md  R0-R5 分会话实施提示词
@@ -207,6 +216,8 @@ edu-agent/
 │   ├── runtime_recovery_demo.py  跨实例 lease、fencing、取消与恢复
 │   ├── r2_recovery_demo.py       稳定 cursor 决策、进程重开与脱敏 Trace
 │   ├── code_sandbox_demo.py      Docker/Jobe 真后端资源与逃逸验收
+│   ├── container_preflight.py    容器启动前迁移、完整性与可写性门禁
+│   ├── container_smoke.py        容器静态检查与可选 throw-away Docker smoke
 │   ├── eval_subset.py            子集快测（调参用）
 │   └── debug_trace.py            打印完整消息序列定位失败轨迹
 └── tests/                        工具 / Agent / Plan / Eval / MCP / Runtime / Scheduler

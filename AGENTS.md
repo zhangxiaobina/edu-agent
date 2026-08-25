@@ -35,3 +35,10 @@
   异常原文或业务数据。draining 期间 liveness 保持成功、readiness 必须失败。
 - 超时停机必须先持久化未完成 run 的恢复建议并保留 session lease/fencing 边界，不能靠无限 join、提前删除 lease
   或接受迟到 worker 回调完成停机。
+
+## API 容器部署
+
+- API 本机部署固定参考 `deploy/api/Dockerfile`、`deploy/docker-compose.yml` 和
+  `docs/production-deployment.md`；镜像多阶段、非 root、依赖必须来自 `uv.lock`，状态/Artifact/备份只能通过明确挂载持久化。
+- Compose 默认只启动 API；Jobe/Docker code execution 不随 API 启动，API 容器不得挂载 Docker socket。无 Docker daemon 时，
+  `scripts/container_smoke.py` 必须保留静态 `verified` 与运行项 `not_verified` 的区分，不得把静态检查写成部署验收。

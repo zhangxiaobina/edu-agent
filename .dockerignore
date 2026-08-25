@@ -1,0 +1,40 @@
+# Source-control and local configuration boundaries.
+.git
+.git/**
+.env
+.env.*
+*.key
+*.pem
+secrets/
+**/secrets/
+
+# Persistent/private state and generated evidence.
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+edu_agent/data/*.db
+artifacts/
+dpo_dumps/
+ci-artifacts/
+eval/results/
+
+# Development-only inputs and caches.
+.venv/
+venv/
+.uv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.DS_Store
+tests/
+.github/
+
+# Editor/build output.
+.idea/
+.vscode/
+build/
+dist/

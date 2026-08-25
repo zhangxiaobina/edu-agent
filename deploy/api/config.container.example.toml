@@ -1,0 +1,68 @@
+# Copy this file to an operator-owned path and mount it read-only at
+# /etc/edu-agent/config.toml. Do not put provider credentials in TOML.
+
+[model]
+provider = "openai"
+api_mode = "chat_completions"
+vendor = "openai-compatible"
+deployment = "operator-managed"
+model = "qwen-plus"
+endpoint = "https://provider.example.invalid/v1"
+context_window_tokens = 131072
+max_output_tokens = 8192
+credential_env = "EDU_AGENT_API_KEY"
+timeout_seconds = 1800
+temperature = 0.0
+max_retries = 2
+
+[runtime]
+max_model_calls = 12
+max_tool_calls = 24
+max_input_tokens = 96000
+max_output_tokens = 24000
+max_total_tokens = 120000
+max_wall_time_seconds = 1800
+tool_batch_max_workers = 4
+tool_call_timeout_seconds = 120
+context_token_budget = 12000
+output_token_reserve = 2048
+recent_message_limit = 80
+compression_enabled = true
+session_lease_seconds = 30
+session_heartbeat_seconds = 10
+run_stall_seconds = 90
+
+[security]
+require_write_approval = true
+allow_local_code_execution = false
+default_role = "teacher"
+
+[code_execution]
+# Jobe and Docker execution remain opt-in and are intentionally absent from
+# the default compose service.
+enabled = false
+provider = "disabled"
+
+[storage]
+state_path = "/var/lib/edu-agent/state/state.db"
+artifact_path = "/var/lib/edu-agent/artifacts"
+
+[scheduler]
+enabled = false
+
+[lifecycle]
+shutdown_deadline_seconds = 30
+cancellation_grace_seconds = 5
+final_flush_seconds = 2
+poll_interval_seconds = 0.05
+
+[observability]
+otel_enabled = false
+trace_page_size = 100
+export_preview_chars = 512
+
+[api]
+request_lease_seconds = 330
+request_retention_seconds = 604800
+failed_request_retention_seconds = 86400
+request_gc_batch_size = 200
